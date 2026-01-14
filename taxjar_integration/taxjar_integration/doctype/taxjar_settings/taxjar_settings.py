@@ -21,10 +21,10 @@ class TaxJarSettings(Document):
 
 		fields_already_exist = frappe.db.exists(
 			"Custom Field",
-			{"dt": ("in", ["Item", "Sales Invoice Item"]), "fieldname": "product_tax_category"},
+			filters={"dt": ("in", ["Item", "Sales Invoice Item"]), "fieldname": "product_tax_category"},
 		)
 		fields_hidden = frappe.get_value(
-			"Custom Field", {"dt": ("in", ["Sales Invoice Item"])}, "hidden"
+			"Custom Field", filters={"dt": ("in", ["Sales Invoice Item"])}, fieldname="hidden"
 		)
 
 		if TAXJAR_CREATE_TRANSACTIONS or TAXJAR_CALCULATE_TAX or TAXJAR_SANDBOX_MODE:
@@ -66,12 +66,12 @@ class TaxJarSettings(Document):
 def toggle_tax_category_fields(hidden):
 	frappe.set_value(
 		"Custom Field",
-		{"dt": "Sales Invoice Item", "fieldname": "product_tax_category"},
-		"hidden",
-		hidden,
+		filters={"dt": "Sales Invoice Item", "fieldname": "product_tax_category"},
+		fieldname="hidden",
+		value=hidden,
 	)
 	frappe.set_value(
-		"Custom Field", {"dt": "Item", "fieldname": "product_tax_category"}, "hidden", hidden
+		"Custom Field", filters={"dt": "Item", "fieldname": "product_tax_category"}, fieldname="hidden", value=hidden
 	)
 
 
@@ -83,7 +83,7 @@ def add_product_tax_categories():
 
 def create_tax_categories(data):
 	for d in data:
-		if not frappe.db.exists("Product Tax Category", {"product_tax_code": d.get("product_tax_code")}):
+		if not frappe.db.exists("Product Tax Category", filters={"product_tax_code": d.get("product_tax_code")}):
 			tax_category = frappe.new_doc("Product Tax Category")
 			tax_category.description = d.get("description")
 			tax_category.product_tax_code = d.get("product_tax_code")

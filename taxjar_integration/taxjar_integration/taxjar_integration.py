@@ -176,12 +176,12 @@ def get_tax_data(doc):
 
 	from_address = get_company_address_details(doc)
 	from_shipping_state = from_address.get("state")
-	from_country_code = frappe.db.get_value("Country", from_address.country, "code")
+	from_country_code = frappe.db.get_value("Country", from_address.country, "code", cache=True)
 	from_country_code = from_country_code.upper()
 
 	to_address = get_shipping_address_details(doc)
 	to_shipping_state = to_address.get("state")
-	to_country_code = frappe.db.get_value("Country", to_address.country, "code")
+	to_country_code = frappe.db.get_value("Country", to_address.country, "code", cache=True)
 	to_country_code = to_country_code.upper()
 
 	shipping = sum([tax.tax_amount for tax in doc.taxes if tax.account_head == SHIP_ACCOUNT_HEAD])
@@ -297,7 +297,7 @@ def set_sales_tax(doc, method):
 
 def check_for_nexus(doc, tax_dict):
 	TAX_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "tax_account_head")
-	if not frappe.db.get_value("TaxJar Nexus", {"region_code": tax_dict["to_state"]}):
+	if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": tax_dict["to_state"]}):
 		for item in doc.get("items"):
 			item.tax_collectable = flt(0)
 			item.taxable_amount = flt(0)
@@ -316,7 +316,7 @@ def check_sales_tax_exemption(doc):
 		hasattr(doc, "exempt_from_sales_tax")
 		and doc.exempt_from_sales_tax
 		or frappe.db.has_column("Customer", "exempt_from_sales_tax")
-		and frappe.db.get_value("Customer", doc.customer, "exempt_from_sales_tax")
+		and frappe.db.get_value("Customer", doc.customer, "exempt_from_sales_tax", cache=True)
 	)
 
 	if sales_tax_exempted:
@@ -374,7 +374,7 @@ def get_shipping_address_details(doc):
 def get_iso_3166_2_state_code(address):
 	import pycountry
 
-	country_code = frappe.db.get_value("Country", address.get("country"), "code")
+	country_code = frappe.db.get_value("Country", address.get("country"), "code", cache=True)
 
 	error_message = _(
 		"""{0} is not a valid state! Check for typos or enter the ISO code for your state."""
