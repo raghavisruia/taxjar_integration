@@ -32,10 +32,11 @@ class TaxJarSettings(Document):
 				add_product_tax_categories()
 				make_custom_fields()
 				add_permissions()
-				frappe.enqueue("erpnext.regional.united_states.setup.add_product_tax_categories", now=False)
-
-			elif fields_already_exist and fields_hidden:
-				toggle_tax_category_fields(hidden="0")
+			frappe.enqueue(
+				"erpnext.regional.united_states.setup.add_product_tax_categories",
+				queue="default",
+				now=False
+			)
 
 		elif fields_already_exist:
 			toggle_tax_category_fields(hidden="1")
@@ -48,7 +49,7 @@ class TaxJarSettings(Document):
 		client = get_client()
 		nexus = client.nexus_regions()
 
-		new_nexus_list = [frappe._dict(address) for address in nexus]
+		new_nexus_list = [dict(address) for address in nexus]
 
 		self.set("nexus", [])
 		self.set("nexus", new_nexus_list)

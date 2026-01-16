@@ -4,6 +4,7 @@ import frappe
 import taxjar
 from frappe import _
 from frappe.contacts.doctype.address.address import get_company_address
+from frappe.exceptions import ValidationError
 from frappe.utils import cint, flt
 
 from erpnext import get_default_company, get_region
@@ -151,7 +152,7 @@ def create_transaction(doc, method):
 	except taxjar.exceptions.TaxJarResponseError as err:
 		frappe.throw(_(sanitize_error_response(err)))
 	except Exception as ex:
-		print(traceback.format_exc(ex))
+		frappe.log_error(title="TaxJar Transaction Error", message=traceback.format_exc())
 
 
 def delete_transaction(doc, method):
@@ -217,9 +218,9 @@ def get_state_code(address, location):
 	if address is not None:
 		state_code = get_iso_3166_2_state_code(address)
 		if state_code not in SUPPORTED_STATE_CODES:
-			frappe.throw(_("Please enter a valid State in the {0} Address").format(location))
+			raise ValidationError(_("Please enter a valid State in the {0} Address").format(location))
 	else:
-		frappe.throw(_("Please enter a valid State in the {0} Address").format(location))
+		raise ValidationError(_("Please enter a valid State in the {0} Address").format(location))
 
 	return state_code
 
@@ -352,7 +353,7 @@ def get_company_address_details(doc):
 	company_address = get_company_address(get_default_company()).company_address
 
 	if not company_address:
-		frappe.throw(_("Please set a default company address"))
+		raise ValidationError(_("Please set a default company address"))
 
 	company_address = frappe.get_doc("Address", company_address)
 	return company_address
@@ -392,12 +393,12 @@ def get_iso_3166_2_state_code(address):
 		if address_state in states:
 			return state
 
-		frappe.throw(_(error_message))
+		raise ValidationError(_(error_message))
 	else:
 		try:
 			lookup_state = pycountry.subdivisions.lookup(state)
 		except LookupError:
-			frappe.throw(_(error_message))
+			raise ValidationError(_(error_message))
 		else:
 			return lookup_state.code.split("-")[1]
 

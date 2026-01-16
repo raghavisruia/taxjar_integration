@@ -8,7 +8,7 @@ app_email = "hello@frappe.io"
 app_license = "MIT"
 
 # Required Apps
-required_apps = ["frappe/erpnext>=15.0.0"]
+required_apps = ["frappe/erpnext>=16.0.0"]
 
 # Includes in <head>
 # ------------------

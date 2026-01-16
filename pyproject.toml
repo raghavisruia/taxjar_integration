@@ -10,12 +10,12 @@ authors = [
 dynamic = ["version"]
 description = "Taxjar Integration with ERPNext"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 
 dependencies = [
     "frappe",
-    "erpnext>=15.0.0",
+    "erpnext>=16.0.0",
     "taxjar~=1.9.2",
 ]
 
