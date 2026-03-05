@@ -14,7 +14,7 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 
 dependencies = [
-    "frappe",
+    "frappe>=15.0.0",
     "erpnext>=15.0.0",
     "taxjar~=1.9.2",
 ]
@@ -23,7 +23,7 @@ dependencies = [
 Homepage = "https://github.com/frappe/taxjar_integration"
 
 [tool.bench.dev-dependencies]
-# Development dependencies can be specified here
+frappe = ">=15.0.0"
 
 [tool.isort]
 profile = "black"
