@@ -13,17 +13,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 
-dependencies = [
-    "frappe>=15.0.0",
-    "erpnext>=15.0.0",
-    "taxjar~=1.9.2",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/frappe/taxjar_integration"
 
 [tool.bench.dev-dependencies]
 frappe = ">=15.0.0"
+erpnext = ">=15.0.0"
+taxjar = "~=1.9.2"
 
 [tool.isort]
 profile = "black"
