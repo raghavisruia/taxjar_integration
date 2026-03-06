@@ -19,12 +19,26 @@ class TaxJarSettings(Document):
 		TAXJAR_CALCULATE_TAX = self.taxjar_calculate_tax
 		TAXJAR_SANDBOX_MODE = self.is_sandbox
 
+		# fields_already_exist = frappe.db.exists(
+		# 	"Custom Field",
+		# 	filters={"dt": ("in", ["Item", "Sales Invoice Item"]), "fieldname": "product_tax_category"},
+		# )
+		# fields_hidden = frappe.get_value(
+		# 	"Custom Field", filters={"dt": ("in", ["Sales Invoice Item"])}, fieldname="hidden"
+		# )
+
 		fields_already_exist = frappe.db.exists(
 			"Custom Field",
-			filters={"dt": ("in", ["Item", "Sales Invoice Item"]), "fieldname": "product_tax_category"},
+			{
+				"dt": ["in", ["Item", "Sales Invoice Item"]],
+				"fieldname": "product_tax_category",
+			},
 		)
-		fields_hidden = frappe.get_value(
-			"Custom Field", filters={"dt": ("in", ["Sales Invoice Item"])}, fieldname="hidden"
+
+		fields_hidden = frappe.db.get_value(
+			"Custom Field",
+			{"dt": ["in", ["Sales Invoice Item"]]},
+			"hidden"
 		)
 
 		if TAXJAR_CREATE_TRANSACTIONS or TAXJAR_CALCULATE_TAX or TAXJAR_SANDBOX_MODE:
