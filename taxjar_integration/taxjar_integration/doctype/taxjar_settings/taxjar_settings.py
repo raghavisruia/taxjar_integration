@@ -97,7 +97,7 @@ def add_product_tax_categories():
 
 def create_tax_categories(data):
 	for d in data:
-		if not frappe.db.exists("Product Tax Category", filters={"product_tax_code": d.get("product_tax_code")}):
+		if not frappe.db.exists("Product Tax Category", {"product_tax_code": d.get("product_tax_code")}):
 			tax_category = frappe.new_doc("Product Tax Category")
 			tax_category.description = d.get("description")
 			tax_category.product_tax_code = d.get("product_tax_code")
