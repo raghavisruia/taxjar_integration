@@ -38,6 +38,7 @@ Open TaxJar Settings and configure:
 - Tax Account Head
 - Shipping Account Head
 - Create TaxJar Transaction (optional)
+- Enable TaxJar Logging (optional, enabled by default)
 
 Notes:
 
@@ -54,6 +55,11 @@ Notes:
 ## TaxJar API Log (UI)
 
 Use TaxJar API Log in Desk to inspect calls and outcomes.
+
+Logging behavior:
+
+- When Enable TaxJar Logging is checked, TaxJar requests/responses/skips/errors are written to TaxJar API Log and file logs.
+- When Enable TaxJar Logging is unchecked, tax logic still runs, but no new TaxJar log entries are written.
 
 Each row captures:
 
@@ -72,42 +78,6 @@ Typical skipped reasons include:
 - TaxJar client credentials not configured
 - no matching sales tax amount for transaction creation
 
-## Demo Script: Create a TaxJar-Friendly Sales Invoice
-
-This repository includes a helper script that creates/submits a Sales Invoice intended to trigger TaxJar tax application in v16.
-
-Module path:
-
-- taxjar_integration.taxjar_integration.demo_invoice.create_taxjar_demo_sales_invoice
-
-Run:
-
-```bash
-bench --site <site-name> execute taxjar_integration.taxjar_integration.demo_invoice.create_taxjar_demo_sales_invoice
-```
-
-Optional kwargs:
-
-```bash
-bench --site <site-name> execute taxjar_integration.taxjar_integration.demo_invoice.create_taxjar_demo_sales_invoice --kwargs "{'company':'Your Company','submit':1,'rate':800}"
-```
-
-The function returns a JSON summary with:
-
-- created invoice id
-- tax rows
-- precondition changes it applied
-- recent TaxJar logs for that invoice
-
-## Verification Checklist
-
-After creating a test invoice:
-
-- Confirm taxes_and_charges is empty or not forcing a static template.
-- Confirm invoice tax row is Actual and aligns with Tax Account Head.
-- Confirm item has product_tax_category.
-- Confirm TaxJar API Log shows request/success (or skipped/error with reason).
-
 ## Troubleshooting
 
 If tax looks template-driven instead of TaxJar-driven:
@@ -124,12 +94,6 @@ If code changes are not reflected:
 bench --site <site-name> migrate
 bench restart
 ```
-
-## Security and Open Source Notes
-
-- Do not commit live API keys, sandbox keys, or customer-sensitive payloads.
-- Use sandbox credentials for demos and CI/testing.
-- When sharing logs/issues publicly, redact secrets and personal data.
 
 ## Contributing
 
