@@ -1,3 +1,4 @@
+import json
 import traceback
 
 import frappe
@@ -96,6 +97,80 @@ SUPPORTED_STATE_CODES = [
 ]
 
 
+def _get_taxjar_logger():
+	return frappe.logger("taxjar_integration", allow_site=True, file_count=20)
+
+
+def _safe_json(data):
+	try:
+		return json.loads(json.dumps(data, default=str))
+	except Exception:
+		return str(data)
+
+
+def _taxjar_response_payload(response):
+	if response is None:
+		return None
+
+	for attr in ("full_response", "__dict__"):
+		value = getattr(response, attr, None)
+		if value:
+			return _safe_json(value)
+
+	return _safe_json(response)
+
+
+def _write_taxjar_ui_log(log_data):
+	if not frappe.db.exists("DocType", "TaxJar API Log"):
+		return
+
+	reference_doctype = (log_data.get("context") or {}).get("doctype")
+	reference_name = (log_data.get("context") or {}).get("name")
+
+	frappe.get_doc(
+		{
+			"doctype": "TaxJar API Log",
+			"action": log_data.get("action"),
+			"status": log_data.get("status"),
+			"reference_doctype": reference_doctype,
+			"reference_name": reference_name,
+			"payload": json.dumps(log_data.get("payload"), default=str)
+			if log_data.get("payload") is not None
+			else None,
+			"response": json.dumps(log_data.get("response"), default=str)
+			if log_data.get("response") is not None
+			else None,
+			"error": json.dumps(log_data.get("error"), default=str)
+			if log_data.get("error") is not None
+			else None,
+		}
+	).insert(ignore_permissions=True)
+
+
+def log_taxjar_call(action, status, payload=None, response=None, error=None, context=None):
+	log_data = {
+		"action": action,
+		"status": status,
+		"context": context or {},
+		"payload": _safe_json(payload) if payload is not None else None,
+		"response": _taxjar_response_payload(response),
+		"error": _safe_json(error) if error is not None else None,
+	}
+
+	logger = _get_taxjar_logger()
+	message = json.dumps(log_data, default=str)
+	if status == "error":
+		logger.error(message)
+	else:
+		logger.info(message)
+
+	try:
+		_write_taxjar_ui_log(log_data)
+	except Exception:
+		logger.error("Failed to write TaxJar API Log DocType entry")
+		logger.error(traceback.format_exc())
+
+
 def get_client():
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 
@@ -120,22 +195,46 @@ def create_transaction(doc, method):
 	"""Create an order transaction in TaxJar"""
 
 	if not TAXJAR_CREATE_TRANSACTIONS:
+		log_taxjar_call(
+			action="create_transaction",
+			status="skipped",
+			error="taxjar_create_transactions is disabled",
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
 		return
 
 	client = get_client()
 
 	if not client:
+		log_taxjar_call(
+			action="create_transaction",
+			status="skipped",
+			error="TaxJar client is not configured",
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
 		return
 
 	TAX_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "tax_account_head")
 	sales_tax = sum([tax.tax_amount for tax in doc.taxes if tax.account_head == TAX_ACCOUNT_HEAD])
 
 	if not sales_tax:
+		log_taxjar_call(
+			action="create_transaction",
+			status="skipped",
+			error="No sales tax amount found on document",
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
 		return
 
 	tax_dict = get_tax_data(doc)
 
 	if not tax_dict:
+		log_taxjar_call(
+			action="create_transaction",
+			status="skipped",
+			error="No TaxJar payload generated",
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
 		return
 
 	tax_dict["transaction_id"] = doc.name
@@ -145,12 +244,52 @@ def create_transaction(doc, method):
 
 	try:
 		if doc.is_return:
-			client.create_refund(tax_dict)
+			log_taxjar_call(
+				action="create_refund",
+				status="request",
+				payload=tax_dict,
+				context={"doctype": doc.doctype, "name": doc.name},
+			)
+			response = client.create_refund(tax_dict)
+			log_taxjar_call(
+				action="create_refund",
+				status="success",
+				payload=tax_dict,
+				response=response,
+				context={"doctype": doc.doctype, "name": doc.name},
+			)
 		else:
-			client.create_order(tax_dict)
+			log_taxjar_call(
+				action="create_order",
+				status="request",
+				payload=tax_dict,
+				context={"doctype": doc.doctype, "name": doc.name},
+			)
+			response = client.create_order(tax_dict)
+			log_taxjar_call(
+				action="create_order",
+				status="success",
+				payload=tax_dict,
+				response=response,
+				context={"doctype": doc.doctype, "name": doc.name},
+			)
 	except taxjar.exceptions.TaxJarResponseError as err:
+		log_taxjar_call(
+			action="create_transaction",
+			status="error",
+			payload=tax_dict,
+			error=getattr(err, "full_response", str(err)),
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
 		frappe.throw(_(sanitize_error_response(err)))
 	except Exception as ex:
+		log_taxjar_call(
+			action="create_transaction",
+			status="error",
+			payload=tax_dict,
+			error=traceback.format_exc(),
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
 		print(traceback.format_exc(ex))
 
 
@@ -168,7 +307,39 @@ def delete_transaction(doc, method):
 	if not client:
 		return
 
-	client.delete_order(doc.name)
+	try:
+		log_taxjar_call(
+			action="delete_order",
+			status="request",
+			payload={"transaction_id": doc.name},
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
+		response = client.delete_order(doc.name)
+		log_taxjar_call(
+			action="delete_order",
+			status="success",
+			payload={"transaction_id": doc.name},
+			response=response,
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
+	except taxjar.exceptions.TaxJarResponseError as err:
+		log_taxjar_call(
+			action="delete_order",
+			status="error",
+			payload={"transaction_id": doc.name},
+			error=getattr(err, "full_response", str(err)),
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
+		raise
+	except Exception:
+		log_taxjar_call(
+			action="delete_order",
+			status="error",
+			payload={"transaction_id": doc.name},
+			error=traceback.format_exc(),
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
+		raise
 
 
 def get_tax_data(doc):
@@ -243,20 +414,50 @@ def set_sales_tax(doc, method):
 	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
 
 	if not TAXJAR_CALCULATE_TAX:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="skipped",
+			error="taxjar_calculate_tax is disabled",
+			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+		)
 		return
 
 	if get_region(doc.company) != "United States":
+		log_taxjar_call(
+			action="tax_for_order",
+			status="skipped",
+			error="Company region is not United States",
+			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+		)
 		return
 
 	if not doc.items:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="skipped",
+			error="Document has no items",
+			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+		)
 		return
 
 	if check_sales_tax_exemption(doc):
+		log_taxjar_call(
+			action="tax_for_order",
+			status="skipped",
+			error="Document or customer is exempt from sales tax",
+			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+		)
 		return
 
 	tax_dict = get_tax_data(doc)
 
 	if not tax_dict:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="skipped",
+			error="No TaxJar payload generated from addresses/items",
+			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+		)
 		# Remove existing tax rows if address is changed from a taxable state/country
 		setattr(doc, "taxes", [tax for tax in doc.taxes if tax.account_head != TAX_ACCOUNT_HEAD])
 		return
@@ -336,13 +537,30 @@ def validate_tax_request(tax_dict):
 	client = get_client()
 
 	if not client:
+		log_taxjar_call(action="tax_for_order", status="skipped", error="TaxJar client is not configured")
 		return
 
 	try:
+		log_taxjar_call(action="tax_for_order", status="request", payload=tax_dict)
 		tax_data = client.tax_for_order(tax_dict)
 	except taxjar.exceptions.TaxJarResponseError as err:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="error",
+			payload=tax_dict,
+			error=getattr(err, "full_response", str(err)),
+		)
 		frappe.throw(_(sanitize_error_response(err)))
+	except Exception:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="error",
+			payload=tax_dict,
+			error=traceback.format_exc(),
+		)
+		raise
 	else:
+		log_taxjar_call(action="tax_for_order", status="success", payload=tax_dict, response=tax_data)
 		return tax_data
 
 
