@@ -4,6 +4,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
@@ -11,6 +12,10 @@ from frappe.model.document import Document
 from frappe.permissions import add_permission, update_permission_property
 
 from taxjar_integration.taxjar_integration.taxjar_integration import get_client
+
+
+BASE_DIR = Path(__file__).resolve().parent
+PRODUCT_TAX_CATEGORY_DATA_FILE = (BASE_DIR / "product_tax_category_data.json").resolve()
 
 
 class TaxJarSettings(Document):
@@ -90,8 +95,11 @@ def toggle_tax_category_fields(hidden):
 
 
 def add_product_tax_categories():
-	with open(os.path.join(os.path.dirname(__file__), "product_tax_category_data.json"), "r") as f:
-		tax_categories = json.loads(f.read())
+	if PRODUCT_TAX_CATEGORY_DATA_FILE.parent != BASE_DIR or not PRODUCT_TAX_CATEGORY_DATA_FILE.is_file():
+		frappe.throw(frappe._("Product tax category fixture file is missing or invalid"))
+
+	# nosemgrep: frappe-security-file-traversal - fixed local fixture path with validation.
+	tax_categories = json.loads(PRODUCT_TAX_CATEGORY_DATA_FILE.read_text(encoding="utf-8"))
 	create_tax_categories(tax_categories["categories"])
 
 

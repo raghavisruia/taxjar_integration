@@ -1,7 +1,15 @@
+from pathlib import Path
+
 from setuptools import setup, find_packages
 
-with open("requirements.txt") as f:
-	install_requires = f.read().strip().split("\n")
+BASE_DIR = Path(__file__).resolve().parent
+REQUIREMENTS_FILE = (BASE_DIR / "requirements.txt").resolve()
+
+if REQUIREMENTS_FILE.parent != BASE_DIR or not REQUIREMENTS_FILE.is_file():
+	raise RuntimeError("Unable to safely resolve requirements.txt")
+
+# nosemgrep: frappe-security-file-traversal - trusted local package metadata file.
+install_requires = REQUIREMENTS_FILE.read_text(encoding="utf-8").strip().split("\n")
 
 # get version from __version__ variable in taxjar_integration/__init__.py
 from taxjar_integration import __version__ as version
