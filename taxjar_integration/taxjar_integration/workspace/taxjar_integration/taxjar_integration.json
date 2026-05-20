@@ -75,5 +75,15 @@
  "modified_by": "Administrator",
  "module": "Taxjar Integration",
  "name": "TaxJar",
- "owner": "Administrator"
+ "number_cards": [],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [],
+ "sequence_id": 18.0,
+ "shortcuts": [],
+ "title": "TaxJar",
+ "type": "Workspace"
 }

@@ -2,10 +2,23 @@ from . import __version__ as app_version
 
 app_name = "taxjar_integration"
 app_title = "Taxjar Integration"
+app_icon = "octicon octicon-globe"
+app_color = "#0b6e99"
 app_publisher = " Frappe Technologies Pvt. Ltd."
 app_description = "Taxjar Integration with ERPNext"
 app_email = "hello@frappe.io"
 app_license = "MIT"
+app_logo_url = "/assets/taxjar_integration/images/taxjar-integration.svg"
+app_home = "/app/taxjar"
+
+add_to_apps_screen = [
+	{
+		"name": app_name,
+		"logo": app_logo_url,
+		"title": "TaxJar",
+		"route": app_home,
+	}
+]
 
 # Required Apps
 required_apps = ["erpnext"]
@@ -68,6 +81,7 @@ required_apps = ["erpnext"]
 
 # before_install = "taxjar_integration.install.before_install"
 # after_install = "taxjar_integration.install.after_install"
+after_migrate = ["taxjar_integration.setup.sync_desk_metadata"]
 
 # Uninstallation
 # ------------
