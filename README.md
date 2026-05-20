@@ -27,6 +27,12 @@ bench --site <site-name> install-app taxjar_integration
 bench --site <site-name> migrate
 ```
 
+## Dependency Management
+
+- Runtime dependencies are defined in [project.dependencies] in pyproject.toml.
+- setup.py is retained for compatibility with older install flows.
+- requirements.txt is a compatibility stub and not the source of truth.
+
 ## Basic Configuration
 
 Open TaxJar Settings and configure:
