@@ -147,7 +147,25 @@ def _write_taxjar_ui_log(log_data):
 	).insert(ignore_permissions=True)
 
 
+def _is_taxjar_logging_enabled():
+	cached_value = getattr(frappe.flags, "taxjar_logging_enabled", None)
+	if cached_value is not None:
+		return cached_value
+
+	# Keep logging enabled by default for backward compatibility before migrate adds the field.
+	try:
+		enabled = cint(frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging") or 1)
+	except Exception:
+		enabled = 1
+
+	frappe.flags.taxjar_logging_enabled = enabled
+	return enabled
+
+
 def log_taxjar_call(action, status, payload=None, response=None, error=None, context=None):
+	if not _is_taxjar_logging_enabled():
+		return
+
 	log_data = {
 		"action": action,
 		"status": status,
