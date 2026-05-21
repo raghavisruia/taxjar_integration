@@ -583,12 +583,14 @@ def validate_tax_request(tax_dict):
 
 
 def get_company_address_details(doc):
-	"""Return default company address details"""
+	"""Return company address details from TaxJar Settings"""
+	settings_company = frappe.db.get_single_value("TaxJar Settings", "company")
+	company = settings_company or get_default_company()
 
-	company_address = get_company_address(get_default_company()).company_address
+	company_address = get_company_address(company).company_address
 
 	if not company_address:
-		frappe.throw(_("Please set a default company address"))
+		frappe.throw(_("Please set a default address for the Taxjar Settings company or the default company."))
 
 	company_address = frappe.get_doc("Address", company_address)
 	return company_address
