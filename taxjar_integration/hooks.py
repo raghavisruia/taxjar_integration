@@ -81,7 +81,7 @@ required_apps = ["erpnext"]
 
 # before_install = "taxjar_integration.install.before_install"
 # after_install = "taxjar_integration.install.after_install"
-after_migrate = ["taxjar_integration.setup.sync_desk_metadata"]
+# after_migrate = ["taxjar_integration.setup.sync_desk_metadata"]
 
 # Uninstallation
 # ------------
