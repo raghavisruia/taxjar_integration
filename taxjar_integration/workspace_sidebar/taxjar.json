@@ -46,18 +46,6 @@
   {
    "child": 0,
    "collapsible": 1,
-   "icon": "globe",
-   "indent": 0,
-   "keep_closed": 0,
-   "label": "TaxJar Nexus",
-   "link_to": "TaxJar Nexus",
-   "link_type": "DocType",
-   "show_arrow": 0,
-   "type": "Link"
-  },
-  {
-   "child": 0,
-   "collapsible": 1,
    "icon": "list",
    "indent": 0,
    "keep_closed": 0,
@@ -68,7 +56,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-05-20 03:30:56.252033",
+ "modified": "2026-05-20 09:38:12.294029",
  "modified_by": "Administrator",
  "module": "Taxjar Integration",
  "name": "TaxJar",
