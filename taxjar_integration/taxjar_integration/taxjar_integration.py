@@ -596,6 +596,28 @@ def get_company_address_details(doc):
 	return company_address
 
 
+@frappe.whitelist()
+def check_nexus(shipping_address_name):
+	if not shipping_address_name:
+		return
+
+	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
+	if not TAXJAR_CALCULATE_TAX:
+		return
+
+	if not frappe.db.exists("Address", shipping_address_name):
+		return
+
+	try:
+		address = frappe.get_doc("Address", shipping_address_name)
+		state_code = get_iso_3166_2_state_code(address)
+
+		if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": state_code}):
+			return {"state": address.state, "state_code": state_code}
+	except Exception:
+		return
+
+
 def get_shipping_address_details(doc):
 	"""Return customer shipping address details"""
 
