@@ -207,6 +207,7 @@ def add_permissions():
 		"Item Manager",
 		"Stock Manager",
 	):
-		add_permission(doctype, role, 0)
+		if not frappe.db.exists("DocPerm", {"parent": doctype, "role": role, "permlevel": 0}):
+			add_permission(doctype, role, 0)
 		update_permission_property(doctype, role, 0, "write", 1)
 		update_permission_property(doctype, role, 0, "create", 1)
