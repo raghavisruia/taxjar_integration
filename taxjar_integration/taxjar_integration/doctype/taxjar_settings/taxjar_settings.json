@@ -11,14 +11,13 @@
   "column_break_pctj",
   "taxjar_create_transactions",
   "section_general",
+  "api_mode",
+  "column_break_jlec",
   "enable_taxjar_logging",
+  "section_break_mhnl",
+  "table_hvjw",
   "configuration",
   "company_config",
-  "api_credentials_tab",
-  "section_api_mode",
-  "api_mode",
-  "section_credentials",
-  "table_hvjw",
   "nexus_tab",
   "update_nexus_list_btn",
   "nexus_html",
@@ -52,7 +51,7 @@
   {
    "fieldname": "section_general",
    "fieldtype": "Section Break",
-   "label": "General"
+   "label": "API Config"
   },
   {
    "default": "1",
@@ -62,7 +61,6 @@
    "label": "Enable API Logs"
   },
   {
-   "depends_on": "eval: doc.taxjar_calculate_tax || doc.taxjar_create_transactions",
    "fieldname": "configuration",
    "fieldtype": "Section Break",
    "label": "Accounting Configuration"
@@ -74,26 +72,10 @@
    "options": "TaxJar Company Config"
   },
   {
-   "fieldname": "api_credentials_tab",
-   "fieldtype": "Tab Break",
-   "label": "Credentials"
-  },
-  {
-   "fieldname": "section_api_mode",
-   "fieldtype": "Section Break",
-   "label": "API Mode"
-  },
-  {
    "fieldname": "api_mode",
    "fieldtype": "Select",
    "label": "API Mode",
-   "options": "Live\nSandbox"
-  },
-  {
-   "description": "Add one row per company. Enter the Live Token, Sandbox Token, or both depending on your API Mode.",
-   "fieldname": "section_credentials",
-   "fieldtype": "Section Break",
-   "label": "API Credentials"
+   "options": "\nLive\nSandbox"
   },
   {
    "fieldname": "table_hvjw",
@@ -102,7 +84,6 @@
    "options": "TaxJar API Credential"
   },
   {
-   "depends_on": "eval: doc.taxjar_calculate_tax || doc.taxjar_create_transactions",
    "fieldname": "nexus_tab",
    "fieldtype": "Tab Break",
    "label": "Nexus"
@@ -115,12 +96,10 @@
   {
    "fieldname": "nexus_html",
    "fieldtype": "HTML",
-   "label": "Nexus Regions",
-   "options": ""
+   "label": "Nexus Regions"
   },
   {
    "collapsible": 1,
-   "collapsed": 1,
    "fieldname": "section_nexus_raw",
    "fieldtype": "Section Break",
    "label": "Raw Data"
@@ -131,11 +110,19 @@
    "label": "Nexus",
    "options": "TaxJar Nexus",
    "read_only": 1
+  },
+  {
+   "fieldname": "column_break_jlec",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "section_break_mhnl",
+   "fieldtype": "Section Break"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-06-10 00:00:00.000000",
+ "modified": "2026-06-11 16:28:27.556077",
  "modified_by": "Administrator",
  "module": "Taxjar Integration",
  "name": "TaxJar Settings",

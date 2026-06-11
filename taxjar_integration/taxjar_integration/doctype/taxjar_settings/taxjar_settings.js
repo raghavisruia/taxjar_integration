@@ -118,6 +118,13 @@ function _render_nexus_html(frm) {
 frappe.ui.form.on('TaxJar Settings', {
 	refresh(frm) {
 		_render_nexus_html(frm);
+
+		const account_query = (doc, cdt, cdn) => {
+			const row = locals[cdt][cdn];
+			return { filters: { company: row.company, is_group: 0 } };
+		};
+		frm.set_query('tax_account_head', 'company_config', account_query);
+		frm.set_query('shipping_account_head', 'company_config', account_query);
 	},
 
 	update_nexus_list_btn(frm) {
