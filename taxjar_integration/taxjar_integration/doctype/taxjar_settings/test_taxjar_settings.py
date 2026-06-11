@@ -7,6 +7,7 @@ import frappe
 from frappe.tests import UnitTestCase
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
+	SUPPORTED_STATE_CODES,
 	TAXJAR_ROW_DESCRIPTION,
 	_remove_taxjar_rows,
 	check_for_nexus,
@@ -14,6 +15,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	set_sales_tax,
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+	_US_STATE_CODE_OPTIONS,
 	make_custom_fields,
 )
 
@@ -499,3 +501,204 @@ class TestCreateTransactionRowDetection(UnitTestCase):
 
 		mock_client.create_order.assert_called_once()
 		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+
+# ── Phase 1: taxjar_state_code custom field on Address ───────────────────────
+
+class TestAddressCustomField(UnitTestCase):
+
+	def _get_address_field_def(self):
+		"""Return the Address field definition dict from make_custom_fields()."""
+		# Intercept create_custom_fields to capture the dict without hitting the DB
+		captured = {}
+
+		def _capture(custom_fields, update=True):
+			captured.update(custom_fields)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields",
+			side_effect=_capture,
+		):
+			make_custom_fields()
+
+		return captured.get("Address", [])
+
+	def test_make_custom_fields_includes_address(self):
+		fields = self._get_address_field_def()
+		self.assertTrue(len(fields) > 0, "Expected at least one Address custom field")
+
+	def test_address_custom_field_fieldname(self):
+		fields = self._get_address_field_def()
+		fieldnames = [f["fieldname"] for f in fields]
+		self.assertIn("taxjar_state_code", fieldnames)
+
+	def test_address_custom_field_type_is_select(self):
+		fields = self._get_address_field_def()
+		field = next(f for f in fields if f["fieldname"] == "taxjar_state_code")
+		self.assertEqual(field["fieldtype"], "Select")
+
+	def test_address_custom_field_inserted_after_state(self):
+		fields = self._get_address_field_def()
+		field = next(f for f in fields if f["fieldname"] == "taxjar_state_code")
+		self.assertEqual(field["insert_after"], "state")
+
+	def test_address_custom_field_depends_on_united_states(self):
+		fields = self._get_address_field_def()
+		field = next(f for f in fields if f["fieldname"] == "taxjar_state_code")
+		self.assertIn("United States", field["depends_on"])
+
+	def test_address_custom_field_options_cover_all_supported_codes(self):
+		"""Every code in SUPPORTED_STATE_CODES must appear in the Select options."""
+		options = set(_US_STATE_CODE_OPTIONS.split("\n"))
+		for code in SUPPORTED_STATE_CODES:
+			self.assertIn(code, options, f"State code {code!r} missing from taxjar_state_code options")
+
+
+# ── Phase 2: get_iso_3166_2_state_code ───────────────────────────────────────
+
+class TestGetIso3166StateCode(UnitTestCase):
+	"""Tests for get_iso_3166_2_state_code() — pycountry is exercised for fallback
+	paths; the DB call for country_code is mocked to "US"."""
+
+	def _call(self, state=None, taxjar_state_code=None, country="United States"):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_iso_3166_2_state_code
+
+		address = MagicMock()
+		address.get = lambda key, default=None: {
+			"state": state,
+			"taxjar_state_code": taxjar_state_code,
+			"country": country,
+		}.get(key, default)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="US",
+		):
+			return get_iso_3166_2_state_code(address)
+
+	# Fast path — taxjar_state_code is set
+
+	def test_prefers_taxjar_state_code_when_set(self):
+		"""When taxjar_state_code is a valid code, return it without pycountry."""
+		result = self._call(taxjar_state_code="FL", state="Anything")
+		self.assertEqual(result, "FL")
+
+	def test_prefers_taxjar_state_code_over_state_field(self):
+		"""taxjar_state_code wins even when state would also parse correctly."""
+		result = self._call(taxjar_state_code="CA", state="Florida")
+		self.assertEqual(result, "CA")
+
+	def test_ignores_taxjar_state_code_if_not_in_supported_list(self):
+		"""An unrecognised taxjar_state_code falls through to pycountry lookup."""
+		result = self._call(taxjar_state_code="XX", state="California")
+		self.assertEqual(result, "CA")
+
+	def test_ignores_blank_taxjar_state_code(self):
+		"""Empty string in taxjar_state_code falls through to pycountry."""
+		result = self._call(taxjar_state_code="", state="New York")
+		self.assertEqual(result, "NY")
+
+	# Fallback — pycountry via state field
+
+	def test_falls_back_to_state_short_code(self):
+		"""state='CA' (≤3 chars, valid code) → 'CA'."""
+		result = self._call(state="CA")
+		self.assertEqual(result, "CA")
+
+	def test_falls_back_to_state_full_name(self):
+		"""state='New York' → 'NY' via pycountry name lookup."""
+		result = self._call(state="New York")
+		self.assertEqual(result, "NY")
+
+	def test_falls_back_to_state_full_name_case_insensitive(self):
+		"""state='florida' (lowercase) → 'FL'."""
+		result = self._call(state="florida")
+		self.assertEqual(result, "FL")
+
+	# Error handling
+
+	def test_none_state_throws_validation_error(self):
+		"""state=None with no taxjar_state_code must throw ValidationError, not AttributeError."""
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(state=None, taxjar_state_code=None)
+
+	def test_empty_state_throws_validation_error(self):
+		"""state='' with no taxjar_state_code must throw ValidationError."""
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(state="", taxjar_state_code=None)
+
+	def test_invalid_state_name_throws_validation_error(self):
+		"""An unrecognisable state like 'Fla.' must throw ValidationError."""
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(state="Fla.", taxjar_state_code=None)
+
+	def test_invalid_short_code_throws_validation_error(self):
+		"""A 2-letter code that isn't a real state must throw ValidationError."""
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(state="ZZ", taxjar_state_code=None)
+
+
+# ── Phase 3: Address desk client script ──────────────────────────────────────
+
+class TestAddressClientScript(UnitTestCase):
+	"""Structural tests: hooks registration and JS file content."""
+
+	_APP_ROOT = (
+		"/home/raghav/frappe-work/benches/v16-bench-group"
+		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+	)
+
+	def _read_js(self):
+		import os
+		path = os.path.join(self._APP_ROOT, "public", "js", "address.js")
+		with open(path) as f:
+			return f.read()
+
+	def test_hooks_registers_address_js(self):
+		"""hooks.py must declare Address in doctype_js."""
+		from taxjar_integration import hooks
+		self.assertIn("Address", hooks.doctype_js)
+		self.assertEqual(hooks.doctype_js["Address"], "public/js/address.js")
+
+	def test_address_js_file_exists(self):
+		import os
+		path = os.path.join(self._APP_ROOT, "public", "js", "address.js")
+		self.assertTrue(os.path.isfile(path), "public/js/address.js does not exist")
+
+	def test_address_js_has_state_handler(self):
+		js = self._read_js()
+		self.assertIn("state(frm)", js, "Missing 'state' event handler in address.js")
+
+	def test_address_js_has_taxjar_state_code_handler(self):
+		js = self._read_js()
+		self.assertIn("taxjar_state_code(frm)", js, "Missing 'taxjar_state_code' event handler")
+
+	def test_address_js_has_country_handler(self):
+		js = self._read_js()
+		self.assertIn("country(frm)", js, "Missing 'country' event handler in address.js")
+
+	def test_address_js_guards_against_missing_field(self):
+		"""All handlers must check _has_state_code_field before calling frm.set_value."""
+		js = self._read_js()
+		self.assertIn("_has_state_code_field", js, "Missing field-existence guard in address.js")
+
+	def test_address_js_has_all_supported_state_codes(self):
+		"""Every code in SUPPORTED_STATE_CODES must appear as a key in the JS map."""
+		js = self._read_js()
+		for code in SUPPORTED_STATE_CODES:
+			self.assertIn(code, js, f"State code {code!r} missing from address.js")
+
+	def test_address_js_makes_pincode_mandatory_for_us(self):
+		"""pincode must be set as required when country is United States."""
+		js = self._read_js()
+		self.assertIn("_set_us_mandatory_fields", js)
+		self.assertIn('"pincode"', js)
+		self.assertIn("reqd", js)
+
+	def test_address_js_mandatory_applied_on_refresh_and_country_change(self):
+		"""_set_us_mandatory_fields must be called from both refresh and country handlers."""
+		js = self._read_js()
+		refresh_idx = js.index("refresh(frm)")
+		country_idx = js.index("country(frm)")
+		self.assertGreater(js.index("_set_us_mandatory_fields", refresh_idx), refresh_idx)
+		self.assertGreater(js.index("_set_us_mandatory_fields", country_idx), country_idx)

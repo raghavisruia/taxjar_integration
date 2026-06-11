@@ -145,6 +145,13 @@ def create_tax_categories(data):
 			tax_category.db_insert()
 
 
+_US_STATE_CODE_OPTIONS = (
+	"\nAL\nAK\nAZ\nAR\nCA\nCO\nCT\nDE\nDC\nFL\nGA\nHI\nID\nIL\nIN\nIA"
+	"\nKS\nKY\nLA\nME\nMD\nMA\nMI\nMN\nMS\nMO\nMT\nNE\nNV\nNH\nNJ\nNM"
+	"\nNY\nNC\nND\nOH\nOK\nOR\nPA\nRI\nSC\nSD\nTN\nTX\nUT\nVT\nVA\nWA\nWV\nWI\nWY"
+)
+
+
 def make_custom_fields(update=True):
 	custom_fields = {
 		"Sales Invoice Item": [
@@ -180,6 +187,17 @@ def make_custom_fields(update=True):
 				insert_after="item_group",
 				options="Product Tax Category",
 				label="Product Tax Category",
+			)
+		],
+		"Address": [
+			dict(
+				fieldname="taxjar_state_code",
+				fieldtype="Select",
+				insert_after="state",
+				label="State Code (US)",
+				description="2-letter US state code for TaxJar. Auto-populated when State is entered.",
+				depends_on='eval: doc.country === "United States"',
+				options=_US_STATE_CODE_OPTIONS,
 			)
 		],
 	}
