@@ -435,11 +435,21 @@ def get_state_code(address, location):
 
 
 def get_line_item_dict(item, docstatus):
+	# Prefer the value already on the line item (populated by fetch_from on Sales Invoice Item).
+	# Fall back to the Item master for doctypes whose item table doesn't carry the custom field
+	# (Quotation Item, Sales Order Item) and for programmatically created documents where the
+	# client-side fetch_from never fired.
+	product_tax_code = item.get("product_tax_category") or (
+		frappe.db.get_value("Item", item.get("item_code"), "product_tax_category", cache=True)
+		if item.get("item_code")
+		else None
+	)
+
 	tax_dict = dict(
 		id=item.get("idx"),
 		quantity=item.get("qty"),
 		unit_price=item.get("rate"),
-		product_tax_code=item.get("product_tax_category"),
+		product_tax_code=product_tax_code,
 	)
 
 	if docstatus == 1:

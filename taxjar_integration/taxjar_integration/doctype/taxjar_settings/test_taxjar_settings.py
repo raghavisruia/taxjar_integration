@@ -505,6 +505,70 @@ class TestSetSalesTax(UnitTestCase):
 		self.assertEqual(len(doc.taxes), 0)
 
 
+# ── Phase 2: get_line_item_dict — product_tax_code resolution ────────────────
+
+class TestGetLineItemDict(UnitTestCase):
+
+	def _make_item(self, item_code=None, product_tax_category=None):
+		item = MagicMock()
+		item.get = lambda key, default=None: {
+			"idx": 1,
+			"qty": 2,
+			"rate": 100.0,
+			"item_code": item_code,
+			"product_tax_category": product_tax_category,
+		}.get(key, default)
+		return item
+
+	def _call(self, item, item_master_category=None):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_line_item_dict
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value=item_master_category,
+		):
+			return get_line_item_dict(item, docstatus=0)
+
+	# Happy path: field is populated on the line item (Sales Invoice Item via fetch_from)
+
+	def test_uses_line_item_product_tax_category_when_set(self):
+		item = self._make_item(item_code="ITEM-001", product_tax_category="20010")
+		result = self._call(item)
+		self.assertEqual(result["product_tax_code"], "20010")
+
+	# Fallback: field is empty on line item (Quotation/SO Item, or fetch_from never fired)
+
+	def test_falls_back_to_item_master_when_line_item_field_empty(self):
+		item = self._make_item(item_code="ITEM-001", product_tax_category=None)
+		result = self._call(item, item_master_category="31000")
+		self.assertEqual(result["product_tax_code"], "31000")
+
+	def test_falls_back_to_item_master_when_line_item_field_blank_string(self):
+		item = self._make_item(item_code="ITEM-001", product_tax_category="")
+		result = self._call(item, item_master_category="20010")
+		self.assertEqual(result["product_tax_code"], "20010")
+
+	def test_line_item_field_takes_priority_over_item_master(self):
+		"""If line item already has the category, the Item master must not be queried."""
+		item = self._make_item(item_code="ITEM-001", product_tax_category="20010")
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		) as mock_db:
+			from taxjar_integration.taxjar_integration.taxjar_integration import get_line_item_dict
+			get_line_item_dict(item, docstatus=0)
+		mock_db.assert_not_called()
+
+	def test_returns_none_when_no_item_code_and_no_line_item_field(self):
+		"""No item_code means no fallback lookup — product_tax_code should be None."""
+		item = self._make_item(item_code=None, product_tax_category=None)
+		result = self._call(item)
+		self.assertIsNone(result["product_tax_code"])
+
+	def test_returns_none_when_item_master_has_no_category(self):
+		item = self._make_item(item_code="ITEM-001", product_tax_category=None)
+		result = self._call(item, item_master_category=None)
+		self.assertIsNone(result["product_tax_code"])
+
+
 # ── Phase 2: create_transaction row detection ────────────────────────────────
 
 class TestCreateTransactionRowDetection(UnitTestCase):
