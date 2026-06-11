@@ -6,8 +6,9 @@ import taxjar
 from frappe import _
 from frappe.contacts.doctype.address.address import get_company_address
 from frappe.utils import cint, flt
+from frappe.utils.password import get_decrypted_password
 
-from erpnext import get_default_company, get_region
+from erpnext import get_region
 
 SUPPORTED_COUNTRY_CODES = [
 	"AT",
@@ -96,6 +97,10 @@ SUPPORTED_STATE_CODES = [
 	"WY",
 ]
 
+# Description used to identify TaxJar-managed rows in the taxes table.
+# Any row with this description is owned by TaxJar and will be replaced on recalculation.
+TAXJAR_ROW_DESCRIPTION = "TaxJar Sales Tax"
+
 
 def _get_taxjar_logger():
 	return frappe.logger("taxjar_integration", allow_site=True, file_count=20)
@@ -152,7 +157,6 @@ def _is_taxjar_logging_enabled():
 	if cached_value is not None:
 		return cached_value
 
-	# Keep logging enabled by default for backward compatibility before migrate adds the field.
 	try:
 		enabled = cint(frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging") or 1)
 	except Exception:
@@ -189,15 +193,27 @@ def log_taxjar_call(action, status, payload=None, response=None, error=None, con
 		logger.error(traceback.format_exc())
 
 
-def get_client():
+def get_company_config(company):
+	"""Return the TaxJar Company Config row for the given company, or None."""
 	taxjar_settings = frappe.get_single("TaxJar Settings")
+	for config in taxjar_settings.company_config or []:
+		if config.company == company:
+			return config
+	return None
 
-	if not taxjar_settings.is_sandbox:
-		api_key = taxjar_settings.api_key and taxjar_settings.get_password("api_key")
-		api_url = taxjar.DEFAULT_API_URL
-	else:
-		api_key = taxjar_settings.sandbox_api_key and taxjar_settings.get_password("sandbox_api_key")
-		api_url = taxjar.SANDBOX_API_URL
+
+def get_client(company=None):
+	taxjar_settings = frappe.get_single("TaxJar Settings")
+	is_sandbox = taxjar_settings.api_mode == "Sandbox"
+	api_url = taxjar.SANDBOX_API_URL if is_sandbox else taxjar.DEFAULT_API_URL
+	token_field = "sandbox_token" if is_sandbox else "live_token"
+
+	api_key = None
+	for cred in taxjar_settings.table_hvjw or []:
+		if not company or cred.company == company:
+			if getattr(cred, token_field, None):
+				api_key = get_decrypted_password("TaxJar API Credential", cred.name, token_field)
+			break
 
 	if api_key and api_url:
 		client = taxjar.Client(api_key=api_key, api_url=api_url)
@@ -206,11 +222,10 @@ def get_client():
 
 
 def create_transaction(doc, method):
+	"""Create an order transaction in TaxJar"""
 	TAXJAR_CREATE_TRANSACTIONS = frappe.db.get_single_value(
 		"TaxJar Settings", "taxjar_create_transactions"
 	)
-
-	"""Create an order transaction in TaxJar"""
 
 	if not TAXJAR_CREATE_TRANSACTIONS:
 		log_taxjar_call(
@@ -221,7 +236,7 @@ def create_transaction(doc, method):
 		)
 		return
 
-	client = get_client()
+	client = get_client(doc.company)
 
 	if not client:
 		log_taxjar_call(
@@ -232,14 +247,15 @@ def create_transaction(doc, method):
 		)
 		return
 
-	TAX_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "tax_account_head")
-	sales_tax = sum([tax.tax_amount for tax in doc.taxes if tax.account_head == TAX_ACCOUNT_HEAD])
+	sales_tax = sum(
+		tax.tax_amount for tax in doc.taxes if tax.description == TAXJAR_ROW_DESCRIPTION
+	)
 
 	if not sales_tax:
 		log_taxjar_call(
 			action="create_transaction",
 			status="skipped",
-			error="No sales tax amount found on document",
+			error="No TaxJar-managed sales tax row found on document",
 			context={"doctype": doc.doctype, "name": doc.name},
 		)
 		return
@@ -320,7 +336,7 @@ def delete_transaction(doc, method):
 	if not TAXJAR_CREATE_TRANSACTIONS:
 		return
 
-	client = get_client()
+	client = get_client(doc.company)
 
 	if not client:
 		return
@@ -361,7 +377,9 @@ def delete_transaction(doc, method):
 
 
 def get_tax_data(doc):
-	SHIP_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "shipping_account_head")
+	company_config = get_company_config(doc.company)
+	if not company_config:
+		return None
 
 	from_address = get_company_address_details(doc)
 	from_shipping_state = from_address.get("state")
@@ -373,7 +391,10 @@ def get_tax_data(doc):
 	to_country_code = frappe.db.get_value("Country", to_address.country, "code", cache=True)
 	to_country_code = to_country_code.upper()
 
-	shipping = sum([tax.tax_amount for tax in doc.taxes if tax.account_head == SHIP_ACCOUNT_HEAD])
+	shipping = sum(
+		tax.tax_amount for tax in doc.taxes
+		if tax.account_head == company_config.shipping_account_head
+	)
 
 	line_items = [get_line_item_dict(item, doc.docstatus) for item in doc.items]
 
@@ -428,7 +449,6 @@ def get_line_item_dict(item, docstatus):
 
 
 def set_sales_tax(doc, method):
-	TAX_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "tax_account_head")
 	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
 
 	if not TAXJAR_CALCULATE_TAX:
@@ -458,7 +478,17 @@ def set_sales_tax(doc, method):
 		)
 		return
 
-	if check_sales_tax_exemption(doc):
+	company_config = get_company_config(doc.company)
+	if not company_config:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="skipped",
+			error="No TaxJar Company Config found for company {0}".format(doc.company),
+			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+		)
+		return
+
+	if check_sales_tax_exemption(doc, company_config):
 		log_taxjar_call(
 			action="tax_for_order",
 			status="skipped",
@@ -476,37 +506,32 @@ def set_sales_tax(doc, method):
 			error="No TaxJar payload generated from addresses/items",
 			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
 		)
-		# Remove existing tax rows if address is changed from a taxable state/country
-		setattr(doc, "taxes", [tax for tax in doc.taxes if tax.account_head != TAX_ACCOUNT_HEAD])
+		_remove_taxjar_rows(doc, company_config)
 		return
 
-	# check if delivering within a nexus
-	check_for_nexus(doc, tax_dict)
+	# Check if delivering within a nexus; clears TaxJar rows if not
+	if not check_for_nexus(doc, tax_dict):
+		return
 
 	tax_data = validate_tax_request(tax_dict)
 	if tax_data is not None:
 		if not tax_data.amount_to_collect:
-			setattr(doc, "taxes", [tax for tax in doc.taxes if tax.account_head != TAX_ACCOUNT_HEAD])
+			_remove_taxjar_rows(doc, company_config)
 		elif tax_data.amount_to_collect > 0:
-			# Loop through tax rows for existing Sales Tax entry
-			# If none are found, add a row with the tax amount
-			for tax in doc.taxes:
-				if tax.account_head == TAX_ACCOUNT_HEAD:
-					tax.tax_amount = tax_data.amount_to_collect
+			# Remove all existing rows for this company's tax account (template rows + previous TaxJar row)
+			_remove_taxjar_rows(doc, company_config)
 
-					doc.run_method("calculate_taxes_and_totals")
-					break
-			else:
-				doc.append(
-					"taxes",
-					{
-						"charge_type": "Actual",
-						"description": "Sales Tax",
-						"account_head": TAX_ACCOUNT_HEAD,
-						"tax_amount": tax_data.amount_to_collect,
-					},
-				)
-			# Assigning values to tax_collectable and taxable_amount fields in sales item table
+			doc.append(
+				"taxes",
+				{
+					"charge_type": "Actual",
+					"description": TAXJAR_ROW_DESCRIPTION,
+					"account_head": company_config.tax_account_head,
+					"tax_amount": tax_data.amount_to_collect,
+				},
+			)
+
+			# Assign tax_collectable and taxable_amount per line item
 			for item in tax_data.breakdown.line_items:
 				doc.get("items")[cint(item.id) - 1].tax_collectable = item.tax_collectable
 				doc.get("items")[cint(item.id) - 1].taxable_amount = item.taxable_amount
@@ -514,23 +539,32 @@ def set_sales_tax(doc, method):
 			doc.run_method("calculate_taxes_and_totals")
 
 
+def _remove_taxjar_rows(doc, company_config):
+	"""Remove all sales tax rows owned by TaxJar for this company."""
+	doc.taxes = [
+		tax for tax in doc.taxes
+		if tax.account_head != company_config.tax_account_head
+	]
+
+
 def check_for_nexus(doc, tax_dict):
-	TAX_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "tax_account_head")
-	if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": tax_dict["to_state"]}):
-		for item in doc.get("items"):
-			item.tax_collectable = flt(0)
-			item.taxable_amount = flt(0)
+	"""Return True if the delivery is within a nexus. Clears TaxJar rows and returns False if not."""
+	company_config = get_company_config(doc.company)
+	in_nexus = frappe.db.get_value(
+		"TaxJar Nexus",
+		filters={"region_code": tax_dict["to_state"], "parent": "TaxJar Settings", "company": doc.company},
+	)
 
-		for tax in list(doc.taxes):
-			if tax.account_head == TAX_ACCOUNT_HEAD:
-				doc.taxes.remove(tax)
-		return
+	if not in_nexus:
+		if company_config:
+			_remove_taxjar_rows(doc, company_config)
+		return False
+
+	return True
 
 
-def check_sales_tax_exemption(doc):
-	# if the party is exempt from sales tax, then set all tax account heads to zero
-	TAX_ACCOUNT_HEAD = frappe.db.get_single_value("TaxJar Settings", "tax_account_head")
-
+def check_sales_tax_exemption(doc, company_config):
+	"""Return True if the document or customer is exempt; zero out TaxJar rows if so."""
 	sales_tax_exempted = (
 		hasattr(doc, "exempt_from_sales_tax")
 		and doc.exempt_from_sales_tax
@@ -540,13 +574,13 @@ def check_sales_tax_exemption(doc):
 
 	if sales_tax_exempted:
 		for tax in doc.taxes:
-			if tax.account_head == TAX_ACCOUNT_HEAD:
+			if tax.account_head == company_config.tax_account_head:
 				tax.tax_amount = 0
 				break
 		doc.run_method("calculate_taxes_and_totals")
 		return True
-	else:
-		return False
+
+	return False
 
 
 def validate_tax_request(tax_dict):
@@ -583,17 +617,17 @@ def validate_tax_request(tax_dict):
 
 
 def get_company_address_details(doc):
-	"""Return company address details from TaxJar Settings"""
-	settings_company = frappe.db.get_single_value("TaxJar Settings", "company")
-	company = settings_company or get_default_company()
+	"""Return company address details for the invoice's company."""
+	from erpnext import get_default_company
+
+	company = doc.company if hasattr(doc, "company") and doc.company else get_default_company()
 
 	company_address = get_company_address(company).company_address
 
 	if not company_address:
-		frappe.throw(_("Please set a default address for the Taxjar Settings company or the default company."))
+		frappe.throw(_("Please set a default address for the company {0}.").format(company))
 
-	company_address = frappe.get_doc("Address", company_address)
-	return company_address
+	return frappe.get_doc("Address", company_address)
 
 
 @frappe.whitelist()
@@ -612,7 +646,7 @@ def check_nexus(shipping_address_name):
 		address = frappe.get_doc("Address", shipping_address_name)
 		state_code = get_iso_3166_2_state_code(address)
 
-		if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": state_code}):
+		if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": state_code, "parent": "TaxJar Settings"}):
 			return {"state": address.state, "state_code": state_code}
 	except Exception:
 		return
@@ -634,12 +668,21 @@ def get_shipping_address_details(doc):
 def get_iso_3166_2_state_code(address):
 	import pycountry
 
+	# Prefer the explicit TaxJar state code field when present (avoids pycountry guessing).
+	taxjar_code = address.get("taxjar_state_code")
+	if taxjar_code and taxjar_code in SUPPORTED_STATE_CODES:
+		return taxjar_code
+
+	state = address.get("state")
+	if not state:
+		frappe.throw(_("Please enter a valid State in the address"))
+
 	country_code = frappe.db.get_value("Country", address.get("country"), "code", cache=True)
 
 	error_message = _(
 		"""{0} is not a valid state! Check for typos or enter the ISO code for your state."""
-	).format(address.get("state"))
-	state = address.get("state").upper().strip()
+	).format(state)
+	state = state.upper().strip()
 
 	# The max length for ISO state codes is 3, excluding the country code
 	if len(state) <= 3:
