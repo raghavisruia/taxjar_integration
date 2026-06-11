@@ -6,98 +6,109 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "section_break_rixa",
   "taxjar_calculate_tax",
-  "is_sandbox",
+  "column_break_pctj",
   "taxjar_create_transactions",
-    "enable_taxjar_logging",
-  "credentials",
-  "api_key",
-  "cb_keys",
-  "sandbox_api_key",
+  "section_general",
+  "enable_taxjar_logging",
   "configuration",
-  "company",
-  "column_break_10",
-  "tax_account_head",
-  "configuration_cb",
-  "shipping_account_head",
-  "section_break_12",
+  "company_config",
+  "api_credentials_tab",
+  "section_api_mode",
+  "api_mode",
+  "section_credentials",
+  "table_hvjw",
+  "nexus_tab",
+  "update_nexus_list_btn",
   "nexus"
  ],
  "fields": [
   {
-   "fieldname": "credentials",
+   "fieldname": "section_break_rixa",
    "fieldtype": "Section Break",
-   "label": "Credentials"
-  },
-  {
-   "fieldname": "api_key",
-   "fieldtype": "Password",
-   "in_list_view": 1,
-   "label": "Live API Key",
-   "reqd": 1
-  },
-  {
-   "fieldname": "configuration",
-   "fieldtype": "Section Break",
-   "label": "Configuration"
-  },
-  {
-   "fieldname": "tax_account_head",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Tax Account Head",
-   "options": "Account",
-   "reqd": 1
-  },
-  {
-   "fieldname": "shipping_account_head",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Shipping Account Head",
-   "options": "Account",
-   "reqd": 1
+   "label": "Features"
   },
   {
    "default": "0",
-   "depends_on": "taxjar_calculate_tax",
-   "fieldname": "is_sandbox",
-   "fieldtype": "Check",
-   "label": "Sandbox Mode"
-  },
-  {
-   "fieldname": "sandbox_api_key",
-   "fieldtype": "Password",
-   "label": "Sandbox API Key"
-  },
-  {
-   "default": "0",
-   "depends_on": "taxjar_calculate_tax",
-   "fieldname": "taxjar_create_transactions",
-   "fieldtype": "Check",
-   "label": "Create TaxJar Transaction"
-  },
-    {
-     "default": "1",
-     "depends_on": "taxjar_calculate_tax",
-     "fieldname": "enable_taxjar_logging",
-     "fieldtype": "Check",
-     "label": "Enable TaxJar Logging"
-    },
-  {
-   "default": "0",
+   "description": "Computes sales tax based on nexus for sales invoices & adds product tax category fields on Items",
    "fieldname": "taxjar_calculate_tax",
    "fieldtype": "Check",
    "label": "Enable Tax Calculation"
   },
   {
-   "fieldname": "cb_keys",
+   "fieldname": "column_break_pctj",
    "fieldtype": "Column Break"
   },
   {
-   "depends_on": "nexus",
-   "fieldname": "section_break_12",
+   "default": "0",
+   "description": "Push submitted Sales Invoices to TaxJar as transactions for sales tax reporting and AutoFile.",
+   "fieldname": "taxjar_create_transactions",
+   "fieldtype": "Check",
+   "label": "Create TaxJar Transaction"
+  },
+  {
+   "fieldname": "section_general",
    "fieldtype": "Section Break",
-   "label": "Nexus List"
+   "label": "General"
+  },
+  {
+   "default": "1",
+   "description": "Records API requests, responses, and errors in <a href=\"/desk/taxjar-api-log\" rel=\"noopener noreferrer\">TaxJar API Log</a>",
+   "fieldname": "enable_taxjar_logging",
+   "fieldtype": "Check",
+   "label": "Enable API Logs"
+  },
+  {
+   "depends_on": "eval: doc.taxjar_calculate_tax || doc.taxjar_create_transactions",
+   "fieldname": "configuration",
+   "fieldtype": "Section Break",
+   "label": "Accounting Configuration"
+  },
+  {
+   "fieldname": "company_config",
+   "fieldtype": "Table",
+   "label": "Company Configuration",
+   "options": "TaxJar Company Config"
+  },
+  {
+   "fieldname": "api_credentials_tab",
+   "fieldtype": "Tab Break",
+   "label": "Credentials"
+  },
+  {
+   "fieldname": "section_api_mode",
+   "fieldtype": "Section Break",
+   "label": "API Mode"
+  },
+  {
+   "fieldname": "api_mode",
+   "fieldtype": "Select",
+   "label": "API Mode",
+   "options": "Live\nSandbox"
+  },
+  {
+   "description": "Add one row per company. Enter the Live Token, Sandbox Token, or both depending on your API Mode.",
+   "fieldname": "section_credentials",
+   "fieldtype": "Section Break",
+   "label": "API Credentials"
+  },
+  {
+   "fieldname": "table_hvjw",
+   "fieldtype": "Table",
+   "label": "API Credentials",
+   "options": "TaxJar API Credential"
+  },
+  {
+   "depends_on": "eval: doc.taxjar_calculate_tax || doc.taxjar_create_transactions",
+   "fieldname": "nexus_tab",
+   "fieldtype": "Tab Break",
+   "label": "Nexus"
+  },
+  {
+   "fieldname": "update_nexus_list_btn",
+   "fieldtype": "Button",
+   "label": "Update Nexus List"
   },
   {
    "fieldname": "nexus",
@@ -105,25 +116,11 @@
    "label": "Nexus",
    "options": "TaxJar Nexus",
    "read_only": 1
-  },
-  {
-   "fieldname": "configuration_cb",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "company",
-   "fieldtype": "Link",
-   "label": "Company",
-   "options": "Company"
-  },
-  {
-   "fieldname": "column_break_10",
-   "fieldtype": "Column Break"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2022-11-21 12:17:24.647979",
+ "modified": "2026-06-10 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Taxjar Integration",
  "name": "TaxJar Settings",
@@ -141,7 +138,9 @@
   }
  ],
  "quick_entry": 1,
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "track_changes": 1
 }

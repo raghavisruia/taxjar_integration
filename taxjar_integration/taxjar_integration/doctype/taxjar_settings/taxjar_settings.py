@@ -11,7 +11,7 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.model.document import Document
 from frappe.permissions import add_permission, update_permission_property
 
-from taxjar_integration.taxjar_integration.taxjar_integration import get_client
+from taxjar_integration.taxjar_integration.taxjar_integration import get_client, log_taxjar_call
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -19,18 +19,29 @@ PRODUCT_TAX_CATEGORY_DATA_FILE = (BASE_DIR / "product_tax_category_data.json").r
 
 
 class TaxJarSettings(Document):
+	# begin: auto-generated types
+	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
+
+	if TYPE_CHECKING:
+		from frappe.types import DF
+		from taxjar_integration.taxjar_integration.doctype.taxjar_api_credential.taxjar_api_credential import TaxJarAPICredential
+		from taxjar_integration.taxjar_integration.doctype.taxjar_company_config.taxjar_company_config import TaxJarCompanyConfig
+		from taxjar_integration.taxjar_integration.doctype.taxjar_nexus.taxjar_nexus import TaxJarNexus
+
+		api_mode: DF.Literal["Live", "Sandbox"]
+		company_config: DF.Table[TaxJarCompanyConfig]
+		enable_taxjar_logging: DF.Check
+		nexus: DF.Table[TaxJarNexus]
+		table_hvjw: DF.Table[TaxJarAPICredential]
+		taxjar_calculate_tax: DF.Check
+		taxjar_create_transactions: DF.Check
+	# end: auto-generated types
+
 	def on_update(self):
 		TAXJAR_CREATE_TRANSACTIONS = self.taxjar_create_transactions
 		TAXJAR_CALCULATE_TAX = self.taxjar_calculate_tax
-		TAXJAR_SANDBOX_MODE = self.is_sandbox
-
-		# fields_already_exist = frappe.db.exists(
-		# 	"Custom Field",
-		# 	filters={"dt": ("in", ["Item", "Sales Invoice Item"]), "fieldname": "product_tax_category"},
-		# )
-		# fields_hidden = frappe.get_value(
-		# 	"Custom Field", filters={"dt": ("in", ["Sales Invoice Item"])}, fieldname="hidden"
-		# )
 
 		fields_already_exist = frappe.db.exists(
 			"Custom Field",
@@ -46,7 +57,7 @@ class TaxJarSettings(Document):
 			"hidden"
 		)
 
-		if TAXJAR_CREATE_TRANSACTIONS or TAXJAR_CALCULATE_TAX or TAXJAR_SANDBOX_MODE:
+		if TAXJAR_CREATE_TRANSACTIONS or TAXJAR_CALCULATE_TAX or self.api_mode == "Sandbox":
 			if not fields_already_exist:
 				add_product_tax_categories()
 				make_custom_fields()
@@ -60,27 +71,48 @@ class TaxJarSettings(Document):
 			toggle_tax_category_fields(hidden="1")
 
 	def validate(self):
-		self.calculate_taxes_validation_for_create_transactions()
+		if self.api_mode == "Sandbox":
+			has_credentials = any(cred.sandbox_token for cred in (self.table_hvjw or []))
+			if not has_credentials:
+				frappe.throw(frappe._("At least one Sandbox Token is required in API Credentials for Sandbox mode"))
+		else:
+			has_credentials = any(cred.live_token for cred in (self.table_hvjw or []))
+			if not has_credentials:
+				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode"))
 
 	@frappe.whitelist()
 	def update_nexus_list(self):
-		client = get_client()
-		nexus = client.nexus_regions()
-
-		new_nexus_list = [frappe._dict(address) for address in nexus]
+		if not self.company_config:
+			frappe.throw(frappe._("Please add at least one Company Configuration before updating Nexus list"))
 
 		self.set("nexus", [])
-		self.set("nexus", new_nexus_list)
-		self.save()
 
-	def calculate_taxes_validation_for_create_transactions(self):
-		if not self.taxjar_calculate_tax and (self.taxjar_create_transactions or self.is_sandbox):
-			frappe.throw(
-				frappe._(
-					"Before enabling <b>Create Transaction</b> or <b>Sandbox Mode</b>, you need to check the <b>Enable Tax Calculation</b> box"
+		for config in self.company_config:
+			client = get_client(config.company)
+			if not client:
+				frappe.msgprint(
+					frappe._("Could not connect to TaxJar for company {0}. Skipping.").format(config.company)
 				)
-			)
+				continue
 
+			try:
+				log_taxjar_call(action="nexus_regions", status="request", context={"company": config.company})
+				nexus = client.nexus_regions()
+				log_taxjar_call(action="nexus_regions", status="success", response=nexus, context={"company": config.company})
+			except Exception as e:
+				log_taxjar_call(action="nexus_regions", status="error", error=str(e), context={"company": config.company})
+				raise
+
+			for address in nexus:
+				self.append("nexus", {
+					"company": config.company,
+					"region": address.region,
+					"region_code": address.region_code,
+					"country": address.country,
+					"country_code": address.country_code,
+				})
+
+		self.save()
 
 def toggle_tax_category_fields(hidden):
 	frappe.set_value(
