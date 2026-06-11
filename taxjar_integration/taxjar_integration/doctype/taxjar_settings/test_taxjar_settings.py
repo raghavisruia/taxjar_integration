@@ -114,22 +114,59 @@ class TestTaxJarSettings(UnitTestCase):
 			"sandbox_token": "test-sandbox-token",
 		})
 
-	# validate() — sandbox mode
+	# validate() — no features enabled: always passes regardless of api_mode or credentials
 
-	def test_validate_sandbox_requires_sandbox_token_in_credentials(self):
+	def test_validate_no_features_blank_mode_passes(self):
+		"""Fresh install state: blank mode, no credentials, no features — must save cleanly."""
+		self.settings.api_mode = ""
+		self.settings.set("table_hvjw", [])
+		self.settings.validate()  # must not raise
+
+	def test_validate_no_features_live_mode_no_creds_passes(self):
+		"""Credentials are not required when no features are enabled."""
+		self.settings.api_mode = "Live"
+		self.settings.set("table_hvjw", [])
+		self.settings.validate()  # must not raise
+
+	def test_validate_no_features_sandbox_mode_no_creds_passes(self):
 		self.settings.api_mode = "Sandbox"
+		self.settings.set("table_hvjw", [])
+		self.settings.validate()  # must not raise
+
+	# validate() — features enabled, blank mode
+
+	def test_validate_blank_mode_with_calculate_tax_throws(self):
+		"""Enabling a feature without selecting an API Mode must throw."""
+		self.settings.api_mode = ""
+		self.settings.taxjar_calculate_tax = 1
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self.settings.validate()
+
+	def test_validate_blank_mode_with_create_transactions_throws(self):
+		self.settings.api_mode = ""
+		self.settings.taxjar_create_transactions = 1
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self.settings.validate()
+
+	# validate() — features enabled, sandbox mode
+
+	def test_validate_sandbox_requires_sandbox_token_when_features_enabled(self):
+		self.settings.api_mode = "Sandbox"
+		self.settings.taxjar_calculate_tax = 1
 		self.settings.set("table_hvjw", [])
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
-	def test_validate_sandbox_passes_with_sandbox_token_in_credentials(self):
+	def test_validate_sandbox_passes_with_sandbox_token_and_features_enabled(self):
 		self.settings.api_mode = "Sandbox"
+		self.settings.taxjar_calculate_tax = 1
 		self._add_sandbox_credential()
 		self.settings.validate()  # must not raise
 
-	def test_validate_sandbox_fails_when_only_live_token_present(self):
+	def test_validate_sandbox_fails_when_only_live_token_present_and_features_enabled(self):
 		"""A row with only live_token is not enough for Sandbox mode."""
 		self.settings.api_mode = "Sandbox"
+		self.settings.taxjar_calculate_tax = 1
 		self.settings.append("table_hvjw", {
 			"company": "_Test Company",
 			"live_token": "test-live-token",
@@ -137,16 +174,18 @@ class TestTaxJarSettings(UnitTestCase):
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
-	# validate() — live mode
+	# validate() — features enabled, live mode
 
-	def test_validate_live_requires_credential(self):
+	def test_validate_live_requires_credential_when_features_enabled(self):
 		self.settings.api_mode = "Live"
+		self.settings.taxjar_calculate_tax = 1
 		self.settings.set("table_hvjw", [])
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
-	def test_validate_live_passes_with_credential(self):
+	def test_validate_live_passes_with_credential_and_features_enabled(self):
 		self.settings.api_mode = "Live"
+		self.settings.taxjar_calculate_tax = 1
 		self.settings.append("table_hvjw", {
 			"company": "_Test Company",
 			"live_token": "test-live-token",
@@ -160,23 +199,24 @@ class TestTaxJarSettings(UnitTestCase):
 		self.settings.taxjar_create_transactions = 1
 		self.settings.validate()  # must not raise
 
-	# Phase 3: Create Transactions is independent of Tax Calculation
+	# validate() — feature independence
 
-	def test_create_transactions_can_be_enabled_without_calculate_tax(self):
-		"""After Phase 3, enabling Create Transactions alone must not throw."""
-		self.settings.api_mode = "Sandbox"
-		self._add_sandbox_credential()
+	def test_create_transactions_alone_enforces_credentials(self):
+		"""create_transactions alone (without calculate_tax) must still enforce credentials."""
+		self.settings.api_mode = "Live"
 		self.settings.taxjar_calculate_tax = 0
 		self.settings.taxjar_create_transactions = 1
-		self.settings.validate()  # must not raise
+		self.settings.set("table_hvjw", [])
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self.settings.validate()
 
-	def test_calculate_tax_alone_passes(self):
-		"""Enable Tax Calculation without Create Transactions must pass."""
+	def test_calculate_tax_alone_enforces_credentials(self):
 		self.settings.api_mode = "Sandbox"
-		self._add_sandbox_credential()
 		self.settings.taxjar_calculate_tax = 1
 		self.settings.taxjar_create_transactions = 0
-		self.settings.validate()  # must not raise
+		self.settings.set("table_hvjw", [])
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self.settings.validate()
 
 	# DocType schema
 

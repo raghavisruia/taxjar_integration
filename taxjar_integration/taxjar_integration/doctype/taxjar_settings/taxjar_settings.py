@@ -30,7 +30,7 @@ class TaxJarSettings(Document):
 		from taxjar_integration.taxjar_integration.doctype.taxjar_company_config.taxjar_company_config import TaxJarCompanyConfig
 		from taxjar_integration.taxjar_integration.doctype.taxjar_nexus.taxjar_nexus import TaxJarNexus
 
-		api_mode: DF.Literal["Live", "Sandbox"]
+		api_mode: DF.Literal["", "Live", "Sandbox"]
 		company_config: DF.Table[TaxJarCompanyConfig]
 		enable_taxjar_logging: DF.Check
 		nexus: DF.Table[TaxJarNexus]
@@ -40,8 +40,7 @@ class TaxJarSettings(Document):
 	# end: auto-generated types
 
 	def on_update(self):
-		TAXJAR_CREATE_TRANSACTIONS = self.taxjar_create_transactions
-		TAXJAR_CALCULATE_TAX = self.taxjar_calculate_tax
+		features_enabled = self.taxjar_calculate_tax or self.taxjar_create_transactions
 
 		fields_already_exist = frappe.db.exists(
 			"Custom Field",
@@ -51,34 +50,30 @@ class TaxJarSettings(Document):
 			},
 		)
 
-		fields_hidden = frappe.db.get_value(
-			"Custom Field",
-			{"dt": ["in", ["Sales Invoice Item"]]},
-			"hidden"
-		)
-
-		if TAXJAR_CREATE_TRANSACTIONS or TAXJAR_CALCULATE_TAX or self.api_mode == "Sandbox":
+		if features_enabled:
 			if not fields_already_exist:
 				add_product_tax_categories()
 				make_custom_fields()
 				add_permissions()
 				frappe.enqueue("erpnext.regional.united_states.setup.add_product_tax_categories", now=False)
-
-			elif fields_already_exist and fields_hidden:
-				toggle_tax_category_fields(hidden="0")
-
+			else:
+				toggle_tax_category_fields(hidden=0)
 		elif fields_already_exist:
-			toggle_tax_category_fields(hidden="1")
+			toggle_tax_category_fields(hidden=1)
 
 	def validate(self):
+		if not (self.taxjar_calculate_tax or self.taxjar_create_transactions):
+			return
+
+		if not self.api_mode:
+			frappe.throw(frappe._("Please select an API Mode before enabling features."))
+
 		if self.api_mode == "Sandbox":
-			has_credentials = any(cred.sandbox_token for cred in (self.table_hvjw or []))
-			if not has_credentials:
-				frappe.throw(frappe._("At least one Sandbox Token is required in API Credentials for Sandbox mode"))
+			if not any(cred.sandbox_token for cred in (self.table_hvjw or [])):
+				frappe.throw(frappe._("At least one Sandbox Token is required in API Credentials for Sandbox mode."))
 		else:
-			has_credentials = any(cred.live_token for cred in (self.table_hvjw or []))
-			if not has_credentials:
-				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode"))
+			if not any(cred.live_token for cred in (self.table_hvjw or [])):
+				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode."))
 
 	@frappe.whitelist()
 	def update_nexus_list(self):
@@ -115,15 +110,14 @@ class TaxJarSettings(Document):
 		self.save()
 
 def toggle_tax_category_fields(hidden):
-	frappe.set_value(
-		"Custom Field",
-		filters={"dt": "Sales Invoice Item", "fieldname": "product_tax_category"},
-		fieldname="hidden",
-		value=hidden,
-	)
-	frappe.set_value(
-		"Custom Field", filters={"dt": "Item", "fieldname": "product_tax_category"}, fieldname="hidden", value=hidden
-	)
+	hidden = 1 if hidden else 0
+	for dt in ("Item", "Sales Invoice Item"):
+		frappe.db.set_value(
+			"Custom Field",
+			{"dt": dt, "fieldname": "product_tax_category"},
+			"hidden",
+			hidden,
+		)
 
 
 def add_product_tax_categories():
