@@ -1,60 +1,42 @@
 {
- "actions": [],
- "allow_rename": 1,
- "creation": "2021-09-11 05:09:53.773838",
- "doctype": "DocType",
- "editable_grid": 1,
- "engine": "InnoDB",
- "field_order": [
-  "company",
-  "region",
-  "region_code",
-  "country",
-  "country_code"
- ],
- "fields": [
-  {
-   "fieldname": "company",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Company",
-   "options": "Company"
-  },
-  {
-   "fieldname": "region",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Region"
-  },
-  {
-   "fieldname": "region_code",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Region Code"
-  },
-  {
-   "fieldname": "country",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Country"
-  },
-  {
-   "fieldname": "country_code",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Country Code"
-  }
- ],
- "index_web_pages_for_search": 1,
- "istable": 1,
- "links": [],
- "modified": "2026-06-09 00:00:00.000000",
- "modified_by": "Administrator",
- "module": "Taxjar Integration",
- "name": "TaxJar Nexus",
- "owner": "Administrator",
- "permissions": [],
- "sort_field": "modified",
- "sort_order": "DESC",
- "track_changes": 1
+    "actions": [],
+    "allow_rename": 1,
+    "creation": "2026-06-08 00:04:11.672252",
+    "doctype": "DocType",
+    "editable_grid": 1,
+    "engine": "InnoDB",
+    "field_order": [
+        "company",
+        "nexus"
+    ],
+    "fields": [
+        {
+            "fieldname": "company",
+            "fieldtype": "Link",
+            "in_list_view": 1,
+            "label": "Company",
+            "options": "Company"
+        },
+        {
+            "fieldname": "nexus",
+            "fieldtype": "Table",
+            "label": "Nexus ",
+            "options": "TaxJar Nexus Item"
+        }
+    ],
+    "grid_page_length": 50,
+    "index_web_pages_for_search": 1,
+    "istable": 1,
+    "links": [],
+    "modified": "2026-06-08 00:07:16.684580",
+    "modified_by": "Administrator",
+    "module": "Taxjar Integration",
+    "name": "TaxJar Nexus Item",
+    "owner": "Administrator",
+    "permissions": [],
+    "row_format": "Dynamic",
+    "rows_threshold_for_grid_search": 20,
+    "sort_field": "creation",
+    "sort_order": "DESC",
+    "states": []
 }
