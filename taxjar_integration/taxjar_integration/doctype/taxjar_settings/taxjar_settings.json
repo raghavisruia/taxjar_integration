@@ -21,6 +21,8 @@
   "table_hvjw",
   "nexus_tab",
   "update_nexus_list_btn",
+  "nexus_html",
+  "section_nexus_raw",
   "nexus"
  ],
  "fields": [
@@ -109,6 +111,19 @@
    "fieldname": "update_nexus_list_btn",
    "fieldtype": "Button",
    "label": "Update Nexus List"
+  },
+  {
+   "fieldname": "nexus_html",
+   "fieldtype": "HTML",
+   "label": "Nexus Regions",
+   "options": ""
+  },
+  {
+   "collapsible": 1,
+   "collapsed": 1,
+   "fieldname": "section_nexus_raw",
+   "fieldtype": "Section Break",
+   "label": "Raw Data"
   },
   {
    "fieldname": "nexus",

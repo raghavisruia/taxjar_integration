@@ -702,3 +702,53 @@ class TestAddressClientScript(UnitTestCase):
 		country_idx = js.index("country(frm)")
 		self.assertGreater(js.index("_set_us_mandatory_fields", refresh_idx), refresh_idx)
 		self.assertGreater(js.index("_set_us_mandatory_fields", country_idx), country_idx)
+
+
+# ── Nexus HTML renderer — JS content ─────────────────────────────────────────
+
+class TestNexusHtmlRenderer(UnitTestCase):
+	"""Structural tests for the nexus grouped-HTML renderer in taxjar_settings.js."""
+
+	_SETTINGS_JS = (
+		"/home/raghav/frappe-work/benches/v16-bench-group"
+		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+		"/taxjar_integration/doctype/taxjar_settings/taxjar_settings.js"
+	)
+
+	def _read_js(self):
+		with open(self._SETTINGS_JS) as f:
+			return f.read()
+
+	def test_settings_js_has_render_nexus_html_function(self):
+		js = self._read_js()
+		self.assertIn("_render_nexus_html", js)
+
+	def test_settings_js_render_called_on_refresh(self):
+		js = self._read_js()
+		refresh_idx = js.index("refresh(frm)")
+		self.assertGreater(js.index("_render_nexus_html", refresh_idx), refresh_idx)
+
+	def test_settings_js_render_called_after_update_nexus(self):
+		js = self._read_js()
+		btn_idx = js.index("update_nexus_list_btn")
+		self.assertGreater(js.index("_render_nexus_html", btn_idx), btn_idx)
+
+	def test_settings_js_groups_by_company(self):
+		"""Renderer must group nexus rows by company."""
+		js = self._read_js()
+		self.assertIn("by_company", js)
+
+	def test_settings_js_renders_region_and_code_columns(self):
+		js = self._read_js()
+		self.assertIn("region_code", js)
+		self.assertIn("country_code", js)
+
+	def test_settings_js_has_empty_state_message(self):
+		"""When nexus is empty, a helpful message must be shown."""
+		js = self._read_js()
+		self.assertIn("Update Nexus List", js)
+
+	def test_settings_js_overflow_x_auto_for_responsiveness(self):
+		"""Table wrapper must use overflow-x: auto for narrow-screen support."""
+		js = self._read_js()
+		self.assertIn("overflow-x: auto", js)
