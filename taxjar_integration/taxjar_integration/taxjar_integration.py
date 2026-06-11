@@ -715,6 +715,24 @@ def get_iso_3166_2_state_code(address):
 			return lookup_state.code.split("-")[1]
 
 
+def validate_address(doc, method):
+	"""Enforce mandatory address fields for US and Canadian addresses."""
+	if not doc.country:
+		return
+
+	country_code = (frappe.db.get_value("Country", doc.country, "code", cache=True) or "").upper()
+
+	if country_code in ("US", "CA"):
+		if not doc.state:
+			frappe.throw(_("State/Province is mandatory for {0} addresses.").format(doc.country))
+
+	if country_code == "US":
+		if not doc.get("taxjar_state_code"):
+			frappe.throw(_("State Code is mandatory for United States addresses."))
+		if not doc.pincode:
+			frappe.throw(_("Postal Code is mandatory for United States addresses."))
+
+
 def sanitize_error_response(response):
 	response = response.full_response.get("detail")
 	response = response.replace("_", " ")

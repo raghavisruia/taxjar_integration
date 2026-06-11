@@ -1,5 +1,6 @@
 // TaxJar — Address form client script
 // Auto-syncs taxjar_state_code ↔ state when country is "United States".
+// Enforces mandatory fields: state (US/CA), taxjar_state_code (US), pincode (US).
 
 const TAXJAR_US_STATES = {
 	AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas",
@@ -36,18 +37,28 @@ function _has_state_code_field(frm) {
 	return !!frm.fields_dict["taxjar_state_code"];
 }
 
-function _set_us_mandatory_fields(frm) {
-	const is_us = frm.doc.country === "United States";
+function _set_taxjar_mandatory_fields(frm) {
+	const country = frm.doc.country;
+	// Use country names — standard Frappe Country DocType values, not subject to change.
+	const needs_state = country === "United States" || country === "Canada";
+	const is_us = country === "United States";
+
+	frm.set_df_property("state", "reqd", needs_state ? 1 : 0);
 	frm.set_df_property("pincode", "reqd", is_us ? 1 : 0);
+
+	// taxjar_state_code only renders for US (has depends_on in field def), so only toggle reqd for US.
+	if (_has_state_code_field(frm)) {
+		frm.set_df_property("taxjar_state_code", "reqd", is_us ? 1 : 0);
+	}
 }
 
 frappe.ui.form.on("Address", {
 	refresh(frm) {
-		_set_us_mandatory_fields(frm);
+		_set_taxjar_mandatory_fields(frm);
 	},
 
 	country(frm) {
-		_set_us_mandatory_fields(frm);
+		_set_taxjar_mandatory_fields(frm);
 
 		if (!_has_state_code_field(frm)) return;
 		if (frm.doc.country !== "United States" && frm.doc.taxjar_state_code) {

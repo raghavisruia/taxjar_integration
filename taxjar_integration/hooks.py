@@ -130,6 +130,9 @@ doc_events = {
 	("Quotation", "Sales Order", "Sales Invoice"): {
 		"validate": ["taxjar_integration.taxjar_integration.taxjar_integration.set_sales_tax"]
 	},
+	"Address": {
+		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_address"
+	},
 }
 
 # Scheduled Tasks

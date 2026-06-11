@@ -742,6 +742,124 @@ class TestGetIso3166StateCode(UnitTestCase):
 			self._call(state="ZZ", taxjar_state_code=None)
 
 
+# ── Phase 3: validate_address — server-side hook ─────────────────────────────
+
+class _MockAddress:
+	"""Minimal stand-in for a Frappe Address document."""
+	def __init__(self, country=None, state=None, taxjar_state_code=None, pincode=None):
+		self.country = country
+		self.state = state
+		self.pincode = pincode
+		self._taxjar_state_code = taxjar_state_code
+
+	def get(self, key, default=None):
+		if key == "taxjar_state_code":
+			return self._taxjar_state_code
+		return getattr(self, key, default)
+
+
+class TestValidateAddress(UnitTestCase):
+
+	def _call(self, doc, country_code):
+		from taxjar_integration.taxjar_integration.taxjar_integration import validate_address
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value=country_code,
+		):
+			validate_address(doc, None)
+
+	# No country — early return, nothing should raise
+
+	def test_no_country_skips_validation(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import validate_address
+		doc = _MockAddress(country=None)
+		validate_address(doc, None)  # no mock needed — returns before DB call
+
+	def test_empty_country_skips_validation(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import validate_address
+		doc = _MockAddress(country="")
+		validate_address(doc, None)
+
+	# United States — all three fields mandatory
+
+	def test_us_missing_state_throws(self):
+		doc = _MockAddress(country="United States", state=None, taxjar_state_code="CA", pincode="90210")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "US")
+
+	def test_us_empty_state_throws(self):
+		doc = _MockAddress(country="United States", state="", taxjar_state_code="CA", pincode="90210")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "US")
+
+	def test_us_missing_taxjar_state_code_throws(self):
+		doc = _MockAddress(country="United States", state="California", taxjar_state_code=None, pincode="90210")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "US")
+
+	def test_us_empty_taxjar_state_code_throws(self):
+		doc = _MockAddress(country="United States", state="California", taxjar_state_code="", pincode="90210")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "US")
+
+	def test_us_missing_pincode_throws(self):
+		doc = _MockAddress(country="United States", state="California", taxjar_state_code="CA", pincode=None)
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "US")
+
+	def test_us_empty_pincode_throws(self):
+		doc = _MockAddress(country="United States", state="California", taxjar_state_code="CA", pincode="")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "US")
+
+	def test_us_all_fields_present_passes(self):
+		doc = _MockAddress(country="United States", state="California", taxjar_state_code="CA", pincode="90210")
+		self._call(doc, "US")  # must not raise
+
+	def test_us_country_code_case_insensitive(self):
+		"""DB may return lowercase 'us' — must still apply validation."""
+		doc = _MockAddress(country="United States", state=None, taxjar_state_code="CA", pincode="90210")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "us")
+
+	# Canada — only state is mandatory; taxjar_state_code and pincode are not
+
+	def test_canada_missing_state_throws(self):
+		doc = _MockAddress(country="Canada", state=None, taxjar_state_code=None, pincode="M5H 2N2")
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "CA")
+
+	def test_canada_state_present_passes(self):
+		doc = _MockAddress(country="Canada", state="Ontario", taxjar_state_code=None, pincode=None)
+		self._call(doc, "CA")  # must not raise
+
+	def test_canada_missing_taxjar_state_code_does_not_throw(self):
+		"""taxjar_state_code is US-only — missing value is fine for Canada."""
+		doc = _MockAddress(country="Canada", state="Ontario", taxjar_state_code=None, pincode="M5H 2N2")
+		self._call(doc, "CA")  # must not raise
+
+	def test_canada_missing_pincode_does_not_throw(self):
+		"""Pincode is mandatory for US only."""
+		doc = _MockAddress(country="Canada", state="Ontario", taxjar_state_code=None, pincode=None)
+		self._call(doc, "CA")  # must not raise
+
+	def test_canada_country_code_case_insensitive(self):
+		"""DB may return lowercase 'ca' — must still enforce state."""
+		doc = _MockAddress(country="Canada", state=None)
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			self._call(doc, "ca")
+
+	# Other countries — no mandatory rules apply
+
+	def test_other_country_no_fields_required(self):
+		doc = _MockAddress(country="Germany", state=None, taxjar_state_code=None, pincode=None)
+		self._call(doc, "DE")  # must not raise
+
+	def test_uk_no_fields_required(self):
+		doc = _MockAddress(country="United Kingdom", state=None, taxjar_state_code=None, pincode=None)
+		self._call(doc, "GB")  # must not raise
+
+
 # ── Phase 3: Address desk client script ──────────────────────────────────────
 
 class TestAddressClientScript(UnitTestCase):
@@ -795,17 +913,36 @@ class TestAddressClientScript(UnitTestCase):
 	def test_address_js_makes_pincode_mandatory_for_us(self):
 		"""pincode must be set as required when country is United States."""
 		js = self._read_js()
-		self.assertIn("_set_us_mandatory_fields", js)
+		self.assertIn("_set_taxjar_mandatory_fields", js)
 		self.assertIn('"pincode"', js)
 		self.assertIn("reqd", js)
 
 	def test_address_js_mandatory_applied_on_refresh_and_country_change(self):
-		"""_set_us_mandatory_fields must be called from both refresh and country handlers."""
+		"""_set_taxjar_mandatory_fields must be called from both refresh and country handlers."""
 		js = self._read_js()
 		refresh_idx = js.index("refresh(frm)")
 		country_idx = js.index("country(frm)")
-		self.assertGreater(js.index("_set_us_mandatory_fields", refresh_idx), refresh_idx)
-		self.assertGreater(js.index("_set_us_mandatory_fields", country_idx), country_idx)
+		self.assertGreater(js.index("_set_taxjar_mandatory_fields", refresh_idx), refresh_idx)
+		self.assertGreater(js.index("_set_taxjar_mandatory_fields", country_idx), country_idx)
+
+	def test_address_js_makes_state_mandatory_for_us_and_ca(self):
+		"""state must become required for both United States and Canada."""
+		js = self._read_js()
+		self.assertIn('"state"', js)
+		self.assertIn("Canada", js)
+
+	def test_address_js_makes_taxjar_state_code_mandatory_for_us(self):
+		"""taxjar_state_code reqd must be toggled (US only, field is hidden for CA)."""
+		js = self._read_js()
+		self.assertIn('"taxjar_state_code"', js)
+		# reqd is toggled based on is_us, not needs_state
+		self.assertIn("is_us", js)
+
+	def test_hooks_registers_address_validate(self):
+		"""hooks.py must declare an Address validate doc event."""
+		from taxjar_integration import hooks
+		self.assertIn("Address", hooks.doc_events)
+		self.assertIn("validate", hooks.doc_events["Address"])
 
 
 # ── Nexus HTML renderer — JS content ─────────────────────────────────────────
