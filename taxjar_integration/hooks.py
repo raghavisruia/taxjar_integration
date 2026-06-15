@@ -141,6 +141,7 @@ doc_events = {
 scheduler_events = {
 	"daily": [
 		"taxjar_integration.taxjar_integration.tasks.purge_old_api_logs",
+		"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
 	],
 }
 

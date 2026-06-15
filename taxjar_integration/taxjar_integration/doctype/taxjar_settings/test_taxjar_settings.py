@@ -993,3 +993,91 @@ class TestNexusHtmlRenderer(UnitTestCase):
 		"""Table wrapper must use overflow-x: auto for narrow-screen support."""
 		js = self._read_js()
 		self.assertIn("overflow-x: auto", js)
+
+
+# ── Phase 1: sync_nexus_list scheduled task ──────────────────────────────────
+
+class TestSyncNexusList(UnitTestCase):
+	"""Tests for the daily scheduled task that refreshes nexus from TaxJar."""
+
+	def _make_settings_doc(self, calculate_tax=1, create_transactions=0, has_company_config=True):
+		doc = MagicMock()
+		doc.taxjar_calculate_tax = calculate_tax
+		doc.taxjar_create_transactions = create_transactions
+		doc.company_config = [MagicMock()] if has_company_config else []
+		return doc
+
+	def _call(self, doc):
+		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
+		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc):
+			sync_nexus_list()
+
+	# Guard: features disabled
+
+	def test_skips_when_both_features_disabled(self):
+		"""No API call when neither calculate_tax nor create_transactions is on."""
+		doc = self._make_settings_doc(calculate_tax=0, create_transactions=0)
+		self._call(doc)
+		doc.update_nexus_list.assert_not_called()
+
+	def test_runs_when_only_calculate_tax_enabled(self):
+		doc = self._make_settings_doc(calculate_tax=1, create_transactions=0)
+		self._call(doc)
+		doc.update_nexus_list.assert_called_once()
+
+	def test_runs_when_only_create_transactions_enabled(self):
+		doc = self._make_settings_doc(calculate_tax=0, create_transactions=1)
+		self._call(doc)
+		doc.update_nexus_list.assert_called_once()
+
+	def test_runs_when_both_features_enabled(self):
+		doc = self._make_settings_doc(calculate_tax=1, create_transactions=1)
+		self._call(doc)
+		doc.update_nexus_list.assert_called_once()
+
+	# Guard: no company config
+
+	def test_skips_when_no_company_config(self):
+		"""No API call when company_config table is empty."""
+		doc = self._make_settings_doc(calculate_tax=1, has_company_config=False)
+		self._call(doc)
+		doc.update_nexus_list.assert_not_called()
+
+	# Error handling
+
+	def test_catches_exception_and_logs_error(self):
+		"""Exceptions from update_nexus_list must be caught and logged, not re-raised."""
+		doc = self._make_settings_doc(calculate_tax=1)
+		doc.update_nexus_list.side_effect = Exception("TaxJar API timeout")
+
+		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
+		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_traceback", return_value="traceback"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.log_error") as mock_log:
+			sync_nexus_list()  # must not raise
+
+		mock_log.assert_called_once_with("traceback", "TaxJar: Nexus sync failed")
+
+	def test_does_not_reraise_exception(self):
+		"""Scheduler must not crash if TaxJar is unreachable."""
+		doc = self._make_settings_doc(calculate_tax=1)
+		doc.update_nexus_list.side_effect = Exception("Network error")
+
+		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
+		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_traceback", return_value="tb"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.log_error"):
+			try:
+				sync_nexus_list()
+			except Exception:
+				self.fail("sync_nexus_list() raised an exception — scheduler would crash")
+
+	# Hooks registration
+
+	def test_hooks_registers_sync_nexus_list_as_daily_job(self):
+		"""hooks.py must declare sync_nexus_list in scheduler_events['daily']."""
+		from taxjar_integration import hooks
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
+			hooks.scheduler_events.get("daily", []),
+		)
