@@ -6,4 +6,3 @@ tags
 node_modules
 .vscode/settings.json
 taxjar_integration/taxjar_integration/demo_invoice.py
-*.md
