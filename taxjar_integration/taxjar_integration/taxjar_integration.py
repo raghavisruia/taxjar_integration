@@ -149,6 +149,8 @@ def _write_taxjar_ui_log(log_data):
 			if log_data.get("error") is not None
 			else None,
 		}
+	# ignore_permissions: log writes must succeed regardless of the triggering user's role.
+	# TaxJar API Log is read-restricted to System Manager; this does not grant the user read access.
 	).insert(ignore_permissions=True)
 
 

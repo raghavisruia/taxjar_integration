@@ -138,23 +138,11 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-#	"all": [
-#		"taxjar_integration.tasks.all"
-#	],
-#	"daily": [
-#		"taxjar_integration.tasks.daily"
-#	],
-#	"hourly": [
-#		"taxjar_integration.tasks.hourly"
-#	],
-#	"weekly": [
-#		"taxjar_integration.tasks.weekly"
-#	],
-#	"monthly": [
-#		"taxjar_integration.tasks.monthly"
-#	],
-# }
+scheduler_events = {
+	"daily": [
+		"taxjar_integration.taxjar_integration.tasks.purge_old_api_logs",
+	],
+}
 
 # Testing
 # -------
@@ -183,26 +171,14 @@ doc_events = {
 # User Data Protection
 # --------------------
 
-# user_data_fields = [
-#	{
-#		"doctype": "{doctype_1}",
-#		"filter_by": "{filter_by}",
-#		"redact_fields": ["{field_1}", "{field_2}"],
-#		"partial": 1,
-#	},
-#	{
-#		"doctype": "{doctype_2}",
-#		"filter_by": "{filter_by}",
-#		"partial": 1,
-#	},
-#	{
-#		"doctype": "{doctype_3}",
-#		"strict": False,
-#	},
-#	{
-#		"doctype": "{doctype_4}"
-#	}
-# ]
+user_data_fields = [
+	{
+		"doctype": "TaxJar API Log",
+		"filter_by": "reference_name",
+		"redact_fields": ["payload", "response"],
+		"partial": 1,
+	},
+]
 
 # Authentication and authorization
 # --------------------------------
