@@ -65,6 +65,14 @@ class TaxJarSettings(Document):
 		elif fields_already_exist:
 			toggle_tax_category_fields(hidden=1)
 
+		# Auto-fetch nexus when first configured: features on, company config present, nexus empty.
+		if features_enabled and self.company_config and not self.nexus:
+			frappe.enqueue(
+				"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
+				queue="short",
+				now=frappe.flags.in_test,
+			)
+
 	def validate(self):
 		if not (self.taxjar_calculate_tax or self.taxjar_create_transactions):
 			return

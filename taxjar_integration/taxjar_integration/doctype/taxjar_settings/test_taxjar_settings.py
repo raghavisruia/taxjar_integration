@@ -1081,3 +1081,88 @@ class TestSyncNexusList(UnitTestCase):
 			"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
 			hooks.scheduler_events.get("daily", []),
 		)
+
+
+# ── Phase 2: auto-enqueue nexus sync on first configuration ──────────────────
+
+class TestAutoNexusEnqueue(UnitTestCase):
+	"""
+	Tests for the on_update auto-enqueue: nexus is fetched in the background
+	the first time settings are saved with features + company config + empty nexus.
+	"""
+
+	def _settings(self, calculate_tax=1, create_transactions=0, has_company_config=True, has_nexus=False):
+		"""Return a live TaxJar Settings single doc wired up for the test scenario."""
+		doc = frappe.get_single("TaxJar Settings")
+		doc.taxjar_calculate_tax = calculate_tax
+		doc.taxjar_create_transactions = create_transactions
+		if has_company_config:
+			doc.set("company_config", [{"company": "_Test Company", "tax_account_head": "Tax - TC", "shipping_account_head": "Freight - TC"}])
+		else:
+			doc.set("company_config", [])
+		if has_nexus:
+			doc.set("nexus", [{"company": "_Test Company", "region": "California", "region_code": "CA", "country": "United States", "country_code": "US"}])
+		else:
+			doc.set("nexus", [])
+		return doc
+
+	def _call_on_update(self, doc):
+		"""Call on_update with frappe.flags.in_test=True and enqueue mocked."""
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.enqueue") as mock_enqueue, \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.exists", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.toggle_tax_category_fields"):
+			doc.on_update()
+		return mock_enqueue
+
+	# Trigger conditions
+
+	def test_enqueues_when_features_enabled_config_present_nexus_empty(self):
+		"""The happy path: first save after setup should trigger a background nexus fetch."""
+		doc = self._settings(calculate_tax=1, has_company_config=True, has_nexus=False)
+		mock_enqueue = self._call_on_update(doc)
+		mock_enqueue.assert_called_once()
+		call_args = mock_enqueue.call_args
+		self.assertIn("sync_nexus_list", call_args[0][0])
+
+	def test_enqueues_when_only_create_transactions_enabled(self):
+		"""create_transactions alone (without calculate_tax) should also trigger auto-fetch."""
+		doc = self._settings(calculate_tax=0, create_transactions=1, has_company_config=True, has_nexus=False)
+		mock_enqueue = self._call_on_update(doc)
+		mock_enqueue.assert_called_once()
+
+	# Guard: nexus already populated
+
+	def test_does_not_enqueue_when_nexus_already_populated(self):
+		"""If nexus rows exist the fetch must not fire — avoids redundant API call on every save."""
+		doc = self._settings(calculate_tax=1, has_company_config=True, has_nexus=True)
+		mock_enqueue = self._call_on_update(doc)
+		# enqueue may be called for the product_tax_categories background job — filter to nexus call only
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(len(nexus_calls), 0)
+
+	# Guard: features disabled
+
+	def test_does_not_enqueue_when_features_disabled(self):
+		"""No enqueue when both checkboxes are off."""
+		doc = self._settings(calculate_tax=0, create_transactions=0, has_company_config=True, has_nexus=False)
+		mock_enqueue = self._call_on_update(doc)
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(len(nexus_calls), 0)
+
+	# Guard: no company config
+
+	def test_does_not_enqueue_when_company_config_empty(self):
+		"""No company config means update_nexus_list would fail — skip the enqueue."""
+		doc = self._settings(calculate_tax=1, has_company_config=False, has_nexus=False)
+		mock_enqueue = self._call_on_update(doc)
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(len(nexus_calls), 0)
+
+	# Queue selection
+
+	def test_enqueue_uses_short_queue(self):
+		"""Nexus fetch should go to the short queue — it completes in seconds."""
+		doc = self._settings(calculate_tax=1, has_company_config=True, has_nexus=False)
+		mock_enqueue = self._call_on_update(doc)
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(nexus_calls[0][1]["queue"], "short")
