@@ -4,7 +4,10 @@
 
 import json
 import os
+import re
 from pathlib import Path
+
+_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
@@ -99,12 +102,16 @@ class TaxJarSettings(Document):
 				raise
 
 			for address in nexus:
+				region_code = (address.region_code or "").strip().upper()
+				country_code = (address.country_code or "").strip().upper()
+				if not _CODE_RE.match(region_code) or not _CODE_RE.match(country_code):
+					continue
 				self.append("nexus", {
 					"company": config.company,
 					"region": address.region,
-					"region_code": address.region_code,
+					"region_code": region_code,
 					"country": address.country,
-					"country_code": address.country_code,
+					"country_code": country_code,
 				})
 
 		self.save()

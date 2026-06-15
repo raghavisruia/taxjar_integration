@@ -86,10 +86,10 @@ function _render_nexus_html(frm) {
 			const cell = is_last ? td_last_style : td_style;
 			return `
 				<tr>
-					<td style="${cell}">${r.region || '—'}</td>
-					<td style="${cell}"><code>${r.region_code || '—'}</code></td>
-					<td style="${cell}">${r.country || '—'}</td>
-					<td style="${cell}"><code>${r.country_code || '—'}</code></td>
+					<td style="${cell}">${frappe.utils.escape_html(r.region || '—')}</td>
+					<td style="${cell}"><code>${frappe.utils.escape_html(r.region_code || '—')}</code></td>
+					<td style="${cell}">${frappe.utils.escape_html(r.country || '—')}</td>
+					<td style="${cell}"><code>${frappe.utils.escape_html(r.country_code || '—')}</code></td>
 				</tr>`;
 		}).join('');
 

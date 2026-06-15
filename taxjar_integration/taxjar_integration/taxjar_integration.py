@@ -316,7 +316,7 @@ def create_transaction(doc, method):
 			context={"doctype": doc.doctype, "name": doc.name},
 		)
 		frappe.throw(_(sanitize_error_response(err)))
-	except Exception as ex:
+	except Exception:
 		log_taxjar_call(
 			action="create_transaction",
 			status="error",
@@ -324,7 +324,7 @@ def create_transaction(doc, method):
 			error=traceback.format_exc(),
 			context={"doctype": doc.doctype, "name": doc.name},
 		)
-		print(traceback.format_exc(ex))
+		_get_taxjar_logger().error(traceback.format_exc())
 
 
 def delete_transaction(doc, method):
@@ -642,7 +642,7 @@ def get_company_address_details(doc):
 
 @frappe.whitelist()
 def check_nexus(shipping_address_name):
-	if not shipping_address_name:
+	if not isinstance(shipping_address_name, str) or not shipping_address_name.strip():
 		return
 
 	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
@@ -734,8 +734,9 @@ def validate_address(doc, method):
 
 
 def sanitize_error_response(response):
-	response = response.full_response.get("detail")
-	response = response.replace("_", " ")
+	full = getattr(response, "full_response", None) or {}
+	detail = full.get("detail") or "An unexpected error occurred. Please try again."
+	detail = detail.replace("_", " ")
 
 	sanitized_responses = {
 		"to zip": "Zipcode",
@@ -745,6 +746,6 @@ def sanitize_error_response(response):
 	}
 
 	for k, v in sanitized_responses.items():
-		response = response.replace(k, v)
+		detail = detail.replace(k, v)
 
-	return response
+	return detail
