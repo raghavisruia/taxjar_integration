@@ -36,6 +36,7 @@ class TaxJarSettings(Document):
 		api_mode: DF.Literal["", "Live", "Sandbox"]
 		company_config: DF.Table[TaxJarCompanyConfig]
 		enable_taxjar_logging: DF.Check
+		log_retention_days: DF.Int
 		nexus: DF.Table[TaxJarNexus]
 		table_hvjw: DF.Table[TaxJarAPICredential]
 		taxjar_calculate_tax: DF.Check

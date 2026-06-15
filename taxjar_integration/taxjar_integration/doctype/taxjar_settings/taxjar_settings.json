@@ -56,13 +56,14 @@
   },
   {
    "default": "0",
-   "description": "Records API requests, responses, and errors in <a href=\"/desk/taxjar-api-log\" rel=\"noopener noreferrer\">TaxJar API Log</a>. Logs contain customer PII (addresses). Enable only when needed for debugging.",
+   "description": "Records API requests, responses, and errors in <a href=\"/desk/taxjar-api-log\" rel=\"noopener noreferrer\">TaxJar API Log</a>. ",
    "fieldname": "enable_taxjar_logging",
    "fieldtype": "Check",
    "label": "Enable API Logs"
   },
   {
    "default": "90",
+   "depends_on": "eval: doc.enable_taxjar_logging",
    "description": "Automatically delete TaxJar API Log entries older than this many days. Set to 0 to disable auto-deletion.",
    "fieldname": "log_retention_days",
    "fieldtype": "Int",
@@ -70,8 +71,7 @@
   },
   {
    "fieldname": "configuration",
-   "fieldtype": "Section Break",
-   "label": "Accounting Configuration"
+   "fieldtype": "Section Break"
   },
   {
    "fieldname": "company_config",
@@ -130,7 +130,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-06-11 16:28:27.556077",
+ "modified": "2026-06-15 08:37:47.275694",
  "modified_by": "Administrator",
  "module": "Taxjar Integration",
  "name": "TaxJar Settings",
