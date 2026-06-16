@@ -115,9 +115,21 @@ function _render_nexus_html(frm) {
 	wrapper.html(html);
 }
 
+const API_MODE_DESCRIPTIONS = {
+	Sandbox: 'Transactions are not sent to TaxJar and API quota is not affected.',
+	Live: 'Transactions are sent to TaxJar for reporting and API quota is affected.',
+};
+
+function _set_api_mode_description(frm) {
+	const desc = API_MODE_DESCRIPTIONS[frm.doc.api_mode]
+		|| 'Select an API Mode to use TaxJar API Features';
+	frm.set_df_property('api_mode', 'description', desc);
+}
+
 frappe.ui.form.on('TaxJar Settings', {
 	refresh(frm) {
 		_render_nexus_html(frm);
+		_set_api_mode_description(frm);
 
 		const account_query = (doc, cdt, cdn) => {
 			const row = locals[cdt][cdn];
@@ -125,6 +137,10 @@ frappe.ui.form.on('TaxJar Settings', {
 		};
 		frm.set_query('tax_account_head', 'company_config', account_query);
 		frm.set_query('shipping_account_head', 'company_config', account_query);
+	},
+
+	api_mode(frm) {
+		_set_api_mode_description(frm);
 	},
 
 	update_nexus_list_btn(frm) {
