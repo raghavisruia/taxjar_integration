@@ -116,13 +116,13 @@ function _render_nexus_html(frm) {
 }
 
 const API_MODE_DESCRIPTIONS = {
-	Sandbox: 'Transactions are not sent to TaxJar and API quota is not affected.',
-	Live: 'Transactions are sent to TaxJar for reporting and API quota is affected.',
+	Sandbox: 'Requests & response payloads are validated. Tax rates might be stale and no transactions are recorded. API calls does not consume plan quota.',
+	Live: 'Sales tax calculations based on nexus, transactions are recorded for reporting and auto-filing. API calls consume plan quota.',
 };
 
 function _set_api_mode_description(frm) {
 	const desc = API_MODE_DESCRIPTIONS[frm.doc.api_mode]
-		|| 'Select an API Mode to use TaxJar API Features';
+		|| 'Select a mode to use TaxJar API Features';
 	frm.set_df_property('api_mode', 'description', desc);
 }
 
