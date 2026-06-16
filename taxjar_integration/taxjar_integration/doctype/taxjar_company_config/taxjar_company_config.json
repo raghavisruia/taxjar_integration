@@ -1,6 +1,6 @@
 {
  "actions": [],
- "creation": "2026-06-09 00:00:00.000000",
+ "creation": "2026-06-09 00:00:00",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
@@ -19,6 +19,7 @@
    "reqd": 1
   },
   {
+   "description": "Sales Tax Ledger where the tax liability will accumulate",
    "fieldname": "tax_account_head",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -27,6 +28,7 @@
    "reqd": 1
   },
   {
+   "description": "Ledger for booking shipping charges to customers",
    "fieldname": "shipping_account_head",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -39,7 +41,7 @@
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-06-09 00:00:00.000000",
+ "modified": "2026-06-16 12:25:04.020147",
  "modified_by": "Administrator",
  "module": "Taxjar Integration",
  "name": "TaxJar Company Config",

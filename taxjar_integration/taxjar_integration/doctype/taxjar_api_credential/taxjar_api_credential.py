@@ -16,10 +16,10 @@ class TaxJarAPICredential(Document):
 
 		company: DF.Link | None
 		live_token: DF.Password | None
-		sandbox_token: DF.Password | None
 		parent: DF.Data
 		parentfield: DF.Data
 		parenttype: DF.Data
+		sandbox_token: DF.Password | None
 	# end: auto-generated types
 
 	pass

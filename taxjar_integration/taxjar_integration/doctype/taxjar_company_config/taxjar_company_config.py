@@ -11,11 +11,11 @@ class TaxJarCompanyConfig(Document):
 		from frappe.types import DF
 
 		company: DF.Link
-		shipping_account_head: DF.Link
-		tax_account_head: DF.Link
 		parent: DF.Data
 		parentfield: DF.Data
 		parenttype: DF.Data
+		shipping_account_head: DF.Link
+		tax_account_head: DF.Link
 	# end: auto-generated types
 
 	pass
