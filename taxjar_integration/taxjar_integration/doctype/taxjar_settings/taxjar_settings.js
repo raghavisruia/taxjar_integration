@@ -150,6 +150,7 @@ frappe.ui.form.on('TaxJar Settings', {
 			callback: () => {
 				frm.refresh();
 				_render_nexus_html(frm);
+				frappe.show_alert({ message: __('Nexus regions fetched and updated.'), indicator: 'green' }, 5);
 			},
 		});
 	},
