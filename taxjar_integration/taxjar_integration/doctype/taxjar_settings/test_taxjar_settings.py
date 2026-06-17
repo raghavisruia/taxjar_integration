@@ -9,16 +9,24 @@ from frappe.tests import UnitTestCase
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
 	TAXJAR_ROW_DESCRIPTION,
+	_format_address_suggestion,
 	_get_customer_name,
+	_is_taxjar_enabled,
 	_remove_taxjar_rows,
+	_validate_address_with_taxjar,
 	check_for_nexus,
 	check_sales_tax_exemption,
+	create_transaction,
+	delete_transaction,
 	get_company_config,
+	get_line_item_dict,
 	on_customer_update,
 	set_sales_tax,
 	sync_customer_to_taxjar,
+	validate_tax_request,
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+	TaxJarSettings,
 	_US_STATE_CODE_OPTIONS,
 	make_custom_fields,
 )
@@ -70,6 +78,8 @@ class _FakeDoc:
 		self.name = "SINV-TEST-001"
 		self.docstatus = 0
 		self.is_return = False
+		self.return_against = None
+		self.posting_date = "2025-06-01"
 		self.net_total = 1000.0
 		self.total = 1000.0
 		self.exempt_from_sales_tax = 0
@@ -432,6 +442,13 @@ class TestCheckForNexus(UnitTestCase):
 
 # ── Phase 2: set_sales_tax — double-tax fix ───────────────────────────────────
 
+def _no_cache():
+	"""Return a mock frappe.cache() that always misses."""
+	mock_cache = MagicMock()
+	mock_cache.get_value.return_value = None
+	return mock_cache
+
+
 class TestSetSalesTax(UnitTestCase):
 
 	def test_replaces_template_row_not_duplicates(self):
@@ -448,7 +465,8 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=False), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
 		tax_rows = [t for t in doc.taxes if t.account_head == "Sales Tax - TC"]
@@ -470,7 +488,8 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=False), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
 		tax_rows = [t for t in doc.taxes if t.account_head == "Sales Tax - TC"]
@@ -769,6 +788,9 @@ class TestValidateAddress(UnitTestCase):
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
 			return_value=country_code,
+		), patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled",
+			return_value=False,
 		):
 			validate_address(doc, None)
 
@@ -1531,3 +1553,332 @@ class TestTaxJarCustomerExemptRegion(UnitTestCase):
 		field = meta.get_field("state")
 		self.assertIsNotNone(field)
 		self.assertEqual(field.fieldtype, "Select")
+
+
+# ── Phase 1: Transaction Compliance (Items 1, 2, 3, 4) ──────────────────────
+
+
+class TestCreateTransactionCompliance(UnitTestCase):
+
+	def _make_submit_doc(self, is_return=False, return_against=None, sales_tax=85.0):
+		doc = _make_doc(
+			taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, sales_tax)] if sales_tax else [],
+		)
+		doc.docstatus = 1
+		doc.posting_date = "2025-05-31"
+		doc.is_return = is_return
+		doc.return_against = return_against
+		return doc
+
+	def test_transaction_date_uses_posting_date(self):
+		"""transaction_date should be doc.posting_date, not today()."""
+		doc = self._make_submit_doc()
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			create_transaction(doc, None)
+
+		payload = mock_client.create_order.call_args[0][0]
+		self.assertEqual(payload["transaction_date"], "2025-05-31")
+
+	def test_refund_includes_transaction_reference_id(self):
+		"""Refunds must include transaction_reference_id linking to the original order."""
+		doc = self._make_submit_doc(is_return=True, return_against="SINV-ORIG-001")
+		mock_client = MagicMock()
+		mock_client.create_refund.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 0, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			create_transaction(doc, None)
+
+		payload = mock_client.create_refund.call_args[0][0]
+		self.assertEqual(payload["transaction_reference_id"], "SINV-ORIG-001")
+
+	def test_zero_tax_order_still_pushed(self):
+		"""$0-tax orders must still be pushed to TaxJar for nexus tracking."""
+		doc = self._make_submit_doc(sales_tax=0)
+		doc.posting_date = "2025-06-01"
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 0, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			create_transaction(doc, None)
+
+		mock_client.create_order.assert_called_once()
+		payload = mock_client.create_order.call_args[0][0]
+		self.assertEqual(payload["sales_tax"], 0)
+
+	def test_provider_field_in_payload(self):
+		"""Provider should be 'ERPNext' in all transaction payloads."""
+		doc = self._make_submit_doc()
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			create_transaction(doc, None)
+
+		payload = mock_client.create_order.call_args[0][0]
+		self.assertEqual(payload["provider"], "ERPNext")
+
+
+class TestDeleteTransactionCompliance(UnitTestCase):
+
+	def test_order_calls_delete_order(self):
+		doc = _make_doc()
+		doc.is_return = False
+		mock_client = MagicMock()
+		mock_client.delete_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			delete_transaction(doc, None)
+
+		mock_client.delete_order.assert_called_once_with(doc.name)
+		mock_client.delete_refund.assert_not_called()
+
+	def test_return_calls_delete_refund(self):
+		doc = _make_doc()
+		doc.is_return = True
+		mock_client = MagicMock()
+		mock_client.delete_refund.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			delete_transaction(doc, None)
+
+		mock_client.delete_refund.assert_called_once_with(doc.name)
+		mock_client.delete_order.assert_not_called()
+
+
+# ── Phase 2: Payload Enrichment (Items 7, 8) ────────────────────────────────
+
+
+class TestGetLineItemDiscount(UnitTestCase):
+
+	def test_discount_when_price_list_rate_higher(self):
+		item = MagicMock()
+		item.get.side_effect = lambda f, d=None: {
+			"idx": 1, "qty": 2, "rate": 80.0, "price_list_rate": 100.0,
+			"product_tax_category": None, "item_code": None, "tax_collectable": 0,
+		}.get(f, d)
+		result = get_line_item_dict(item, 0)
+		self.assertEqual(result["unit_price"], 100.0)
+		self.assertEqual(result["discount"], 20.0)
+
+	def test_no_discount_when_no_price_list(self):
+		item = MagicMock()
+		item.get.side_effect = lambda f, d=None: {
+			"idx": 1, "qty": 1, "rate": 50.0, "price_list_rate": 0,
+			"product_tax_category": None, "item_code": None, "tax_collectable": 0,
+		}.get(f, d)
+		result = get_line_item_dict(item, 0)
+		self.assertEqual(result["unit_price"], 50.0)
+		self.assertNotIn("discount", result)
+
+	def test_no_discount_when_same_rate(self):
+		item = MagicMock()
+		item.get.side_effect = lambda f, d=None: {
+			"idx": 1, "qty": 1, "rate": 100.0, "price_list_rate": 100.0,
+			"product_tax_category": None, "item_code": None, "tax_collectable": 0,
+		}.get(f, d)
+		result = get_line_item_dict(item, 0)
+		self.assertEqual(result["unit_price"], 100.0)
+		self.assertNotIn("discount", result)
+
+
+# ── Phase 3: Token Validation (Item 5) ──────────────────────────────────────
+
+
+class TestTokenValidation(UnitTestCase):
+
+	def test_valid_token_passes(self):
+		"""No error when categories() succeeds."""
+		mock_client = MagicMock()
+		mock_client.categories.return_value = []
+
+		settings = MagicMock()
+		settings.taxjar_calculate_tax = 1
+		settings.taxjar_create_transactions = 0
+		settings.api_mode = "Sandbox"
+		settings.table_hvjw = [MagicMock(company="Test Co", sandbox_token="sk_test")]
+
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client", return_value=mock_client):
+			settings._validate_tokens = TaxJarSettings._validate_tokens.__get__(settings)
+			settings._validate_tokens()
+
+		mock_client.categories.assert_called_once()
+
+	def test_invalid_token_throws(self):
+		"""401 response should throw."""
+		import taxjar.exceptions
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status": "401"}
+
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = err
+
+		settings = MagicMock()
+		settings.table_hvjw = [MagicMock(company="Test Co")]
+
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client", return_value=mock_client):
+			settings._validate_tokens = TaxJarSettings._validate_tokens.__get__(settings)
+			self.assertRaises(frappe.ValidationError, settings._validate_tokens)
+
+	def test_connection_error_warns_but_saves(self):
+		"""Connection error should warn, not throw."""
+		import taxjar.exceptions
+
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+
+		settings = MagicMock()
+		settings.table_hvjw = [MagicMock(company="Test Co")]
+
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.msgprint") as mock_msg:
+			settings._validate_tokens = TaxJarSettings._validate_tokens.__get__(settings)
+			settings._validate_tokens()  # should not raise
+
+		mock_msg.assert_called_once()
+
+
+# ── Phase 4: API Resilience (Items 6, 11) ────────────────────────────────────
+
+
+class TestValidateTaxRequestOutage(UnitTestCase):
+
+	def test_connection_error_returns_none_with_warning(self):
+		"""TaxJarConnectionError should return None and show msgprint, not throw."""
+		import taxjar.exceptions
+
+		mock_client = MagicMock()
+		mock_client.tax_for_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msg:
+			result = validate_tax_request({"dummy": True})
+
+		self.assertIsNone(result)
+		mock_msg.assert_called_once()
+		self.assertIn("unreachable", mock_msg.call_args[0][0].lower())
+
+
+class TestCreateTransactionOutage(UnitTestCase):
+
+	def test_connection_error_blocks_submission(self):
+		"""TaxJarConnectionError on submit should throw to block submission."""
+		import taxjar.exceptions
+
+		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 85.0)])
+		doc.docstatus = 1
+		doc.posting_date = "2025-06-01"
+
+		mock_client = MagicMock()
+		mock_client.create_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			self.assertRaises(frappe.ValidationError, create_transaction, doc, None)
+
+
+class TestDeleteTransactionOutage(UnitTestCase):
+
+	def test_connection_error_blocks_cancellation(self):
+		"""TaxJarConnectionError on cancel should throw to block cancellation."""
+		import taxjar.exceptions
+
+		doc = _make_doc()
+		doc.is_return = False
+
+		mock_client = MagicMock()
+		mock_client.delete_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			self.assertRaises(frappe.ValidationError, delete_transaction, doc, None)
+
+
+# ── Phase 5: Address Validation (Item 14) ────────────────────────────────────
+
+
+class TestAddressValidationWithTaxJar(UnitTestCase):
+
+	def _make_address_doc(self, country_code="US"):
+		doc = MagicMock()
+		doc.name = "ADDR-001"
+		doc.country = "United States" if country_code == "US" else "Germany"
+		doc.state = "Texas"
+		doc.city = "Austin"
+		doc.pincode = "78701"
+		doc.address_line1 = "123 Main St"
+		doc.get.side_effect = lambda f, d=None: getattr(doc, f, d)
+		return doc
+
+	def test_us_address_calls_validation_api(self):
+		mock_client = MagicMock()
+		mock_client.validate_address.return_value = []
+		doc = self._make_address_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			_validate_address_with_taxjar(doc)
+
+		mock_client.validate_address.assert_called_once()
+
+	def test_connection_error_does_not_block_save(self):
+		import taxjar.exceptions
+
+		mock_client = MagicMock()
+		mock_client.validate_address.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+		doc = self._make_address_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			_validate_address_with_taxjar(doc)  # should not raise
+
+	def test_validation_error_shows_warning(self):
+		import taxjar.exceptions
+
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"detail": "Invalid address"}
+
+		mock_client = MagicMock()
+		mock_client.validate_address.side_effect = err
+		doc = self._make_address_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msg:
+			_validate_address_with_taxjar(doc)
+
+		mock_msg.assert_called_once()
+
+	def test_format_address_suggestion(self):
+		match = MagicMock(street="123 Main St", city="Austin", state="TX", zip="78701", country="US")
+		result = _format_address_suggestion(match)
+		self.assertIn("Austin", result)
+		self.assertIn("TX", result)
+
+	def test_format_address_suggestion_empty(self):
+		match = MagicMock(spec=[])
+		result = _format_address_suggestion(match)
+		self.assertIsNone(result)

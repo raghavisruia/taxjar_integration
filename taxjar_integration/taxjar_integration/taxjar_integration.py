@@ -1,3 +1,4 @@
+import hashlib
 import json
 import traceback
 
@@ -253,15 +254,6 @@ def create_transaction(doc, method):
 		tax.tax_amount for tax in doc.taxes if tax.description == TAXJAR_ROW_DESCRIPTION
 	)
 
-	if not sales_tax:
-		log_taxjar_call(
-			action="create_transaction",
-			status="skipped",
-			error="No TaxJar-managed sales tax row found on document",
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
-		return
-
 	tax_dict = get_tax_data(doc)
 
 	if not tax_dict:
@@ -274,9 +266,13 @@ def create_transaction(doc, method):
 		return
 
 	tax_dict["transaction_id"] = doc.name
-	tax_dict["transaction_date"] = frappe.utils.today()
+	tax_dict["transaction_date"] = str(doc.posting_date)
 	tax_dict["sales_tax"] = sales_tax
 	tax_dict["amount"] = doc.total + tax_dict["shipping"]
+	tax_dict["provider"] = "ERPNext"
+
+	if doc.is_return and doc.return_against:
+		tax_dict["transaction_reference_id"] = doc.return_against
 
 	try:
 		if doc.is_return:
@@ -309,6 +305,17 @@ def create_transaction(doc, method):
 				response=response,
 				context={"doctype": doc.doctype, "name": doc.name},
 			)
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(
+			action="create_transaction",
+			status="error",
+			payload=tax_dict,
+			error="TaxJar API is unreachable",
+			context={"doctype": doc.doctype, "name": doc.name},
+		)
+		frappe.throw(_(
+			"TaxJar API is unreachable. The transaction cannot be submitted because it will not be recorded in TaxJar. Please try again later."
+		))
 	except taxjar.exceptions.TaxJarResponseError as err:
 		log_taxjar_call(
 			action="create_transaction",
@@ -330,7 +337,7 @@ def create_transaction(doc, method):
 
 
 def delete_transaction(doc, method):
-	"""Delete an existing TaxJar order transaction"""
+	"""Delete an existing TaxJar order or refund transaction."""
 	TAXJAR_CREATE_TRANSACTIONS = frappe.db.get_single_value(
 		"TaxJar Settings", "taxjar_create_transactions"
 	)
@@ -343,38 +350,28 @@ def delete_transaction(doc, method):
 	if not client:
 		return
 
+	is_refund = doc.is_return
+	action = "delete_refund" if is_refund else "delete_order"
+	payload = {"transaction_id": doc.name}
+	ctx = {"doctype": doc.doctype, "name": doc.name}
+
 	try:
-		log_taxjar_call(
-			action="delete_order",
-			status="request",
-			payload={"transaction_id": doc.name},
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
-		response = client.delete_order(doc.name)
-		log_taxjar_call(
-			action="delete_order",
-			status="success",
-			payload={"transaction_id": doc.name},
-			response=response,
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+		log_taxjar_call(action=action, status="request", payload=payload, context=ctx)
+		if is_refund:
+			response = client.delete_refund(doc.name)
+		else:
+			response = client.delete_order(doc.name)
+		log_taxjar_call(action=action, status="success", payload=payload, response=response, context=ctx)
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(action=action, status="error", payload=payload, error="TaxJar API is unreachable", context=ctx)
+		frappe.throw(_(
+			"TaxJar API is unreachable. Cannot cancel — the transaction deletion will not be recorded in TaxJar."
+		))
 	except taxjar.exceptions.TaxJarResponseError as err:
-		log_taxjar_call(
-			action="delete_order",
-			status="error",
-			payload={"transaction_id": doc.name},
-			error=getattr(err, "full_response", str(err)),
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+		log_taxjar_call(action=action, status="error", payload=payload, error=getattr(err, "full_response", str(err)), context=ctx)
 		raise
 	except Exception:
-		log_taxjar_call(
-			action="delete_order",
-			status="error",
-			payload={"transaction_id": doc.name},
-			error=traceback.format_exc(),
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+		log_taxjar_call(action=action, status="error", payload=payload, error=traceback.format_exc(), context=ctx)
 		raise
 
 
@@ -452,12 +449,20 @@ def get_line_item_dict(item, docstatus):
 		else None
 	)
 
+	unit_price = flt(item.get("rate"))
+	price_list_rate = flt(item.get("price_list_rate"))
+
 	tax_dict = dict(
 		id=item.get("idx"),
 		quantity=item.get("qty"),
-		unit_price=item.get("rate"),
 		product_tax_code=product_tax_code,
 	)
+
+	if price_list_rate and price_list_rate > unit_price:
+		tax_dict["unit_price"] = price_list_rate
+		tax_dict["discount"] = price_list_rate - unit_price
+	else:
+		tax_dict["unit_price"] = unit_price
 
 	if docstatus == 1:
 		tax_dict.update({"sales_tax": item.get("tax_collectable")})
@@ -530,7 +535,17 @@ def set_sales_tax(doc, method):
 	if not check_for_nexus(doc, tax_dict):
 		return
 
-	tax_data = validate_tax_request(tax_dict)
+	cache_key = "taxjar_tax:" + hashlib.md5(
+		json.dumps(tax_dict, sort_keys=True, default=str).encode()
+	).hexdigest()
+	cached = frappe.cache().get_value(cache_key)
+
+	if cached is not None:
+		tax_data = cached
+	else:
+		tax_data = validate_tax_request(tax_dict)
+		if tax_data is not None:
+			frappe.cache().set_value(cache_key, tax_data, expires_in_sec=300)
 	if tax_data is not None:
 		if not tax_data.amount_to_collect:
 			_remove_taxjar_rows(doc, company_config)
@@ -616,6 +631,19 @@ def validate_tax_request(tax_dict):
 	try:
 		log_taxjar_call(action="tax_for_order", status="request", payload=tax_dict)
 		tax_data = client.tax_for_order(tax_dict)
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(
+			action="tax_for_order",
+			status="error",
+			payload=tax_dict,
+			error="TaxJar API is unreachable",
+		)
+		frappe.msgprint(
+			_("TaxJar API is unreachable. Tax has not been calculated for this document."),
+			indicator="orange",
+			alert=True,
+		)
+		return None
 	except taxjar.exceptions.TaxJarResponseError as err:
 		log_taxjar_call(
 			action="tax_for_order",
@@ -742,6 +770,69 @@ def validate_address(doc, method):
 			frappe.throw(_("State Code is mandatory for United States addresses."))
 		if not doc.pincode:
 			frappe.throw(_("Postal Code is mandatory for United States addresses."))
+
+		if _is_taxjar_enabled():
+			_validate_address_with_taxjar(doc)
+
+
+def _is_taxjar_enabled():
+	return cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")) or \
+		cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions"))
+
+
+def _validate_address_with_taxjar(doc):
+	"""Call TaxJar's address validation endpoint for US addresses."""
+	client = get_client()
+	if not client:
+		return
+
+	address_data = {
+		"country": "US",
+		"state": doc.get("taxjar_state_code") or "",
+		"zip": doc.pincode or "",
+		"city": doc.city or "",
+		"street": doc.address_line1 or "",
+	}
+
+	ctx = {"doctype": "Address", "name": doc.name}
+
+	try:
+		log_taxjar_call(action="validate_address", status="request", payload=address_data, context=ctx)
+		result = client.validate_address(address_data)
+		log_taxjar_call(action="validate_address", status="success", payload=address_data, response=result, context=ctx)
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(action="validate_address", status="error", error="TaxJar API is unreachable", context=ctx)
+		return
+	except taxjar.exceptions.TaxJarResponseError as err:
+		log_taxjar_call(action="validate_address", status="error", error=getattr(err, "full_response", str(err)), context=ctx)
+		frappe.msgprint(
+			_("TaxJar could not validate this address: {0}").format(sanitize_error_response(err)),
+			indicator="orange",
+		)
+		return
+	except Exception:
+		log_taxjar_call(action="validate_address", status="error", error=traceback.format_exc(), context=ctx)
+		return
+
+	if hasattr(result, "__iter__"):
+		for match in result:
+			suggested = _format_address_suggestion(match)
+			if suggested:
+				frappe.msgprint(
+					_("TaxJar suggests: {0}").format(suggested),
+					indicator="blue",
+					title=_("Address Verification"),
+				)
+				break
+
+
+def _format_address_suggestion(match):
+	parts = []
+	for field in ("street", "city", "state", "zip", "country"):
+		val = getattr(match, field, None)
+		if val:
+			parts.append(str(val))
+	return ", ".join(parts) if parts else None
 
 
 def _get_customer_name(doc):

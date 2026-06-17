@@ -14,6 +14,8 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.model.document import Document
 from frappe.permissions import add_permission, update_permission_property
 
+import taxjar
+
 from taxjar_integration.taxjar_integration.taxjar_integration import get_client, log_taxjar_call
 
 
@@ -86,6 +88,29 @@ class TaxJarSettings(Document):
 		else:
 			if not any(cred.live_token for cred in (self.table_hvjw or [])):
 				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode."))
+
+		self._validate_tokens()
+
+	def _validate_tokens(self):
+		"""Test each credential by calling a lightweight TaxJar endpoint."""
+		for cred in self.table_hvjw or []:
+			company = cred.company
+			try:
+				test_client = get_client(company)
+				if test_client:
+					test_client.categories()
+			except taxjar.exceptions.TaxJarResponseError as err:
+				full = getattr(err, "full_response", None) or {}
+				status = full.get("status") if isinstance(full, dict) else None
+				if str(status) == "401":
+					frappe.throw(frappe._("Invalid API token for company {0}. Please check your credentials.").format(company))
+			except taxjar.exceptions.TaxJarConnectionError:
+				frappe.msgprint(
+					frappe._("Could not reach TaxJar to verify credentials for {0}. Token not validated.").format(company),
+					indicator="orange",
+				)
+			except Exception:
+				pass
 
 	@frappe.whitelist()
 	def update_nexus_list(self):
