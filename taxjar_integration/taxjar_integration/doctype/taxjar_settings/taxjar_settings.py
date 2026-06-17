@@ -210,6 +210,52 @@ def make_custom_fields(update=True):
 				options=_US_STATE_CODE_OPTIONS,
 			)
 		],
+		"Customer": [
+			dict(
+				fieldname="taxjar_section_break",
+				fieldtype="Section Break",
+				insert_after="default_commission_rate",
+				label="TaxJar Tax Exemption",
+				collapsible=1,
+			),
+			dict(
+				fieldname="taxjar_exemption_type",
+				fieldtype="Select",
+				insert_after="taxjar_section_break",
+				label="TaxJar Exemption Type",
+				options="\nwholesale\ngovernment\nother\nnon_exempt",
+				description="Maps to TaxJar's exemption_type. Leave blank for normal taxable customers.",
+			),
+			dict(
+				fieldname="taxjar_column_break",
+				fieldtype="Column Break",
+				insert_after="taxjar_exemption_type",
+			),
+			dict(
+				fieldname="taxjar_customer_id",
+				fieldtype="Data",
+				insert_after="taxjar_column_break",
+				label="TaxJar Customer ID",
+				read_only=1,
+				description="Auto-set on first sync to TaxJar. Used as customer_id in TaxJar API calls.",
+			),
+			dict(
+				fieldname="taxjar_exempt_regions",
+				fieldtype="Table",
+				insert_after="taxjar_customer_id",
+				label="Tax Exempt Regions",
+				options="TaxJar Customer Exempt Region",
+				description="States where this customer is exempt. Only applies when Exemption Type is set.",
+				depends_on="eval: doc.taxjar_exemption_type && doc.taxjar_exemption_type !== 'non_exempt'",
+			),
+			dict(
+				fieldname="taxjar_last_synced",
+				fieldtype="Datetime",
+				insert_after="taxjar_exempt_regions",
+				label="Last Synced to TaxJar",
+				read_only=1,
+			),
+		],
 	}
 	create_custom_fields(custom_fields, update=update)
 

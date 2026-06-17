@@ -422,6 +422,11 @@ def get_tax_data(doc):
 		"plugin": "erpnext",
 		"line_items": line_items,
 	}
+
+	customer_name = _get_customer_name(doc)
+	if customer_name:
+		tax_dict["customer_id"] = customer_name
+
 	return tax_dict
 
 
@@ -576,19 +581,23 @@ def check_for_nexus(doc, tax_dict):
 
 
 def check_sales_tax_exemption(doc, company_config):
-	"""Return True if the document or customer is exempt; zero out TaxJar rows if so."""
-	sales_tax_exempted = (
-		hasattr(doc, "exempt_from_sales_tax")
-		and doc.exempt_from_sales_tax
-		or frappe.db.has_column("Customer", "exempt_from_sales_tax")
-		and frappe.db.get_value("Customer", doc.customer, "exempt_from_sales_tax", cache=True)
-	)
+	"""Return True if the document or customer is blanket-exempt; remove TaxJar rows if so.
 
-	if sales_tax_exempted:
-		for tax in doc.taxes:
-			if tax.account_head == company_config.tax_account_head:
-				tax.tax_amount = 0
-				break
+	State-specific exemptions (via TaxJar Customer API exempt_regions) are NOT
+	handled here — they flow through to TaxJar via customer_id in the API payload.
+	"""
+	doc_exempt = hasattr(doc, "exempt_from_sales_tax") and doc.exempt_from_sales_tax
+
+	customer_name = _get_customer_name(doc)
+	customer_exempt = False
+	if not doc_exempt and customer_name:
+		customer_exempt = (
+			frappe.db.has_column("Customer", "exempt_from_sales_tax")
+			and frappe.db.get_value("Customer", customer_name, "exempt_from_sales_tax", cache=True)
+		)
+
+	if doc_exempt or customer_exempt:
+		_remove_taxjar_rows(doc, company_config)
 		doc.run_method("calculate_taxes_and_totals")
 		return True
 
@@ -735,6 +744,15 @@ def validate_address(doc, method):
 			frappe.throw(_("Postal Code is mandatory for United States addresses."))
 
 
+def _get_customer_name(doc):
+	"""Return the Customer name for a transaction document, or None."""
+	if doc.doctype == "Quotation":
+		if getattr(doc, "quotation_to", None) == "Customer":
+			return doc.party_name
+		return None
+	return getattr(doc, "customer", None)
+
+
 def sanitize_error_response(response):
 	full = getattr(response, "full_response", None) or {}
 	detail = full.get("detail") or "An unexpected error occurred. Please try again."
@@ -751,3 +769,92 @@ def sanitize_error_response(response):
 		detail = detail.replace(k, v)
 
 	return detail
+
+
+# ── TaxJar Customer API ──────────────────────────────────────────────────────
+
+
+@frappe.whitelist()
+def sync_customer_to_taxjar(customer_name, company=None):
+	"""Create or update a customer record in TaxJar.
+
+	Designed to run via frappe.enqueue (background) or called directly
+	from the client-side "Sync to TaxJar" button.
+	"""
+	client = get_client(company)
+	if not client:
+		log_taxjar_call(
+			action="sync_customer",
+			status="skipped",
+			error="TaxJar client is not configured",
+			context={"doctype": "Customer", "name": customer_name, "company": company},
+		)
+		return
+
+	customer_doc = frappe.get_doc("Customer", customer_name)
+	exemption_type = customer_doc.get("taxjar_exemption_type") or "non_exempt"
+
+	exempt_regions = [
+		{"country": r.country, "state": r.state}
+		for r in (customer_doc.get("taxjar_exempt_regions") or [])
+	]
+
+	customer_data = {
+		"customer_id": customer_name,
+		"exemption_type": exemption_type,
+		"name": customer_doc.customer_name,
+		"exempt_regions": exempt_regions,
+	}
+
+	ctx = {"doctype": "Customer", "name": customer_name, "company": company}
+
+	try:
+		log_taxjar_call(action="update_customer", status="request", payload=customer_data, context=ctx)
+		response = client.update_customer(customer_name, customer_data)
+		log_taxjar_call(action="update_customer", status="success", payload=customer_data, response=response, context=ctx)
+	except taxjar.exceptions.TaxJarResponseError as err:
+		full = getattr(err, "full_response", {}) or {}
+		if full.get("status") == 404:
+			try:
+				log_taxjar_call(action="create_customer", status="request", payload=customer_data, context=ctx)
+				response = client.create_customer(customer_data)
+				log_taxjar_call(action="create_customer", status="success", payload=customer_data, response=response, context=ctx)
+			except Exception:
+				log_taxjar_call(action="create_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
+				_get_taxjar_logger().error(traceback.format_exc())
+				return
+		else:
+			log_taxjar_call(action="update_customer", status="error", payload=customer_data, error=getattr(err, "full_response", str(err)), context=ctx)
+			_get_taxjar_logger().error(traceback.format_exc())
+			return
+	except Exception:
+		log_taxjar_call(action="sync_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
+		_get_taxjar_logger().error(traceback.format_exc())
+		return
+
+	frappe.db.set_value("Customer", customer_name, "taxjar_customer_id", customer_name, update_modified=False)
+	frappe.db.set_value("Customer", customer_name, "taxjar_last_synced", frappe.utils.now(), update_modified=False)
+
+
+def on_customer_update(doc, method):
+	"""Enqueue TaxJar customer sync when exemption fields are present."""
+	if not (
+		frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
+		or frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")
+	):
+		return
+
+	exemption_type = doc.get("taxjar_exemption_type")
+	if not exemption_type:
+		return
+
+	taxjar_settings = frappe.get_single("TaxJar Settings")
+	for config in taxjar_settings.company_config or []:
+		frappe.enqueue(
+			"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
+			customer_name=doc.name,
+			company=config.company,
+			queue="short",
+			deduplicate=True,
+			now=frappe.flags.in_test,
+		)

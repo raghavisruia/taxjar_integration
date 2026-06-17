@@ -48,6 +48,7 @@ required_apps = ["erpnext"]
 doctype_js = {
 	"Sales Invoice": "public/js/sales_invoice.js",
 	"Address": "public/js/address.js",
+	"Customer": "public/js/customer.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -84,7 +85,7 @@ doctype_js = {
 
 # before_install = "taxjar_integration.install.before_install"
 # after_install = "taxjar_integration.install.after_install"
-# after_migrate = ["taxjar_integration.setup.sync_desk_metadata"]
+after_migrate = ["taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_custom_fields"]
 
 # Uninstallation
 # ------------
@@ -132,6 +133,9 @@ doc_events = {
 	},
 	"Address": {
 		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_address"
+	},
+	"Customer": {
+		"on_update": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_update"
 	},
 }
 
