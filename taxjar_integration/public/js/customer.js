@@ -26,7 +26,7 @@ frappe.ui.form.on("Customer", {
 	},
 
 	taxjar_exemption_type(frm) {
-		if (!frm.doc.taxjar_exemption_type || frm.doc.taxjar_exemption_type === "non_exempt") {
+		if (!frm.doc.taxjar_exemption_type || frm.doc.taxjar_exemption_type === "Non Exempt") {
 			frm.clear_table("taxjar_exempt_regions");
 			frm.refresh_field("taxjar_exempt_regions");
 		}

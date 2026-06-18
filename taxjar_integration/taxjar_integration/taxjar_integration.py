@@ -864,6 +864,18 @@ def sanitize_error_response(response):
 
 # ── TaxJar Customer API ──────────────────────────────────────────────────────
 
+_EXEMPTION_TYPE_MAP = {
+	"Wholesale": "wholesale",
+	"Government": "government",
+	"Non Exempt": "non_exempt",
+	"Other": "other",
+}
+
+
+def _map_exemption_type(label):
+	"""Convert a human-readable exemption label to the TaxJar API value."""
+	return _EXEMPTION_TYPE_MAP.get(label, "non_exempt")
+
 
 @frappe.whitelist()
 def sync_customer_to_taxjar(customer_name, company=None):
@@ -883,7 +895,7 @@ def sync_customer_to_taxjar(customer_name, company=None):
 		return
 
 	customer_doc = frappe.get_doc("Customer", customer_name)
-	exemption_type = customer_doc.get("taxjar_exemption_type") or "non_exempt"
+	exemption_type = _map_exemption_type(customer_doc.get("taxjar_exemption_type"))
 
 	exempt_regions = [
 		{"country": r.country, "state": r.state}

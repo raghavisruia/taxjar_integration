@@ -239,16 +239,16 @@ def make_custom_fields(update=True):
 			dict(
 				fieldname="taxjar_section_break",
 				fieldtype="Section Break",
-				insert_after="default_commission_rate",
+				insert_after="tax_tab",
 				label="TaxJar Tax Exemption",
-				collapsible=1,
+				collapsible=0,
 			),
 			dict(
 				fieldname="taxjar_exemption_type",
 				fieldtype="Select",
 				insert_after="taxjar_section_break",
 				label="TaxJar Exemption Type",
-				options="\nwholesale\ngovernment\nother\nnon_exempt",
+				options="\nWholesale\nGovernment\nNon Exempt\nOther",
 				description="Maps to TaxJar's exemption_type. Leave blank for normal taxable customers.",
 			),
 			dict(
@@ -271,7 +271,7 @@ def make_custom_fields(update=True):
 				label="Tax Exempt Regions",
 				options="TaxJar Customer Exempt Region",
 				description="States where this customer is exempt. Only applies when Exemption Type is set.",
-				depends_on="eval: doc.taxjar_exemption_type && doc.taxjar_exemption_type !== 'non_exempt'",
+				depends_on="eval: doc.taxjar_exemption_type && doc.taxjar_exemption_type !== 'Non Exempt'",
 			),
 			dict(
 				fieldname="taxjar_last_synced",

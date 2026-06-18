@@ -1322,7 +1322,7 @@ class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
 
 class TestSyncCustomerToTaxJar(UnitTestCase):
 
-	def _make_customer_doc(self, exemption_type="wholesale", exempt_regions=None):
+	def _make_customer_doc(self, exemption_type="Wholesale", exempt_regions=None):
 		doc = MagicMock()
 		doc.customer_name = "Acme Corp"
 		doc.get.side_effect = lambda field, default=None: {
@@ -1428,7 +1428,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 	def test_skips_when_features_disabled(self):
 		doc = MagicMock()
-		doc.get.return_value = "wholesale"
+		doc.get.return_value = "Wholesale"
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
@@ -1449,7 +1449,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 	def test_enqueues_per_company(self):
 		doc = MagicMock()
 		doc.name = "CUST-001"
-		doc.get.return_value = "wholesale"
+		doc.get.return_value = "Wholesale"
 
 		config_a = MagicMock(company="Company A")
 		config_b = MagicMock(company="Company B")
@@ -1469,7 +1469,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 	def test_enqueue_uses_short_queue_and_deduplicate(self):
 		doc = MagicMock()
 		doc.name = "CUST-001"
-		doc.get.return_value = "government"
+		doc.get.return_value = "Government"
 
 		config = MagicMock(company="Test Co")
 		settings = MagicMock()
@@ -1503,7 +1503,7 @@ class TestCustomerCustomFields(UnitTestCase):
 		fields = self._get_customer_field_defs()
 		f = fields["taxjar_exemption_type"]
 		self.assertEqual(f["fieldtype"], "Select")
-		for opt in ("wholesale", "government", "other", "non_exempt"):
+		for opt in ("Wholesale", "Government", "Other", "Non Exempt"):
 			self.assertIn(opt, f["options"])
 
 	def test_exempt_regions_is_table(self):
