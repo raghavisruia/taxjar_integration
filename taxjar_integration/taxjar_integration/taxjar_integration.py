@@ -569,14 +569,17 @@ def set_sales_tax(doc, method):
 				doc.get("items")[cint(item.id) - 1].taxable_amount = item.taxable_amount
 
 			doc.run_method("calculate_taxes_and_totals")
+			doc.run_method("set_total_in_words")
 
 
 def _remove_taxjar_rows(doc, company_config):
-	"""Remove all sales tax rows owned by TaxJar for this company."""
+	"""Remove all sales tax rows owned by TaxJar for this company and recalculate totals."""
 	doc.taxes = [
 		tax for tax in doc.taxes
 		if tax.account_head != company_config.tax_account_head
 	]
+	doc.run_method("calculate_taxes_and_totals")
+	doc.run_method("set_total_in_words")
 
 
 def check_for_nexus(doc, tax_dict):
@@ -613,7 +616,6 @@ def check_sales_tax_exemption(doc, company_config):
 
 	if doc_exempt or customer_exempt:
 		_remove_taxjar_rows(doc, company_config)
-		doc.run_method("calculate_taxes_and_totals")
 		return True
 
 	return False
@@ -917,7 +919,7 @@ def sync_customer_to_taxjar(customer_name, company=None):
 		log_taxjar_call(action="update_customer", status="success", payload=customer_data, response=response, context=ctx)
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
-		if full.get("status") == 404:
+		if full.get("status_code") == 404:
 			try:
 				log_taxjar_call(action="create_customer", status="request", payload=customer_data, context=ctx)
 				response = client.create_customer(customer_data)
@@ -959,5 +961,6 @@ def on_customer_update(doc, method):
 			company=config.company,
 			queue="short",
 			deduplicate=True,
+			job_id=f"sync_customer_taxjar_{doc.name}_{config.company}",
 			now=frappe.flags.in_test,
 		)

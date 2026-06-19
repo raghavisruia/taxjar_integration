@@ -101,8 +101,8 @@ class TaxJarSettings(Document):
 					test_client.categories()
 			except taxjar.exceptions.TaxJarResponseError as err:
 				full = getattr(err, "full_response", None) or {}
-				status = full.get("status") if isinstance(full, dict) else None
-				if str(status) == "401":
+				status = full.get("status_code") if isinstance(full, dict) else None
+				if status == 401:
 					frappe.throw(frappe._("Invalid API token for company {0}. Please check your credentials.").format(company))
 			except taxjar.exceptions.TaxJarConnectionError:
 				frappe.msgprint(

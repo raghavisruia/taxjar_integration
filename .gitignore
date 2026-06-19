@@ -2,6 +2,7 @@
 *.pyc
 *.egg-info
 *.swp
+*.md
 tags
 node_modules
 .vscode/settings.json

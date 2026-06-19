@@ -1368,7 +1368,7 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 
 		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
-		err.full_response = {"status": 404}
+		err.full_response = {"status_code": 404}
 		mock_client.update_customer.side_effect = err
 		mock_client.create_customer.return_value = MagicMock()
 
@@ -1483,6 +1483,8 @@ class TestOnCustomerUpdate(UnitTestCase):
 		call_kwargs = mock_enqueue.call_args[1]
 		self.assertEqual(call_kwargs["queue"], "short")
 		self.assertTrue(call_kwargs["deduplicate"])
+		self.assertIn("job_id", call_kwargs)
+		self.assertIn("CUST-001", call_kwargs["job_id"])
 
 
 # ── TaxJar Customer API — Custom Field definitions ──────────────────────────
@@ -1726,7 +1728,7 @@ class TestTokenValidation(UnitTestCase):
 		"""401 response should throw."""
 		import taxjar.exceptions
 		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
-		err.full_response = {"status": "401"}
+		err.full_response = {"status_code": 401}
 
 		mock_client = MagicMock()
 		mock_client.categories.side_effect = err
