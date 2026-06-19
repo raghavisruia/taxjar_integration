@@ -125,8 +125,9 @@ after_migrate = ["taxjar_integration.taxjar_integration.doctype.taxjar_settings.
 
 doc_events = {
 	"Sales Invoice": {
-		"on_submit": "taxjar_integration.taxjar_integration.taxjar_integration.create_transaction",
-		"on_cancel": "taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction"
+		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_return_against",
+		"on_submit": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_sync",
+		"on_cancel": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_delete",
 	},
 	("Quotation", "Sales Order", "Sales Invoice"): {
 		"validate": ["taxjar_integration.taxjar_integration.taxjar_integration.set_sales_tax"]
@@ -147,6 +148,11 @@ scheduler_events = {
 		"taxjar_integration.taxjar_integration.tasks.purge_old_api_logs",
 		"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
 	],
+	"cron": {
+		"*/15 * * * *": [
+			"taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_syncs",
+		],
+	},
 }
 
 # Testing

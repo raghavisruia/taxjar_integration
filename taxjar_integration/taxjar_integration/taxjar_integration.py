@@ -224,30 +224,58 @@ def get_client(company=None):
 		return client
 
 
-def create_transaction(doc, method):
-	"""Create an order transaction in TaxJar"""
-	TAXJAR_CREATE_TRANSACTIONS = frappe.db.get_single_value(
-		"TaxJar Settings", "taxjar_create_transactions"
+def enqueue_taxjar_sync(doc, method):
+	"""on_submit hook: enqueue background TaxJar transaction sync."""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+		return
+	if not get_client(doc.company):
+		return
+
+	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
+
+	frappe.enqueue(
+		"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
+		invoice_name=doc.name,
+		queue="short",
+		enqueue_after_commit=True,
+		job_id=f"taxjar_sync_{doc.name}",
+		deduplicate=True,
+		now=frappe.flags.in_test,
 	)
 
-	if not TAXJAR_CREATE_TRANSACTIONS:
-		log_taxjar_call(
-			action="create_transaction",
-			status="skipped",
-			error="taxjar_create_transactions is disabled",
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+
+def enqueue_taxjar_delete(doc, method):
+	"""on_cancel hook: enqueue background TaxJar transaction deletion."""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+		return
+	if not get_client(doc.company):
+		return
+
+	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
+
+	frappe.enqueue(
+		"taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction_from_taxjar",
+		invoice_name=doc.name,
+		queue="short",
+		enqueue_after_commit=True,
+		job_id=f"taxjar_delete_{doc.name}",
+		deduplicate=True,
+		now=frappe.flags.in_test,
+	)
+
+
+def sync_transaction_to_taxjar(invoice_name):
+	"""Background worker: create order/refund in TaxJar for a submitted Sales Invoice."""
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
+
+	if doc.docstatus == 2:
+		delete_transaction_from_taxjar(invoice_name)
 		return
 
 	client = get_client(doc.company)
-
 	if not client:
-		log_taxjar_call(
-			action="create_transaction",
-			status="skipped",
-			error="TaxJar client is not configured",
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+		_set_sync_status(invoice_name, "Failed", error="TaxJar client is not configured")
 		return
 
 	sales_tax = sum(
@@ -255,14 +283,9 @@ def create_transaction(doc, method):
 	)
 
 	tax_dict = get_tax_data(doc)
-
 	if not tax_dict:
-		log_taxjar_call(
-			action="create_transaction",
-			status="skipped",
-			error="No TaxJar payload generated",
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+		_set_sync_status(invoice_name, "Failed", error="No TaxJar payload generated")
+		log_taxjar_call(action="create_transaction", status="skipped", error="No TaxJar payload generated", context=ctx)
 		return
 
 	tax_dict["transaction_id"] = doc.name
@@ -276,84 +299,41 @@ def create_transaction(doc, method):
 
 	try:
 		if doc.is_return:
-			log_taxjar_call(
-				action="create_refund",
-				status="request",
-				payload=tax_dict,
-				context={"doctype": doc.doctype, "name": doc.name},
-			)
+			log_taxjar_call(action="create_refund", status="request", payload=tax_dict, context=ctx)
 			response = client.create_refund(tax_dict)
-			log_taxjar_call(
-				action="create_refund",
-				status="success",
-				payload=tax_dict,
-				response=response,
-				context={"doctype": doc.doctype, "name": doc.name},
-			)
+			log_taxjar_call(action="create_refund", status="success", payload=tax_dict, response=response, context=ctx)
 		else:
-			log_taxjar_call(
-				action="create_order",
-				status="request",
-				payload=tax_dict,
-				context={"doctype": doc.doctype, "name": doc.name},
-			)
+			log_taxjar_call(action="create_order", status="request", payload=tax_dict, context=ctx)
 			response = client.create_order(tax_dict)
-			log_taxjar_call(
-				action="create_order",
-				status="success",
-				payload=tax_dict,
-				response=response,
-				context={"doctype": doc.doctype, "name": doc.name},
-			)
+			log_taxjar_call(action="create_order", status="success", payload=tax_dict, response=response, context=ctx)
+
+		_set_sync_status(invoice_name, "Synced")
 	except taxjar.exceptions.TaxJarConnectionError:
-		log_taxjar_call(
-			action="create_transaction",
-			status="error",
-			payload=tax_dict,
-			error="TaxJar API is unreachable",
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
-		frappe.throw(_(
-			"TaxJar API is unreachable. The transaction cannot be submitted because it will not be recorded in TaxJar. Please try again later."
-		))
+		log_taxjar_call(action="create_transaction", status="error", payload=tax_dict, error="TaxJar API is unreachable", context=ctx)
+		_set_sync_status(invoice_name, "Failed", error="TaxJar API is unreachable")
 	except taxjar.exceptions.TaxJarResponseError as err:
-		log_taxjar_call(
-			action="create_transaction",
-			status="error",
-			payload=tax_dict,
-			error=getattr(err, "full_response", str(err)),
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
-		frappe.throw(_(sanitize_error_response(err)))
+		error_msg = sanitize_error_response(err)
+		log_taxjar_call(action="create_transaction", status="error", payload=tax_dict, error=getattr(err, "full_response", str(err)), context=ctx)
+		_set_sync_status(invoice_name, "Failed", error=error_msg)
 	except Exception:
-		log_taxjar_call(
-			action="create_transaction",
-			status="error",
-			payload=tax_dict,
-			error=traceback.format_exc(),
-			context={"doctype": doc.doctype, "name": doc.name},
-		)
+		log_taxjar_call(action="create_transaction", status="error", payload=tax_dict, error=traceback.format_exc(), context=ctx)
+		_set_sync_status(invoice_name, "Failed", error=traceback.format_exc())
 		_get_taxjar_logger().error(traceback.format_exc())
 
 
-def delete_transaction(doc, method):
-	"""Delete an existing TaxJar order or refund transaction."""
-	TAXJAR_CREATE_TRANSACTIONS = frappe.db.get_single_value(
-		"TaxJar Settings", "taxjar_create_transactions"
-	)
-
-	if not TAXJAR_CREATE_TRANSACTIONS:
-		return
+def delete_transaction_from_taxjar(invoice_name):
+	"""Background worker: delete order/refund from TaxJar for a cancelled Sales Invoice."""
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
 
 	client = get_client(doc.company)
-
 	if not client:
+		_set_sync_status(invoice_name, "Failed", error="TaxJar client is not configured")
 		return
 
 	is_refund = doc.is_return
 	action = "delete_refund" if is_refund else "delete_order"
 	payload = {"transaction_id": doc.name}
-	ctx = {"doctype": doc.doctype, "name": doc.name}
 
 	try:
 		log_taxjar_call(action=action, status="request", payload=payload, context=ctx)
@@ -362,17 +342,162 @@ def delete_transaction(doc, method):
 		else:
 			response = client.delete_order(doc.name)
 		log_taxjar_call(action=action, status="success", payload=payload, response=response, context=ctx)
+		_set_sync_status(invoice_name, "Synced")
 	except taxjar.exceptions.TaxJarConnectionError:
 		log_taxjar_call(action=action, status="error", payload=payload, error="TaxJar API is unreachable", context=ctx)
-		frappe.throw(_(
-			"TaxJar API is unreachable. Cannot cancel — the transaction deletion will not be recorded in TaxJar."
-		))
+		_set_sync_status(invoice_name, "Failed", error="TaxJar API is unreachable")
 	except taxjar.exceptions.TaxJarResponseError as err:
+		error_msg = sanitize_error_response(err)
 		log_taxjar_call(action=action, status="error", payload=payload, error=getattr(err, "full_response", str(err)), context=ctx)
-		raise
+		_set_sync_status(invoice_name, "Failed", error=error_msg)
 	except Exception:
 		log_taxjar_call(action=action, status="error", payload=payload, error=traceback.format_exc(), context=ctx)
-		raise
+		_set_sync_status(invoice_name, "Failed", error=traceback.format_exc())
+		_get_taxjar_logger().error(traceback.format_exc())
+
+
+def _set_sync_status(invoice_name, status, error=None):
+	"""Update TaxJar sync status fields on a Sales Invoice via db_set."""
+	frappe.db.set_value(
+		"Sales Invoice", invoice_name,
+		{
+			"taxjar_sync_status": status,
+			"taxjar_sync_error": error or "",
+			"taxjar_last_synced": frappe.utils.now() if status == "Synced" else None,
+		},
+		update_modified=False,
+	)
+
+
+@frappe.whitelist()
+def get_taxjar_response_html(invoice_name):
+	"""Return HTML table rendering of the latest successful TaxJar API Log for an invoice."""
+	if not frappe.db.exists("DocType", "TaxJar API Log"):
+		return ""
+
+	log_name = frappe.db.get_value(
+		"TaxJar API Log",
+		filters={
+			"reference_doctype": "Sales Invoice",
+			"reference_name": invoice_name,
+			"action": ("in", ("create_order", "create_refund")),
+			"status": "success",
+		},
+		fieldname="name",
+		order_by="creation desc",
+	)
+
+	if not log_name:
+		return ""
+
+	response_json = frappe.db.get_value("TaxJar API Log", log_name, "response")
+	if not response_json:
+		return ""
+
+	try:
+		data = json.loads(response_json)
+	except (json.JSONDecodeError, TypeError):
+		return ""
+
+	resp = data.get("__dict__", data) if isinstance(data, dict) else data
+
+	rows = []
+	field_map = [
+		("Transaction ID", "transaction_id"),
+		("Transaction Date", "transaction_date"),
+		("Amount", "amount"),
+		("Sales Tax", "sales_tax"),
+		("Shipping", "shipping"),
+		("From State", "from_state"),
+		("To State", "to_state"),
+		("Transaction Reference ID", "transaction_reference_id"),
+		("Provider", "provider"),
+	]
+
+	for label, key in field_map:
+		val = resp.get(key) if isinstance(resp, dict) else getattr(resp, key, None)
+		if val is not None and val != "":
+			rows.append(f"<tr><td><b>{frappe.utils.escape_html(label)}</b></td>"
+						f"<td>{frappe.utils.escape_html(str(val))}</td></tr>")
+
+	if not rows:
+		return ""
+
+	return (
+		'<table class="table table-bordered table-sm">'
+		+ "".join(rows)
+		+ "</table>"
+	)
+
+
+@frappe.whitelist()
+def retry_all_failed_syncs():
+	"""Re-enqueue all Sales Invoices with Failed sync status."""
+	failed = frappe.get_all(
+		"Sales Invoice",
+		filters={"taxjar_sync_status": "Failed", "docstatus": ("in", (1, 2))},
+		pluck="name",
+	)
+	for name in failed:
+		frappe.enqueue(
+			"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
+			invoice_name=name,
+			queue="short",
+			job_id=f"taxjar_retry_{name}",
+			deduplicate=True,
+		)
+	return len(failed)
+
+
+@frappe.whitelist()
+def fetch_transaction_from_taxjar(invoice_name):
+	"""Pull current transaction state from TaxJar and return the response data."""
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	client = get_client(doc.company)
+	if not client:
+		frappe.throw(_("TaxJar client is not configured for company {0}").format(doc.company))
+
+	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
+
+	try:
+		if doc.is_return:
+			log_taxjar_call(action="show_refund", status="request", context=ctx)
+			response = client.show_refund(doc.name)
+			log_taxjar_call(action="show_refund", status="success", response=response, context=ctx)
+		else:
+			log_taxjar_call(action="show_order", status="request", context=ctx)
+			response = client.show_order(doc.name)
+			log_taxjar_call(action="show_order", status="success", response=response, context=ctx)
+		return _taxjar_response_payload(response)
+	except Exception as e:
+		log_taxjar_call(action="show_transaction", status="error", error=str(e), context=ctx)
+		frappe.throw(_("Failed to fetch from TaxJar: {0}").format(str(e)))
+
+
+@frappe.whitelist()
+def delete_transaction_manual(invoice_name):
+	"""Manual deletion of a transaction from TaxJar (for cleanup)."""
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	client = get_client(doc.company)
+	if not client:
+		frappe.throw(_("TaxJar client is not configured for company {0}").format(doc.company))
+
+	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
+	is_refund = doc.is_return
+	action = "delete_refund" if is_refund else "delete_order"
+
+	try:
+		log_taxjar_call(action=action, status="request", payload={"transaction_id": doc.name}, context=ctx)
+		if is_refund:
+			response = client.delete_refund(doc.name)
+		else:
+			response = client.delete_order(doc.name)
+		log_taxjar_call(action=action, status="success", response=response, context=ctx)
+		_set_sync_status(invoice_name, "Not Applicable")
+		return {"success": True}
+	except Exception as e:
+		log_taxjar_call(action=action, status="error", error=str(e), context=ctx)
+		frappe.throw(_("Failed to delete from TaxJar: {0}").format(str(e)))
 
 
 def get_tax_data(doc):
@@ -570,6 +695,22 @@ def set_sales_tax(doc, method):
 
 			doc.run_method("calculate_taxes_and_totals")
 			doc.run_method("set_total_in_words")
+
+
+def validate_return_against(doc, method):
+	"""Enforce return_against on credit notes when TaxJar transaction reporting is enabled."""
+	if not getattr(doc, "is_return", False):
+		return
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+		return
+	if not doc.return_against:
+		frappe.throw(
+			_(
+				"Return Against is mandatory for credit notes when TaxJar transaction reporting is enabled. "
+				"Please link the original Sales Invoice."
+			),
+			title=_("TaxJar: Missing Return Reference"),
+		)
 
 
 def _remove_taxjar_rows(doc, company_config):

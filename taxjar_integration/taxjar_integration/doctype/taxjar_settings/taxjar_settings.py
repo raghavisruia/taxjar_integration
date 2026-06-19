@@ -11,6 +11,7 @@ _CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 from frappe.model.document import Document
 from frappe.permissions import add_permission, update_permission_property
 
@@ -235,6 +236,55 @@ def make_custom_fields(update=True):
 				options=_US_STATE_CODE_OPTIONS,
 			)
 		],
+		"Sales Invoice": [
+			dict(
+				fieldname="taxjar_tab",
+				fieldtype="Tab Break",
+				insert_after="loyalty_amount",
+				label="TaxJar",
+			),
+			dict(
+				fieldname="taxjar_sync_status",
+				fieldtype="Select",
+				insert_after="taxjar_tab",
+				label="Sync Status",
+				options="Not Applicable\nQueued\nSynced\nFailed",
+				default="Not Applicable",
+				allow_on_submit=1,
+				in_list_view=1,
+				read_only=1,
+			),
+			dict(
+				fieldname="taxjar_sync_error",
+				fieldtype="Small Text",
+				insert_after="taxjar_sync_status",
+				label="Sync Error",
+				read_only=1,
+				allow_on_submit=1,
+				depends_on="eval: doc.taxjar_sync_status == 'Failed'",
+			),
+			dict(
+				fieldname="taxjar_last_synced",
+				fieldtype="Datetime",
+				insert_after="taxjar_sync_error",
+				label="Last Synced",
+				read_only=1,
+				allow_on_submit=1,
+			),
+			dict(
+				fieldname="taxjar_response_section",
+				fieldtype="Section Break",
+				insert_after="taxjar_last_synced",
+				label="TaxJar Response",
+				depends_on="eval: doc.taxjar_sync_status == 'Synced'",
+			),
+			dict(
+				fieldname="taxjar_response_html",
+				fieldtype="HTML",
+				insert_after="taxjar_response_section",
+				label="TaxJar Response",
+			),
+		],
 		"Customer": [
 			dict(
 				fieldname="taxjar_section_break",
@@ -283,6 +333,11 @@ def make_custom_fields(update=True):
 		],
 	}
 	create_custom_fields(custom_fields, update=update)
+
+	make_property_setter(
+		"Sales Invoice", "return_against", "no_copy", "0", "Check",
+		for_doctype=False,
+	)
 
 
 def add_permissions():

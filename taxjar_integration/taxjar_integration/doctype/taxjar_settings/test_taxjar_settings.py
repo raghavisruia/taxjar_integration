@@ -13,16 +13,24 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_get_customer_name,
 	_is_taxjar_enabled,
 	_remove_taxjar_rows,
+	_set_sync_status,
 	_validate_address_with_taxjar,
 	check_for_nexus,
 	check_sales_tax_exemption,
-	create_transaction,
-	delete_transaction,
+	delete_transaction_from_taxjar,
+	delete_transaction_manual,
+	enqueue_taxjar_delete,
+	enqueue_taxjar_sync,
+	fetch_transaction_from_taxjar,
 	get_company_config,
 	get_line_item_dict,
+	get_taxjar_response_html,
 	on_customer_update,
+	retry_all_failed_syncs,
 	set_sales_tax,
 	sync_customer_to_taxjar,
+	sync_transaction_to_taxjar,
+	validate_return_against,
 	validate_tax_request,
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
@@ -592,39 +600,42 @@ class TestGetLineItemDict(UnitTestCase):
 		self.assertIsNone(result["product_tax_code"])
 
 
-# ── Phase 2: create_transaction row detection ────────────────────────────────
+# ── Phase 2: sync_transaction_to_taxjar row detection ────────────────────────
 
-class TestCreateTransactionRowDetection(UnitTestCase):
+class TestSyncTransactionRowDetection(UnitTestCase):
 
 	def test_taxjar_row_description_constant_value(self):
 		self.assertEqual(TAXJAR_ROW_DESCRIPTION, "TaxJar Sales Tax")
 
-	def test_skips_when_no_taxjar_row(self):
-		"""Must not call TaxJar API when no row carries TAXJAR_ROW_DESCRIPTION."""
-		from taxjar_integration.taxjar_integration.taxjar_integration import create_transaction
-
+	def test_sets_failed_when_no_tax_data(self):
+		"""When get_tax_data returns None, sync should mark as Failed."""
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Template Tax", 80.0)])
+		doc.docstatus = 1
 		mock_client = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client):
-			create_transaction(doc, None)
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
 
+		mock_status.assert_called_with("SINV-TEST-001", "Failed", error="No TaxJar payload generated")
 		mock_client.create_order.assert_not_called()
-		mock_client.create_refund.assert_not_called()
 
 	def test_uses_taxjar_row_amount_for_transaction(self):
 		"""Sales tax amount is taken from the TAXJAR_ROW_DESCRIPTION row."""
-		from taxjar_integration.taxjar_integration.taxjar_integration import create_transaction
-
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 95.0)])
+		doc.docstatus = 1
 		mock_client = MagicMock()
 		mock_client.create_order.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}):
-			create_transaction(doc, None)
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
 
 		mock_client.create_order.assert_called_once()
 		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 95.0)
@@ -1557,10 +1568,10 @@ class TestTaxJarCustomerExemptRegion(UnitTestCase):
 		self.assertEqual(field.fieldtype, "Select")
 
 
-# ── Phase 1: Transaction Compliance (Items 1, 2, 3, 4) ──────────────────────
+# ── Transaction Compliance — async sync_transaction_to_taxjar ─────────────────
 
 
-class TestCreateTransactionCompliance(UnitTestCase):
+class TestSyncTransactionCompliance(UnitTestCase):
 
 	def _make_submit_doc(self, is_return=False, return_against=None, sales_tax=85.0):
 		doc = _make_doc(
@@ -1578,11 +1589,12 @@ class TestCreateTransactionCompliance(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_order.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			create_transaction(doc, None)
+			sync_transaction_to_taxjar("SINV-TEST-001")
 
 		payload = mock_client.create_order.call_args[0][0]
 		self.assertEqual(payload["transaction_date"], "2025-05-31")
@@ -1593,11 +1605,12 @@ class TestCreateTransactionCompliance(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_refund.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 0, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			create_transaction(doc, None)
+			sync_transaction_to_taxjar("SINV-TEST-001")
 
 		payload = mock_client.create_refund.call_args[0][0]
 		self.assertEqual(payload["transaction_reference_id"], "SINV-ORIG-001")
@@ -1609,11 +1622,12 @@ class TestCreateTransactionCompliance(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_order.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 0, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			create_transaction(doc, None)
+			sync_transaction_to_taxjar("SINV-TEST-001")
 
 		mock_client.create_order.assert_called_once()
 		payload = mock_client.create_order.call_args[0][0]
@@ -1625,14 +1639,30 @@ class TestCreateTransactionCompliance(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_order.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			create_transaction(doc, None)
+			sync_transaction_to_taxjar("SINV-TEST-001")
 
 		payload = mock_client.create_order.call_args[0][0]
 		self.assertEqual(payload["provider"], "ERPNext")
+
+	def test_sets_synced_on_success(self):
+		"""On successful API call, status should be set to Synced."""
+		doc = self._make_submit_doc()
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		mock_status.assert_called_with("SINV-TEST-001", "Synced")
 
 
 class TestDeleteTransactionCompliance(UnitTestCase):
@@ -1643,10 +1673,11 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.delete_order.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			delete_transaction(doc, None)
+			delete_transaction_from_taxjar(doc.name)
 
 		mock_client.delete_order.assert_called_once_with(doc.name)
 		mock_client.delete_refund.assert_not_called()
@@ -1657,10 +1688,11 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.delete_refund.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			delete_transaction(doc, None)
+			delete_transaction_from_taxjar(doc.name)
 
 		mock_client.delete_refund.assert_called_once_with(doc.name)
 		mock_client.delete_order.assert_not_called()
@@ -1780,10 +1812,10 @@ class TestValidateTaxRequestOutage(UnitTestCase):
 		self.assertIn("unreachable", mock_msg.call_args[0][0].lower())
 
 
-class TestCreateTransactionOutage(UnitTestCase):
+class TestSyncTransactionOutage(UnitTestCase):
 
-	def test_connection_error_blocks_submission(self):
-		"""TaxJarConnectionError on submit should throw to block submission."""
+	def test_connection_error_sets_failed_status(self):
+		"""TaxJarConnectionError in background should set status to Failed, not throw."""
 		import taxjar.exceptions
 
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 85.0)])
@@ -1793,17 +1825,20 @@ class TestCreateTransactionOutage(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			self.assertRaises(frappe.ValidationError, create_transaction, doc, None)
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		mock_status.assert_called_with("SINV-TEST-001", "Failed", error="TaxJar API is unreachable")
 
 
 class TestDeleteTransactionOutage(UnitTestCase):
 
-	def test_connection_error_blocks_cancellation(self):
-		"""TaxJarConnectionError on cancel should throw to block cancellation."""
+	def test_connection_error_sets_failed_status(self):
+		"""TaxJarConnectionError on delete should set status to Failed, not throw."""
 		import taxjar.exceptions
 
 		doc = _make_doc()
@@ -1812,10 +1847,13 @@ class TestDeleteTransactionOutage(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.delete_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			self.assertRaises(frappe.ValidationError, delete_transaction, doc, None)
+			delete_transaction_from_taxjar(doc.name)
+
+		mock_status.assert_called_with("SINV-TEST-001", "Failed", error="TaxJar API is unreachable")
 
 
 # ── Phase 5: Address Validation (Item 14) ────────────────────────────────────
@@ -1884,3 +1922,400 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 		match = MagicMock(spec=[])
 		result = _format_address_suggestion(match)
 		self.assertIsNone(result)
+
+
+# ── Phase 1: Sales Invoice Custom Fields ─────────────────────────────────────
+
+
+class TestSalesInvoiceCustomFields(UnitTestCase):
+
+	def _get_si_field_defs(self):
+		captured = {}
+		def fake_create(fields, update=True):
+			captured.update(fields)
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields", side_effect=fake_create), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter"):
+			make_custom_fields(update=True)
+		return {f["fieldname"]: f for f in captured.get("Sales Invoice", [])}
+
+	def test_taxjar_tab_exists(self):
+		fields = self._get_si_field_defs()
+		self.assertIn("taxjar_tab", fields)
+		self.assertEqual(fields["taxjar_tab"]["fieldtype"], "Tab Break")
+
+	def test_sync_status_field(self):
+		fields = self._get_si_field_defs()
+		f = fields["taxjar_sync_status"]
+		self.assertEqual(f["fieldtype"], "Select")
+		for opt in ("Not Applicable", "Queued", "Synced", "Failed"):
+			self.assertIn(opt, f["options"])
+		self.assertTrue(f.get("allow_on_submit"))
+		self.assertTrue(f.get("read_only"))
+
+	def test_sync_error_field(self):
+		fields = self._get_si_field_defs()
+		f = fields["taxjar_sync_error"]
+		self.assertEqual(f["fieldtype"], "Small Text")
+		self.assertTrue(f.get("read_only"))
+		self.assertTrue(f.get("allow_on_submit"))
+
+	def test_last_synced_field(self):
+		fields = self._get_si_field_defs()
+		f = fields["taxjar_last_synced"]
+		self.assertEqual(f["fieldtype"], "Datetime")
+		self.assertTrue(f.get("read_only"))
+
+	def test_response_html_field(self):
+		fields = self._get_si_field_defs()
+		self.assertIn("taxjar_response_html", fields)
+		self.assertEqual(fields["taxjar_response_html"]["fieldtype"], "HTML")
+
+	def test_response_section_depends_on_synced(self):
+		fields = self._get_si_field_defs()
+		f = fields["taxjar_response_section"]
+		self.assertIn("Synced", f.get("depends_on", ""))
+
+
+# ── Phase 1: Property Setter for return_against ──────────────────────────────
+
+
+class TestReturnAgainstPropertySetter(UnitTestCase):
+
+	def test_make_custom_fields_calls_property_setter(self):
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields"), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter") as mock_ps:
+			make_custom_fields(update=True)
+
+		mock_ps.assert_called_once_with(
+			"Sales Invoice", "return_against", "no_copy", "0", "Check",
+			for_doctype=False,
+		)
+
+
+# ── Phase 2: validate_return_against ─────────────────────────────────────────
+
+
+class TestValidateReturnAgainst(UnitTestCase):
+
+	def test_skips_non_return(self):
+		doc = _make_doc()
+		doc.is_return = False
+		validate_return_against(doc, None)
+
+	def test_skips_when_create_transactions_disabled(self):
+		doc = _make_doc()
+		doc.is_return = True
+		doc.return_against = None
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0):
+			validate_return_against(doc, None)
+
+	def test_throws_when_return_without_return_against(self):
+		doc = _make_doc()
+		doc.is_return = True
+		doc.return_against = None
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1):
+			self.assertRaises(frappe.ValidationError, validate_return_against, doc, None)
+
+	def test_passes_when_return_with_return_against(self):
+		doc = _make_doc()
+		doc.is_return = True
+		doc.return_against = "SINV-ORIG-001"
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1):
+			validate_return_against(doc, None)
+
+
+# ── Phase 3: enqueue_taxjar_sync / enqueue_taxjar_delete ─────────────────────
+
+
+class TestEnqueueTaxjarSync(UnitTestCase):
+
+	def test_skips_when_create_transactions_disabled(self):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_sync(doc, None)
+		mock_enqueue.assert_not_called()
+
+	def test_skips_when_no_client(self):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_sync(doc, None)
+		mock_enqueue.assert_not_called()
+
+	def test_sets_queued_and_enqueues(self):
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+		mock_client = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_sync(doc, None)
+
+		doc.db_set.assert_called_once_with("taxjar_sync_status", "Queued", update_modified=False)
+		mock_enqueue.assert_called_once()
+		call_kwargs = mock_enqueue.call_args[1]
+		self.assertTrue(call_kwargs["deduplicate"])
+		self.assertIn("job_id", call_kwargs)
+
+
+class TestEnqueueTaxjarDelete(UnitTestCase):
+
+	def test_skips_when_create_transactions_disabled(self):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_delete(doc, None)
+		mock_enqueue.assert_not_called()
+
+	def test_sets_queued_and_enqueues(self):
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+		mock_client = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_delete(doc, None)
+
+		doc.db_set.assert_called_once_with("taxjar_sync_status", "Queued", update_modified=False)
+		mock_enqueue.assert_called_once()
+		self.assertIn("delete", mock_enqueue.call_args[1]["job_id"])
+
+
+# ── Phase 3: sync_transaction_to_taxjar — cancelled invoice routing ──────────
+
+
+class TestSyncCancelledInvoice(UnitTestCase):
+
+	def test_cancelled_invoice_routes_to_delete(self):
+		"""sync_transaction_to_taxjar on a cancelled doc should call delete_transaction_from_taxjar."""
+		doc = _make_doc()
+		doc.docstatus = 2
+		doc.is_return = False
+		mock_client = MagicMock()
+		mock_client.delete_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		mock_client.delete_order.assert_called_once()
+		mock_client.create_order.assert_not_called()
+
+
+# ── Phase 4: get_taxjar_response_html ────────────────────────────────────────
+
+
+class TestGetTaxjarResponseHtml(UnitTestCase):
+
+	def test_returns_empty_when_no_log(self):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.exists", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None):
+			result = get_taxjar_response_html("SINV-TEST-001")
+		self.assertEqual(result, "")
+
+	def test_renders_table_from_log(self):
+		import json
+		response_data = json.dumps({
+			"transaction_id": "SINV-001",
+			"transaction_date": "2025-06-01",
+			"amount": 1000.0,
+			"sales_tax": 82.5,
+			"shipping": 10.0,
+			"from_state": "TX",
+			"to_state": "CA",
+			"provider": "ERPNext",
+		})
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.exists", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value") as mock_get:
+			mock_get.side_effect = ["LOG-001", response_data]
+			result = get_taxjar_response_html("SINV-001")
+
+		self.assertIn("SINV-001", result)
+		self.assertIn("82.5", result)
+		self.assertIn("ERPNext", result)
+		self.assertIn("<table", result)
+
+	def test_returns_empty_for_invalid_json(self):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.exists", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value") as mock_get:
+			mock_get.side_effect = ["LOG-001", "not-valid-json{{{"]
+			result = get_taxjar_response_html("SINV-001")
+		self.assertEqual(result, "")
+
+
+# ── Phase 5: Sales Invoice JS — structural tests ────────────────────────────
+
+
+class TestSalesInvoiceClientScript(UnitTestCase):
+
+	_APP_ROOT = (
+		"/home/raghav/frappe-work/benches/v16-bench-group"
+		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+	)
+
+	def _read_js(self):
+		import os
+		path = os.path.join(self._APP_ROOT, "public", "js", "sales_invoice.js")
+		with open(path) as f:
+			return f.read()
+
+	def test_js_has_refresh_handler(self):
+		js = self._read_js()
+		self.assertIn("refresh(frm)", js)
+
+	def test_js_renders_taxjar_response(self):
+		js = self._read_js()
+		self.assertIn("get_taxjar_response_html", js)
+
+	def test_js_has_sync_button(self):
+		js = self._read_js()
+		self.assertIn("Sync to TaxJar", js)
+		self.assertIn("sync_transaction_to_taxjar", js)
+
+	def test_js_has_fetch_button(self):
+		js = self._read_js()
+		self.assertIn("Fetch from TaxJar", js)
+		self.assertIn("fetch_transaction_from_taxjar", js)
+
+	def test_js_has_delete_button(self):
+		js = self._read_js()
+		self.assertIn("Delete from TaxJar", js)
+		self.assertIn("delete_transaction_manual", js)
+
+	def test_js_buttons_grouped_under_taxjar(self):
+		js = self._read_js()
+		self.assertIn('__("TaxJar")', js)
+
+
+# ── Phase 6: retry_failed_taxjar_syncs ───────────────────────────────────────
+
+
+class TestRetryFailedTaxjarSyncs(UnitTestCase):
+
+	def test_skips_when_create_transactions_disabled(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_syncs
+		with patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
+			retry_failed_taxjar_syncs()
+		mock_enqueue.assert_not_called()
+
+	def test_enqueues_failed_invoices(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_syncs
+		with patch("taxjar_integration.taxjar_integration.tasks.cint", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=["SINV-001", "SINV-002"]), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
+			retry_failed_taxjar_syncs()
+		self.assertEqual(mock_enqueue.call_count, 2)
+
+	def test_hooks_registers_cron(self):
+		from taxjar_integration import hooks
+		self.assertIn("cron", hooks.scheduler_events)
+		cron_tasks = hooks.scheduler_events["cron"].get("*/15 * * * *", [])
+		self.assertIn("taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_syncs", cron_tasks)
+
+
+# ── Phase 6: retry_all_failed_syncs (whitelisted) ───────────────────────────
+
+
+class TestRetryAllFailedSyncs(UnitTestCase):
+
+	def test_returns_count_of_retried(self):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_all", return_value=["SINV-001", "SINV-002", "SINV-003"]), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
+			count = retry_all_failed_syncs()
+		self.assertEqual(count, 3)
+
+
+# ── Phase 7: Script Report structure ─────────────────────────────────────────
+
+
+class TestTaxJarTransactionSyncReport(UnitTestCase):
+
+	def test_report_py_exists(self):
+		import os
+		report_dir = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/taxjar_integration/report/taxjar_transaction_sync"
+		)
+		self.assertTrue(os.path.isfile(os.path.join(report_dir, "taxjar_transaction_sync.py")))
+		self.assertTrue(os.path.isfile(os.path.join(report_dir, "taxjar_transaction_sync.js")))
+		self.assertTrue(os.path.isfile(os.path.join(report_dir, "taxjar_transaction_sync.json")))
+
+	def test_report_returns_columns_and_data(self):
+		from taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync import execute
+		with patch("taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync.frappe.get_all", return_value=[]):
+			columns, data, _, _, summary = execute(filters={})
+		self.assertTrue(len(columns) > 0)
+		self.assertEqual(len(data), 0)
+		self.assertTrue(len(summary) > 0)
+
+	def test_report_summary_counts(self):
+		from taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync import get_summary
+		data = [
+			{"taxjar_sync_status": "Synced"},
+			{"taxjar_sync_status": "Synced"},
+			{"taxjar_sync_status": "Failed"},
+			{"taxjar_sync_status": "Queued"},
+			{"taxjar_sync_status": "Not Applicable"},
+		]
+		summary = get_summary(data)
+		values = {s["label"]: s["value"] for s in summary}
+		self.assertEqual(values["Total Invoices"], 5)
+		self.assertEqual(values["Synced"], 2)
+		self.assertEqual(values["Failed"], 1)
+		self.assertEqual(values["Queued"], 1)
+
+	def test_report_transaction_type_derivation(self):
+		from taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync import get_data
+		row_invoice = frappe._dict(is_return=False, is_debit_note=False, taxjar_sync_status="Synced", taxjar_sync_error="")
+		row_credit = frappe._dict(is_return=True, is_debit_note=False, taxjar_sync_status="Synced", taxjar_sync_error="")
+
+		with patch("taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync.frappe.get_all", return_value=[row_invoice, row_credit]):
+			data = get_data({})
+
+		types = [r["transaction_type"] for r in data]
+		self.assertIn("Invoice", types)
+		self.assertIn("Credit Note", types)
+
+	def test_report_js_has_retry_all_button(self):
+		import os
+		js_path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/taxjar_integration/report/taxjar_transaction_sync"
+			"/taxjar_transaction_sync.js"
+		)
+		with open(js_path) as f:
+			js = f.read()
+		self.assertIn("Retry All Failed", js)
+		self.assertIn("retry_all_failed_syncs", js)
+
+
+# ── Hooks registration — updated hooks ───────────────────────────────────────
+
+
+class TestHooksUpdated(UnitTestCase):
+
+	def test_sales_invoice_on_submit_is_enqueue(self):
+		from taxjar_integration import hooks
+		si_events = hooks.doc_events.get("Sales Invoice", {})
+		self.assertIn("enqueue_taxjar_sync", si_events.get("on_submit", ""))
+
+	def test_sales_invoice_on_cancel_is_enqueue(self):
+		from taxjar_integration import hooks
+		si_events = hooks.doc_events.get("Sales Invoice", {})
+		self.assertIn("enqueue_taxjar_delete", si_events.get("on_cancel", ""))
+
+	def test_sales_invoice_validate_has_return_against(self):
+		from taxjar_integration import hooks
+		si_events = hooks.doc_events.get("Sales Invoice", {})
+		self.assertIn("validate_return_against", si_events.get("validate", ""))

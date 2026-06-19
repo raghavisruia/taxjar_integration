@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import cint
 
 
 def purge_old_api_logs():
@@ -22,3 +23,25 @@ def sync_nexus_list():
 		doc.update_nexus_list()
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "TaxJar: Nexus sync failed")
+
+
+def retry_failed_taxjar_syncs():
+	"""Every 15 min: re-enqueue all Sales Invoices with Failed TaxJar sync status."""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+		return
+
+	failed_invoices = frappe.get_all(
+		"Sales Invoice",
+		filters={"taxjar_sync_status": "Failed", "docstatus": ("in", (1, 2))},
+		pluck="name",
+		limit=50,
+	)
+
+	for invoice_name in failed_invoices:
+		frappe.enqueue(
+			"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
+			invoice_name=invoice_name,
+			queue="short",
+			job_id=f"taxjar_retry_{invoice_name}",
+			deduplicate=True,
+		)
