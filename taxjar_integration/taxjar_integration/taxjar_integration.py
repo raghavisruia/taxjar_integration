@@ -264,6 +264,7 @@ def enqueue_taxjar_delete(doc, method):
 	)
 
 
+@frappe.whitelist()
 def sync_transaction_to_taxjar(invoice_name):
 	"""Background worker: create order/refund in TaxJar for a submitted Sales Invoice."""
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
@@ -469,6 +470,19 @@ def fetch_transaction_from_taxjar(invoice_name):
 			response = client.show_order(doc.name)
 			log_taxjar_call(action="show_order", status="success", response=response, context=ctx)
 		return _taxjar_response_payload(response)
+	except taxjar.exceptions.TaxJarResponseError as err:
+		full = getattr(err, "full_response", {}) or {}
+		status_code = full.get("status_code") if isinstance(full, dict) else None
+		log_taxjar_call(action="show_transaction", status="error", error=getattr(err, "full_response", str(err)), context=ctx)
+		if status_code == 404:
+			frappe.throw(
+				_("Transaction {0} was not found in TaxJar. It may have been created in a different API mode (Sandbox/Live) "
+				  "or may not have been synced yet.").format(invoice_name)
+			)
+		frappe.throw(_("Failed to fetch from TaxJar: {0}").format(sanitize_error_response(err)))
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(action="show_transaction", status="error", error="TaxJar API is unreachable", context=ctx)
+		frappe.throw(_("TaxJar API is unreachable. Please try again later."))
 	except Exception as e:
 		log_taxjar_call(action="show_transaction", status="error", error=str(e), context=ctx)
 		frappe.throw(_("Failed to fetch from TaxJar: {0}").format(str(e)))
