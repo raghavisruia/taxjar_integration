@@ -1679,7 +1679,7 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
 			delete_transaction_from_taxjar(doc.name)
 
-		mock_client.delete_order.assert_called_once_with(doc.name)
+		mock_client.delete_order.assert_called_once_with(doc.name, params={"provider": "ERPNext"})
 		mock_client.delete_refund.assert_not_called()
 
 	def test_return_calls_delete_refund(self):
@@ -1694,7 +1694,7 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
 			delete_transaction_from_taxjar(doc.name)
 
-		mock_client.delete_refund.assert_called_once_with(doc.name)
+		mock_client.delete_refund.assert_called_once_with(doc.name, params={"provider": "ERPNext"})
 		mock_client.delete_order.assert_not_called()
 
 

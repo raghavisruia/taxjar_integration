@@ -335,13 +335,14 @@ def delete_transaction_from_taxjar(invoice_name):
 	is_refund = doc.is_return
 	action = "delete_refund" if is_refund else "delete_order"
 	payload = {"transaction_id": doc.name}
+	provider_params = {"provider": "ERPNext"}
 
 	try:
 		log_taxjar_call(action=action, status="request", payload=payload, context=ctx)
 		if is_refund:
-			response = client.delete_refund(doc.name)
+			response = client.delete_refund(doc.name, params=provider_params)
 		else:
-			response = client.delete_order(doc.name)
+			response = client.delete_order(doc.name, params=provider_params)
 		log_taxjar_call(action=action, status="success", payload=payload, response=response, context=ctx)
 		_set_sync_status(invoice_name, "Synced")
 	except taxjar.exceptions.TaxJarConnectionError:
@@ -381,7 +382,7 @@ def get_taxjar_response_html(invoice_name):
 		filters={
 			"reference_doctype": "Sales Invoice",
 			"reference_name": invoice_name,
-			"action": ("in", ("create_order", "create_refund")),
+			"action": ("in", ("create_order", "create_refund", "show_order", "show_refund")),
 			"status": "success",
 		},
 		fieldname="name",
@@ -460,14 +461,16 @@ def fetch_transaction_from_taxjar(invoice_name):
 
 	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
 
+	provider_params = {"provider": "ERPNext"}
+
 	try:
 		if doc.is_return:
 			log_taxjar_call(action="show_refund", status="request", context=ctx)
-			response = client.show_refund(doc.name)
+			response = client.show_refund(doc.name, params=provider_params)
 			log_taxjar_call(action="show_refund", status="success", response=response, context=ctx)
 		else:
 			log_taxjar_call(action="show_order", status="request", context=ctx)
-			response = client.show_order(doc.name)
+			response = client.show_order(doc.name, params=provider_params)
 			log_taxjar_call(action="show_order", status="success", response=response, context=ctx)
 		return _taxjar_response_payload(response)
 	except taxjar.exceptions.TaxJarResponseError as err:
@@ -500,12 +503,14 @@ def delete_transaction_manual(invoice_name):
 	is_refund = doc.is_return
 	action = "delete_refund" if is_refund else "delete_order"
 
+	provider_params = {"provider": "ERPNext"}
+
 	try:
 		log_taxjar_call(action=action, status="request", payload={"transaction_id": doc.name}, context=ctx)
 		if is_refund:
-			response = client.delete_refund(doc.name)
+			response = client.delete_refund(doc.name, params=provider_params)
 		else:
-			response = client.delete_order(doc.name)
+			response = client.delete_order(doc.name, params=provider_params)
 		log_taxjar_call(action=action, status="success", response=response, context=ctx)
 		_set_sync_status(invoice_name, "Not Applicable")
 		return {"success": True}
