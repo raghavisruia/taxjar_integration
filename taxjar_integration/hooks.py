@@ -151,6 +151,7 @@ scheduler_events = {
 	"cron": {
 		"*/15 * * * *": [
 			"taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_syncs",
+			"taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_customer_syncs",
 		],
 	},
 }

@@ -330,6 +330,22 @@ def make_custom_fields(update=True):
 				label="Last Synced to TaxJar",
 				read_only=1,
 			),
+			dict(
+				fieldname="taxjar_customer_sync_status",
+				fieldtype="Select",
+				insert_after="taxjar_last_synced",
+				label="TaxJar Sync Status",
+				options="\nQueued\nSynced\nFailed",
+				read_only=1,
+			),
+			dict(
+				fieldname="taxjar_customer_sync_error",
+				fieldtype="Small Text",
+				insert_after="taxjar_customer_sync_status",
+				label="TaxJar Sync Error",
+				read_only=1,
+				depends_on="eval: doc.taxjar_customer_sync_status == 'Failed'",
+			),
 		],
 	}
 	create_custom_fields(custom_fields, update=update)

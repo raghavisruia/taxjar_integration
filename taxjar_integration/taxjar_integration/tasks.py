@@ -45,3 +45,31 @@ def retry_failed_taxjar_syncs():
 			job_id=f"taxjar_retry_{invoice_name}",
 			deduplicate=True,
 		)
+
+
+def retry_failed_taxjar_customer_syncs():
+	"""Every 15 min: re-enqueue all Customers with Failed TaxJar sync status."""
+	if not (
+		cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax"))
+		or cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions"))
+	):
+		return
+
+	failed_customers = frappe.get_all(
+		"Customer",
+		filters={"taxjar_customer_sync_status": "Failed"},
+		pluck="name",
+		limit=50,
+	)
+
+	taxjar_settings = frappe.get_single("TaxJar Settings")
+	for customer_name in failed_customers:
+		for config in taxjar_settings.company_config or []:
+			frappe.enqueue(
+				"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
+				customer_name=customer_name,
+				company=config.company,
+				queue="short",
+				job_id=f"taxjar_customer_retry_{customer_name}_{config.company}",
+				deduplicate=True,
+			)

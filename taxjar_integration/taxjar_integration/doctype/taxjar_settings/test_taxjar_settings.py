@@ -11,8 +11,10 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_ROW_DESCRIPTION,
 	_format_address_suggestion,
 	_get_customer_name,
+	_has_taxjar_fields_changed,
 	_is_taxjar_enabled,
 	_remove_taxjar_rows,
+	_set_customer_sync_status,
 	_set_sync_status,
 	_validate_address_with_taxjar,
 	check_for_nexus,
@@ -1437,31 +1439,109 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 
 class TestOnCustomerUpdate(UnitTestCase):
 
-	def test_skips_when_features_disabled(self):
+	def _make_customer_doc(self, exemption_type="Wholesale", customer_id="", exempt_regions=None,
+	                       has_value_changed=True, previous_regions=None):
+		"""Build a mock Customer doc with TaxJar fields and change-detection support."""
 		doc = MagicMock()
-		doc.get.return_value = "Wholesale"
+		doc.name = "CUST-001"
+		doc.db_set = MagicMock()
 
+		regions = exempt_regions or []
+		doc.get.side_effect = lambda field, default=None: {
+			"taxjar_exemption_type": exemption_type,
+			"taxjar_customer_id": customer_id,
+			"taxjar_exempt_regions": regions,
+		}.get(field, default)
+
+		doc.has_value_changed.return_value = has_value_changed
+
+		if previous_regions is not None:
+			previous = MagicMock()
+			previous.get.return_value = previous_regions
+			doc.get_doc_before_save.return_value = previous
+		else:
+			doc.get_doc_before_save.return_value = None
+
+		return doc
+
+	def test_skips_when_features_disabled(self):
+		doc = self._make_customer_doc()
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
-
 		mock_enqueue.assert_not_called()
 
-	def test_skips_when_no_exemption_type(self):
-		doc = MagicMock()
-		doc.get.return_value = ""
-
+	def test_skips_when_no_exemption_and_never_synced(self):
+		"""Clearing exemption on a never-synced customer should not sync."""
+		doc = self._make_customer_doc(exemption_type="", customer_id="")
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
-
 		mock_enqueue.assert_not_called()
 
-	def test_enqueues_per_company(self):
-		doc = MagicMock()
-		doc.name = "CUST-001"
-		doc.get.return_value = "Wholesale"
+	def test_skips_when_no_taxjar_fields_changed(self):
+		"""Saving a customer without changing TaxJar fields should not sync."""
+		old_region = MagicMock(country="US", state="TX")
+		new_region = MagicMock(country="US", state="TX")
+		doc = self._make_customer_doc(
+			exemption_type="Wholesale", customer_id="CUST-001",
+			has_value_changed=False,
+			exempt_regions=[new_region], previous_regions=[old_region],
+		)
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			on_customer_update(doc, None)
+		mock_enqueue.assert_not_called()
 
+	def test_syncs_when_exemption_type_set(self):
+		"""Setting exemption type should trigger sync."""
+		doc = self._make_customer_doc(exemption_type="Government", customer_id="")
+		config = MagicMock(company="Test Co")
+		settings = MagicMock()
+		settings.company_config = [config]
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			on_customer_update(doc, None)
+		mock_enqueue.assert_called_once()
+
+	def test_syncs_when_exemption_cleared_on_synced_customer(self):
+		"""Clearing exemption on a previously-synced customer should sync as non_exempt."""
+		doc = self._make_customer_doc(exemption_type="", customer_id="CUST-001")
+		config = MagicMock(company="Test Co")
+		settings = MagicMock()
+		settings.company_config = [config]
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			on_customer_update(doc, None)
+		mock_enqueue.assert_called_once()
+		doc.db_set.assert_called_once_with("taxjar_customer_sync_status", "Queued", update_modified=False)
+
+	def test_syncs_when_exempt_regions_changed(self):
+		"""Adding exempt regions should trigger sync even if exemption_type didn't change."""
+		old_region = MagicMock(country="US", state="TX")
+		new_region_1 = MagicMock(country="US", state="TX")
+		new_region_2 = MagicMock(country="US", state="CA")
+		doc = self._make_customer_doc(
+			exemption_type="Wholesale", customer_id="CUST-001",
+			has_value_changed=False,
+			exempt_regions=[new_region_1, new_region_2], previous_regions=[old_region],
+		)
+		config = MagicMock(company="Test Co")
+		settings = MagicMock()
+		settings.company_config = [config]
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			on_customer_update(doc, None)
+		mock_enqueue.assert_called_once()
+
+	def test_enqueues_per_company(self):
+		doc = self._make_customer_doc(exemption_type="Wholesale")
 		config_a = MagicMock(company="Company A")
 		config_b = MagicMock(company="Company B")
 		settings = MagicMock()
@@ -1478,10 +1558,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 		self.assertIn("Company B", companies_synced)
 
 	def test_enqueue_uses_short_queue_and_deduplicate(self):
-		doc = MagicMock()
-		doc.name = "CUST-001"
-		doc.get.return_value = "Government"
-
+		doc = self._make_customer_doc(exemption_type="Government")
 		config = MagicMock(company="Test Co")
 		settings = MagicMock()
 		settings.company_config = [config]
@@ -2319,3 +2396,166 @@ class TestHooksUpdated(UnitTestCase):
 		from taxjar_integration import hooks
 		si_events = hooks.doc_events.get("Sales Invoice", {})
 		self.assertIn("validate_return_against", si_events.get("validate", ""))
+
+	def test_customer_retry_cron_registered(self):
+		from taxjar_integration import hooks
+		cron_tasks = hooks.scheduler_events.get("cron", {}).get("*/15 * * * *", [])
+		self.assertIn("taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_customer_syncs", cron_tasks)
+
+
+# ── Customer sync status tracking ────────────────────────────────────────────
+
+
+class TestCustomerSyncStatusTracking(UnitTestCase):
+
+	def _make_customer_doc(self, exemption_type="Wholesale", exempt_regions=None):
+		doc = MagicMock()
+		doc.customer_name = "Acme Corp"
+		doc.get.side_effect = lambda field, default=None: {
+			"taxjar_exemption_type": exemption_type,
+			"taxjar_exempt_regions": exempt_regions or [],
+		}.get(field, default)
+		return doc
+
+	def test_sync_sets_synced_status_on_success(self):
+		customer_doc = self._make_customer_doc()
+		mock_client = MagicMock()
+		mock_client.update_customer.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_status.assert_called_once_with("CUST-001", "Synced")
+
+	def test_sync_sets_failed_status_on_api_error(self):
+		import taxjar.exceptions
+
+		customer_doc = self._make_customer_doc()
+		mock_client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 500, "detail": "Server error"}
+		mock_client.update_customer.side_effect = err
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_status.assert_called_once()
+		self.assertEqual(mock_status.call_args[0][1], "Failed")
+
+	def test_sync_sets_failed_on_create_fallback_error(self):
+		import taxjar.exceptions
+
+		customer_doc = self._make_customer_doc()
+		mock_client = MagicMock()
+
+		update_err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		update_err.full_response = {"status_code": 404}
+		mock_client.update_customer.side_effect = update_err
+		mock_client.create_customer.side_effect = Exception("Create failed")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_status.assert_called_once()
+		self.assertEqual(mock_status.call_args[0][1], "Failed")
+
+
+# ── Customer sync custom fields ──────────────────────────────────────────────
+
+
+class TestCustomerSyncStatusFields(UnitTestCase):
+
+	def _get_customer_field_defs(self):
+		captured = {}
+		def fake_create(fields, update=True):
+			captured.update(fields)
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields", side_effect=fake_create), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter"):
+			make_custom_fields(update=True)
+		return {f["fieldname"]: f for f in captured.get("Customer", [])}
+
+	def test_sync_status_field_exists(self):
+		fields = self._get_customer_field_defs()
+		f = fields["taxjar_customer_sync_status"]
+		self.assertEqual(f["fieldtype"], "Select")
+		for opt in ("Queued", "Synced", "Failed"):
+			self.assertIn(opt, f["options"])
+		self.assertTrue(f.get("read_only"))
+
+	def test_sync_error_field_exists(self):
+		fields = self._get_customer_field_defs()
+		f = fields["taxjar_customer_sync_error"]
+		self.assertEqual(f["fieldtype"], "Small Text")
+		self.assertTrue(f.get("read_only"))
+		self.assertIn("Failed", f.get("depends_on", ""))
+
+
+# ── Customer retry scheduled task ────────────────────────────────────────────
+
+
+class TestRetryFailedCustomerSyncs(UnitTestCase):
+
+	def test_skips_when_features_disabled(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+		with patch("taxjar_integration.taxjar_integration.tasks.cint", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
+			retry_failed_taxjar_customer_syncs()
+		mock_enqueue.assert_not_called()
+
+	def test_enqueues_failed_customers(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+
+		config = MagicMock(company="Test Co")
+		settings = MagicMock()
+		settings.company_config = [config]
+
+		with patch("taxjar_integration.taxjar_integration.tasks.cint", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=["CUST-001", "CUST-002"]), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
+			retry_failed_taxjar_customer_syncs()
+
+		self.assertEqual(mock_enqueue.call_count, 2)
+
+
+# ── Customer JS — button removed ─────────────────────────────────────────────
+
+
+class TestCustomerClientScriptUpdated(UnitTestCase):
+
+	_APP_ROOT = (
+		"/home/raghav/frappe-work/benches/v16-bench-group"
+		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+	)
+
+	def _read_js(self):
+		import os
+		path = os.path.join(self._APP_ROOT, "public", "js", "customer.js")
+		with open(path) as f:
+			return f.read()
+
+	def test_no_sync_button(self):
+		"""The manual Sync to TaxJar button should be removed — auto-sync handles it."""
+		js = self._read_js()
+		self.assertNotIn("Sync to TaxJar", js)
+
+	def test_clears_regions_on_exemption_change(self):
+		js = self._read_js()
+		self.assertIn("taxjar_exemption_type(frm)", js)
+		self.assertIn("clear_table", js)
+
+	def test_auto_fills_customer_id(self):
+		js = self._read_js()
+		self.assertIn("taxjar_customer_id", js)

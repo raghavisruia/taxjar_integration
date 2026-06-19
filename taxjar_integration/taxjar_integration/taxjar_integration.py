@@ -1039,12 +1039,23 @@ def _map_exemption_type(label):
 	return _EXEMPTION_TYPE_MAP.get(label, "non_exempt")
 
 
+def _set_customer_sync_status(customer_name, status, error=None):
+	"""Update TaxJar sync status fields on a Customer."""
+	frappe.db.set_value(
+		"Customer", customer_name,
+		{
+			"taxjar_customer_sync_status": status,
+			"taxjar_customer_sync_error": error or "",
+		},
+		update_modified=False,
+	)
+
+
 @frappe.whitelist()
 def sync_customer_to_taxjar(customer_name, company=None):
 	"""Create or update a customer record in TaxJar.
 
-	Designed to run via frappe.enqueue (background) or called directly
-	from the client-side "Sync to TaxJar" button.
+	Designed to run via frappe.enqueue (background).
 	"""
 	client = get_client(company)
 	if not client:
@@ -1087,31 +1098,53 @@ def sync_customer_to_taxjar(customer_name, company=None):
 			except Exception:
 				log_taxjar_call(action="create_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
 				_get_taxjar_logger().error(traceback.format_exc())
+				_set_customer_sync_status(customer_name, "Failed", error=traceback.format_exc())
 				return
 		else:
 			log_taxjar_call(action="update_customer", status="error", payload=customer_data, error=getattr(err, "full_response", str(err)), context=ctx)
 			_get_taxjar_logger().error(traceback.format_exc())
+			_set_customer_sync_status(customer_name, "Failed", error=sanitize_error_response(err))
 			return
 	except Exception:
 		log_taxjar_call(action="sync_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
 		_get_taxjar_logger().error(traceback.format_exc())
+		_set_customer_sync_status(customer_name, "Failed", error=traceback.format_exc())
 		return
 
+	_set_customer_sync_status(customer_name, "Synced")
 	frappe.db.set_value("Customer", customer_name, "taxjar_customer_id", customer_name, update_modified=False)
 	frappe.db.set_value("Customer", customer_name, "taxjar_last_synced", frappe.utils.now(), update_modified=False)
 
 
+def _has_taxjar_fields_changed(doc):
+	"""Return True if any TaxJar-relevant field changed since last save."""
+	if doc.has_value_changed("taxjar_exemption_type"):
+		return True
+
+	previous = doc.get_doc_before_save()
+	if not previous:
+		return bool(doc.get("taxjar_exempt_regions"))
+
+	old_regions = {(r.country, r.state) for r in (previous.get("taxjar_exempt_regions") or [])}
+	new_regions = {(r.country, r.state) for r in (doc.get("taxjar_exempt_regions") or [])}
+	return old_regions != new_regions
+
+
 def on_customer_update(doc, method):
-	"""Enqueue TaxJar customer sync when exemption fields are present."""
+	"""Enqueue TaxJar customer sync when exemption fields change."""
 	if not (
 		frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
 		or frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")
 	):
 		return
 
-	exemption_type = doc.get("taxjar_exemption_type")
-	if not exemption_type:
+	if not _has_taxjar_fields_changed(doc):
 		return
+
+	if not doc.get("taxjar_exemption_type") and not doc.get("taxjar_customer_id"):
+		return
+
+	doc.db_set("taxjar_customer_sync_status", "Queued", update_modified=False)
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:
