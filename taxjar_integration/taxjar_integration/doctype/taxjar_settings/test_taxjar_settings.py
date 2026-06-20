@@ -1671,11 +1671,11 @@ class TestCustomerCustomFields(UnitTestCase):
 		f = fields["taxjar_exempt_regions"]
 		self.assertIn("taxjar_exemption_type", f.get("depends_on", ""))
 
-	def test_section_inserted_after_tax_withholding_group(self):
-		"""TaxJar section should appear BELOW standard tax fields, not above."""
+	def test_section_inserted_in_tax_tab(self):
+		"""TaxJar section must be inside the Tax tab."""
 		fields = self._get_customer_field_defs()
 		f = fields["taxjar_section_break"]
-		self.assertEqual(f["insert_after"], "tax_withholding_group")
+		self.assertEqual(f["insert_after"], "tax_tab")
 
 	def test_sync_details_section_is_collapsible(self):
 		fields = self._get_customer_field_defs()

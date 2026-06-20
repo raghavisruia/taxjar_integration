@@ -290,7 +290,7 @@ def make_custom_fields(update=True):
 			dict(
 				fieldname="taxjar_section_break",
 				fieldtype="Section Break",
-				insert_after="tax_withholding_group",
+				insert_after="tax_tab",
 				label="TaxJar Tax Exemption",
 				collapsible=0,
 			),
