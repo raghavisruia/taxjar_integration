@@ -299,7 +299,7 @@ def make_custom_fields(update=True):
 				fieldtype="Select",
 				insert_after="taxjar_section_break",
 				label="TaxJar Exemption Type",
-				options="\nWholesale\nGovernment\nMarketplace\nNon Exempt\nOther",
+				options="\nWholesale\nGovernment\nNon Exempt\nOther",
 				description="Maps to TaxJar's exemption_type. Leave blank for normal taxable customers.",
 			),
 			dict(

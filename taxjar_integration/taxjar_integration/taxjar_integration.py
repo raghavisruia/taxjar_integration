@@ -1044,7 +1044,6 @@ def _make_safe_customer_id(customer_name):
 _EXEMPTION_TYPE_MAP = {
 	"Wholesale": "wholesale",
 	"Government": "government",
-	"Marketplace": "marketplace",
 	"Non Exempt": "non_exempt",
 	"Other": "other",
 }

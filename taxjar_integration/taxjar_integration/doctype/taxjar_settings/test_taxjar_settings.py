@@ -1478,21 +1478,6 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		payload = mock_client.create_customer.call_args[0][0]
 		self.assertEqual(payload["exemption_type"], "non_exempt")
 
-	def test_marketplace_exemption_type(self):
-		"""Marketplace exemption type should map correctly."""
-		customer_doc = self._make_customer_doc(exemption_type="Marketplace", customer_id="")
-		mock_client = MagicMock()
-		mock_client.create_customer.return_value = MagicMock()
-
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value"):
-			sync_customer_to_taxjar("CUST-001")
-
-		payload = mock_client.create_customer.call_args[0][0]
-		self.assertEqual(payload["exemption_type"], "marketplace")
-
 	def test_connection_error_sets_failed(self):
 		"""TaxJarConnectionError should set Failed status."""
 		import taxjar.exceptions
@@ -1669,7 +1654,7 @@ class TestCustomerCustomFields(UnitTestCase):
 		fields = self._get_customer_field_defs()
 		f = fields["taxjar_exemption_type"]
 		self.assertEqual(f["fieldtype"], "Select")
-		for opt in ("Wholesale", "Government", "Marketplace", "Other", "Non Exempt"):
+		for opt in ("Wholesale", "Government", "Other", "Non Exempt"):
 			self.assertIn(opt, f["options"])
 
 	def test_exempt_regions_is_table(self):
