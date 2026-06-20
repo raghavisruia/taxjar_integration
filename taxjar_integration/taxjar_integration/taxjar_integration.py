@@ -1199,6 +1199,35 @@ def on_customer_validate(doc, method):
 		if db_val and not doc.get(field):
 			doc.set(field, db_val)
 
+	_validate_exempt_regions(doc)
+
+
+_US_STATES = {
+	"AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN",
+	"IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
+	"NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT",
+	"VT","VA","WA","WV","WI","WY",
+}
+
+_CA_PROVINCES = {
+	"AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT",
+}
+
+_STATES_BY_COUNTRY = {"US": _US_STATES, "CA": _CA_PROVINCES}
+
+
+def _validate_exempt_regions(doc):
+	for row in doc.get("taxjar_exempt_regions") or []:
+		valid_states = _STATES_BY_COUNTRY.get(row.country)
+		if not valid_states:
+			continue
+		if row.state and row.state not in valid_states:
+			frappe.throw(
+				_("Row {0}: {1} is not a valid state/province for {2}").format(
+					row.idx, row.state, row.country
+				)
+			)
+
 
 def on_customer_update(doc, method):
 	"""Enqueue TaxJar customer sync when exemption fields change."""

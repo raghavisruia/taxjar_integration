@@ -24,6 +24,7 @@ class TaxJarCustomerExemptRegion(Document):
 			"MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
 			"NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
 			"SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+			"AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
 		]
 	# end: auto-generated types
 
