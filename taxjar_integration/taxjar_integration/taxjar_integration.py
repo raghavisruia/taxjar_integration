@@ -1029,6 +1029,7 @@ def sanitize_error_response(response):
 _EXEMPTION_TYPE_MAP = {
 	"Wholesale": "wholesale",
 	"Government": "government",
+	"Marketplace": "marketplace",
 	"Non Exempt": "non_exempt",
 	"Other": "other",
 }
@@ -1055,6 +1056,7 @@ def _set_customer_sync_status(customer_name, status, error=None):
 def sync_customer_to_taxjar(customer_name, company=None):
 	"""Create or update a customer record in TaxJar.
 
+	Uses taxjar_customer_id to decide: empty → POST (create), set → PUT (update).
 	Designed to run via frappe.enqueue (background).
 	"""
 	client = get_client(company)
@@ -1083,32 +1085,24 @@ def sync_customer_to_taxjar(customer_name, company=None):
 	}
 
 	ctx = {"doctype": "Customer", "name": customer_name, "company": company}
+	existing_customer_id = customer_doc.get("taxjar_customer_id")
 
 	try:
-		log_taxjar_call(action="update_customer", status="request", payload=customer_data, context=ctx)
-		response = client.update_customer(customer_name, customer_data)
-		log_taxjar_call(action="update_customer", status="success", payload=customer_data, response=response, context=ctx)
-	except taxjar.exceptions.TaxJarResponseError as err:
-		full = getattr(err, "full_response", {}) or {}
-		if full.get("status_code") == 404:
-			try:
-				log_taxjar_call(action="create_customer", status="request", payload=customer_data, context=ctx)
-				response = client.create_customer(customer_data)
-				log_taxjar_call(action="create_customer", status="success", payload=customer_data, response=response, context=ctx)
-			except Exception:
-				log_taxjar_call(action="create_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
-				_get_taxjar_logger().error(traceback.format_exc())
-				_set_customer_sync_status(customer_name, "Failed", error=traceback.format_exc())
-				return
+		if existing_customer_id:
+			response = _update_taxjar_customer(client, customer_name, customer_data, ctx)
 		else:
-			log_taxjar_call(action="update_customer", status="error", payload=customer_data, error=getattr(err, "full_response", str(err)), context=ctx)
-			_get_taxjar_logger().error(traceback.format_exc())
-			_set_customer_sync_status(customer_name, "Failed", error=sanitize_error_response(err))
-			return
+			response = _create_taxjar_customer(client, customer_data, ctx)
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(action="sync_customer", status="error", payload=customer_data, error="TaxJar API is unreachable", context=ctx)
+		_set_customer_sync_status(customer_name, "Failed", error="TaxJar API is unreachable")
+		return
 	except Exception:
 		log_taxjar_call(action="sync_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
 		_get_taxjar_logger().error(traceback.format_exc())
 		_set_customer_sync_status(customer_name, "Failed", error=traceback.format_exc())
+		return
+
+	if response is None:
 		return
 
 	_set_customer_sync_status(customer_name, "Synced")
@@ -1116,9 +1110,45 @@ def sync_customer_to_taxjar(customer_name, company=None):
 	frappe.db.set_value("Customer", customer_name, "taxjar_last_synced", frappe.utils.now(), update_modified=False)
 
 
+def _create_taxjar_customer(client, customer_data, ctx):
+	"""POST a new customer to TaxJar. Returns the response or None on failure."""
+	customer_name = customer_data["customer_id"]
+	log_taxjar_call(action="create_customer", status="request", payload=customer_data, context=ctx)
+	try:
+		response = client.create_customer(customer_data)
+	except taxjar.exceptions.TaxJarResponseError as err:
+		log_taxjar_call(action="create_customer", status="error", payload=customer_data, error=getattr(err, "full_response", str(err)), context=ctx)
+		_get_taxjar_logger().error(traceback.format_exc())
+		_set_customer_sync_status(customer_name, "Failed", error=sanitize_error_response(err))
+		return None
+	log_taxjar_call(action="create_customer", status="success", payload=customer_data, response=response, context=ctx)
+	return response
+
+
+def _update_taxjar_customer(client, customer_id, customer_data, ctx):
+	"""PUT an existing customer to TaxJar. Falls back to create on 404."""
+	log_taxjar_call(action="update_customer", status="request", payload=customer_data, context=ctx)
+	try:
+		response = client.update_customer(customer_id, customer_data)
+	except taxjar.exceptions.TaxJarResponseError as err:
+		full = getattr(err, "full_response", {}) or {}
+		if full.get("status_code") == 404:
+			frappe.db.set_value("Customer", customer_id, "taxjar_customer_id", "", update_modified=False)
+			return _create_taxjar_customer(client, customer_data, ctx)
+		log_taxjar_call(action="update_customer", status="error", payload=customer_data, error=full, context=ctx)
+		_get_taxjar_logger().error(traceback.format_exc())
+		_set_customer_sync_status(customer_id, "Failed", error=sanitize_error_response(err))
+		return None
+	log_taxjar_call(action="update_customer", status="success", payload=customer_data, response=response, context=ctx)
+	return response
+
+
 def _has_taxjar_fields_changed(doc):
 	"""Return True if any TaxJar-relevant field changed since last save."""
 	if doc.has_value_changed("taxjar_exemption_type"):
+		return True
+
+	if doc.has_value_changed("customer_name"):
 		return True
 
 	previous = doc.get_doc_before_save()
@@ -1157,3 +1187,53 @@ def on_customer_update(doc, method):
 			job_id=f"sync_customer_taxjar_{doc.name}_{config.company}",
 			now=frappe.flags.in_test,
 		)
+
+
+def on_customer_delete(doc, method):
+	"""Delete customer from TaxJar when trashed in ERPNext."""
+	taxjar_customer_id = doc.get("taxjar_customer_id")
+	if not taxjar_customer_id:
+		return
+
+	if not (
+		frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
+		or frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")
+	):
+		return
+
+	taxjar_settings = frappe.get_single("TaxJar Settings")
+	for config in taxjar_settings.company_config or []:
+		try:
+			delete_customer_from_taxjar(taxjar_customer_id, config.company)
+		except Exception:
+			_get_taxjar_logger().error(traceback.format_exc())
+			log_taxjar_call(
+				action="delete_customer",
+				status="error",
+				error=traceback.format_exc(),
+				context={"doctype": "Customer", "name": doc.name, "company": config.company},
+			)
+
+
+def delete_customer_from_taxjar(taxjar_customer_id, company=None):
+	"""Delete a customer record from TaxJar."""
+	client = get_client(company)
+	if not client:
+		return
+
+	ctx = {"doctype": "Customer", "name": taxjar_customer_id, "company": company}
+	log_taxjar_call(action="delete_customer", status="request", context=ctx)
+	try:
+		response = client.delete_customer(taxjar_customer_id)
+	except taxjar.exceptions.TaxJarResponseError as err:
+		full = getattr(err, "full_response", {}) or {}
+		if full.get("status_code") == 404:
+			log_taxjar_call(action="delete_customer", status="success", context=ctx)
+			return
+		log_taxjar_call(action="delete_customer", status="error", error=getattr(err, "full_response", str(err)), context=ctx)
+		raise
+	except taxjar.exceptions.TaxJarConnectionError:
+		log_taxjar_call(action="delete_customer", status="error", error="TaxJar API is unreachable", context=ctx)
+		raise
+
+	log_taxjar_call(action="delete_customer", status="success", response=response, context=ctx)
