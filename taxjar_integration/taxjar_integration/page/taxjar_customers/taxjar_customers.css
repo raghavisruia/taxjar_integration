@@ -1,0 +1,19 @@
+.taxjar-table-wrapper .table th {
+	background-color: var(--subtle-fg);
+	font-size: var(--text-sm);
+	font-weight: 600;
+}
+
+.taxjar-table-wrapper .table td {
+	vertical-align: middle;
+}
+
+.taxjar-table-wrapper .taxjar-exemption-select {
+	padding: 2px 6px;
+	height: 28px;
+	font-size: var(--text-sm);
+}
+
+.taxjar-table-wrapper .taxjar-regions-cell:hover {
+	background-color: var(--subtle-fg);
+}

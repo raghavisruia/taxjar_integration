@@ -2914,3 +2914,190 @@ class TestOnCustomerValidate(UnitTestCase):
 		customer_events = hooks.doc_events.get("Customer", {})
 		self.assertIn("validate", customer_events)
 		self.assertIn("on_customer_validate", customer_events["validate"])
+
+
+# ── TaxJar Customer Config Page — Python API ──────────────────────────────
+
+
+from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+	get_customers,
+	save_exemption_type,
+	get_exempt_regions,
+	save_exempt_regions,
+	bulk_set_exemption_type,
+	bulk_clear_exemption,
+	bulk_sync_to_taxjar,
+)
+
+
+class TestCustomerConfigPageAPI(UnitTestCase):
+
+	def test_get_customers_returns_structure(self):
+		result = get_customers()
+		self.assertIn("customers", result)
+		self.assertIn("total", result)
+		self.assertIn("page", result)
+		self.assertIn("page_size", result)
+		self.assertIn("total_pages", result)
+		self.assertEqual(result["page"], 1)
+		self.assertEqual(result["page_size"], 50)
+
+	def test_get_customers_returns_expected_fields(self):
+		result = get_customers()
+		if result["customers"]:
+			c = result["customers"][0]
+			for key in ("name", "customer_name", "customer_group", "taxjar_exemption_type",
+			            "taxjar_customer_id", "taxjar_customer_sync_status", "exempt_region_count"):
+				self.assertIn(key, c)
+
+	def test_get_customers_filter_by_name(self):
+		result = get_customers(filters='{"customer_name": "NONEXISTENT_XYZ"}')
+		self.assertEqual(result["total"], 0)
+		self.assertEqual(len(result["customers"]), 0)
+
+	def test_get_customers_filter_by_exemption_not_set(self):
+		result = get_customers(filters='{"exemption_type": "__not_set"}')
+		for c in result["customers"]:
+			self.assertIn(c["taxjar_exemption_type"], ("", None))
+
+	def test_get_customers_filter_by_sync_not_set(self):
+		result = get_customers(filters='{"sync_status": "__not_set"}')
+		for c in result["customers"]:
+			self.assertIn(c["taxjar_customer_sync_status"], ("", None))
+
+	def test_get_customers_pagination(self):
+		result = get_customers(page=1)
+		self.assertEqual(result["page"], 1)
+		self.assertGreaterEqual(result["total_pages"], 1)
+
+	def test_get_customers_page_out_of_range(self):
+		result = get_customers(page=9999)
+		self.assertEqual(len(result["customers"]), 0)
+
+	def test_save_exemption_type(self):
+		customers = get_customers()["customers"]
+		if not customers:
+			return
+
+		name = customers[0]["name"]
+		original = customers[0]["taxjar_exemption_type"]
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			save_exemption_type(name, "Government")
+
+		val = frappe.db.get_value("Customer", name, "taxjar_exemption_type")
+		self.assertEqual(val, "Government")
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			save_exemption_type(name, original or "")
+
+	def test_save_and_get_exempt_regions(self):
+		customers = get_customers()["customers"]
+		if not customers:
+			return
+
+		name = customers[0]["name"]
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			save_exempt_regions(name, [{"country": "US", "state": "TX"}, {"country": "CA", "state": "ON"}])
+
+		regions = get_exempt_regions(name)
+		states = {r["state"] for r in regions}
+		self.assertIn("TX", states)
+		self.assertIn("ON", states)
+		self.assertEqual(len(regions), 2)
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			save_exempt_regions(name, [])
+
+	def test_bulk_set_exemption_type(self):
+		customers = get_customers()["customers"]
+		if len(customers) < 1:
+			return
+
+		names = [customers[0]["name"]]
+		originals = {c["name"]: c["taxjar_exemption_type"] for c in customers[:1]}
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			result = bulk_set_exemption_type(names, "Other")
+
+		self.assertEqual(result["updated"], 1)
+		val = frappe.db.get_value("Customer", names[0], "taxjar_exemption_type")
+		self.assertEqual(val, "Other")
+
+		for name, orig in originals.items():
+			with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+				save_exemption_type(name, orig or "")
+
+	def test_bulk_clear_exemption(self):
+		customers = get_customers()["customers"]
+		if len(customers) < 1:
+			return
+
+		name = customers[0]["name"]
+		original = frappe.db.get_value("Customer", name, "taxjar_exemption_type")
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			save_exemption_type(name, "Wholesale")
+			result = bulk_clear_exemption([name])
+
+		self.assertEqual(result["updated"], 1)
+		val = frappe.db.get_value("Customer", name, "taxjar_exemption_type")
+		self.assertIn(val, ("", None))
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+			save_exemption_type(name, original or "")
+
+	def test_bulk_sync_to_taxjar(self):
+		customers = get_customers()["customers"]
+		if not customers:
+			return
+
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue") as mock_enqueue:
+			result = bulk_sync_to_taxjar([c["name"] for c in customers])
+
+		self.assertIn("queued", result)
+
+	def test_page_json_exists(self):
+		import os
+		page_json = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/taxjar_integration/page/taxjar_customers/taxjar_customers.json"
+		)
+		self.assertTrue(os.path.isfile(page_json))
+
+	def test_page_js_exists(self):
+		import os
+		page_js = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/taxjar_integration/page/taxjar_customers/taxjar_customers.js"
+		)
+		self.assertTrue(os.path.isfile(page_js))
+
+	def test_page_js_has_regions_dialog(self):
+		import os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/taxjar_integration/page/taxjar_customers/taxjar_customers.js"
+		)
+		with open(path) as f:
+			js = f.read()
+		self.assertIn("show_regions_dialog", js)
+		self.assertIn("US_STATES", js)
+		self.assertIn("CA_PROVINCES", js)
+		self.assertIn("select-all-country", js)
+
+	def test_workspace_has_page_link(self):
+		import json, os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/taxjar_integration/workspace/taxjar_integration/taxjar_integration.json"
+		)
+		with open(path) as f:
+			ws = json.load(f)
+		page_links = [l for l in ws["links"] if l.get("link_to") == "taxjar-customers"]
+		self.assertTrue(len(page_links) > 0)
