@@ -1392,7 +1392,7 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client.create_customer.assert_not_called()
 
 	def test_update_fallback_to_create_on_404(self):
-		"""When update_customer returns 404, should clear taxjar_customer_id and fall back to create."""
+		"""When update_customer returns 404, should fall back to create without clearing taxjar_customer_id."""
 		import taxjar.exceptions
 
 		customer_doc = self._make_customer_doc(customer_id="CUST-001")
@@ -1410,9 +1410,9 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 			sync_customer_to_taxjar("CUST-001")
 
 		mock_client.create_customer.assert_called_once()
-		# taxjar_customer_id should be cleared on 404
-		clear_calls = [c for c in mock_set.call_args_list if c[0][2] == "taxjar_customer_id" and c[0][3] == ""]
-		self.assertTrue(len(clear_calls) > 0)
+		# taxjar_customer_id must NOT be cleared — prevents permanent broken state if create also fails
+		clear_calls = [c for c in mock_set.call_args_list if len(c[0]) >= 4 and c[0][2] == "taxjar_customer_id" and c[0][3] == ""]
+		self.assertEqual(len(clear_calls), 0)
 
 	def test_skips_when_no_client(self):
 		"""Should log skip and return when client is None."""

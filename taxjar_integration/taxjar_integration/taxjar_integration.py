@@ -1133,7 +1133,7 @@ def _update_taxjar_customer(client, customer_id, customer_data, ctx):
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
 		if full.get("status_code") == 404:
-			frappe.db.set_value("Customer", customer_id, "taxjar_customer_id", "", update_modified=False)
+			log_taxjar_call(action="update_customer", status="error", payload=customer_data, error="404 — falling back to create", context=ctx)
 			return _create_taxjar_customer(client, customer_data, ctx)
 		log_taxjar_call(action="update_customer", status="error", payload=customer_data, error=full, context=ctx)
 		_get_taxjar_logger().error(traceback.format_exc())
