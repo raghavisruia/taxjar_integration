@@ -1,6 +1,7 @@
 import hashlib
 import json
 import traceback
+from urllib.parse import quote
 
 import frappe
 import taxjar
@@ -1129,7 +1130,7 @@ def _update_taxjar_customer(client, customer_id, customer_data, ctx):
 	"""PUT an existing customer to TaxJar. Falls back to create on 404."""
 	log_taxjar_call(action="update_customer", status="request", payload=customer_data, context=ctx)
 	try:
-		response = client.update_customer(customer_id, customer_data)
+		response = client.update_customer(quote(str(customer_id), safe=""), customer_data)
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
 		if full.get("status_code") == 404:
@@ -1248,7 +1249,7 @@ def delete_customer_from_taxjar(taxjar_customer_id, company=None):
 	ctx = {"doctype": "Customer", "name": taxjar_customer_id, "company": company}
 	log_taxjar_call(action="delete_customer", status="request", context=ctx)
 	try:
-		response = client.delete_customer(taxjar_customer_id)
+		response = client.delete_customer(quote(str(taxjar_customer_id), safe=""))
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
 		if full.get("status_code") == 404:
