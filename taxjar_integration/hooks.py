@@ -136,6 +136,7 @@ doc_events = {
 		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_address"
 	},
 	"Customer": {
+		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_validate",
 		"on_update": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_update",
 		"on_trash": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_delete",
 	},

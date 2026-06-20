@@ -21,6 +21,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	check_sales_tax_exemption,
 	delete_customer_from_taxjar,
 	delete_transaction_from_taxjar,
+	on_customer_validate,
 	delete_transaction_manual,
 	enqueue_taxjar_delete,
 	enqueue_taxjar_sync,
@@ -2790,3 +2791,77 @@ class TestHasTaxjarFieldsChangedCustomerName(UnitTestCase):
 		new_region = MagicMock(country="US", state="TX")
 		doc.get.return_value = [new_region]
 		self.assertFalse(_has_taxjar_fields_changed(doc))
+
+
+# ── on_customer_validate — preserve read-only TaxJar fields ───────────────
+
+
+class TestOnCustomerValidate(UnitTestCase):
+
+	def _make_doc(self, customer_id="", sync_status="", last_synced=""):
+		doc = MagicMock()
+		doc.name = "CUST-001"
+		doc.is_new.return_value = False
+		_values = {
+			"taxjar_customer_id": customer_id,
+			"taxjar_customer_sync_status": sync_status,
+			"taxjar_last_synced": last_synced,
+		}
+		doc.get.side_effect = lambda f, d=None: _values.get(f, d)
+		return doc
+
+	def test_preserves_customer_id_from_stale_overwrite(self):
+		"""Form save with stale empty taxjar_customer_id must restore the DB value."""
+		doc = self._make_doc(customer_id="")
+		db_values = frappe._dict(taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced", taxjar_last_synced="2026-06-20 10:00:00")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+			on_customer_validate(doc, None)
+
+		doc.set.assert_any_call("taxjar_customer_id", "CUST-001")
+
+	def test_preserves_sync_status_from_stale_overwrite(self):
+		"""Sync status should also be preserved from stale form data."""
+		doc = self._make_doc(sync_status="")
+		db_values = frappe._dict(taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced", taxjar_last_synced="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+			on_customer_validate(doc, None)
+
+		doc.set.assert_any_call("taxjar_customer_sync_status", "Synced")
+
+	def test_does_not_overwrite_when_form_has_value(self):
+		"""If the form already has the field value, don't touch it."""
+		doc = self._make_doc(customer_id="CUST-001", sync_status="Synced")
+		db_values = frappe._dict(taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced", taxjar_last_synced="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+			on_customer_validate(doc, None)
+
+		doc.set.assert_not_called()
+
+	def test_skips_for_new_customer(self):
+		"""New customers have no DB values to preserve."""
+		doc = MagicMock()
+		doc.is_new.return_value = True
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value") as mock_db:
+			on_customer_validate(doc, None)
+
+		mock_db.assert_not_called()
+
+	def test_skips_when_db_has_no_values(self):
+		"""If DB fields are also empty, nothing to restore."""
+		doc = self._make_doc(customer_id="")
+		db_values = frappe._dict(taxjar_customer_id="", taxjar_customer_sync_status="", taxjar_last_synced="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+			on_customer_validate(doc, None)
+
+		doc.set.assert_not_called()
+
+	def test_hooks_registers_validate(self):
+		from taxjar_integration import hooks
+		customer_events = hooks.doc_events.get("Customer", {})
+		self.assertIn("validate", customer_events)
+		self.assertIn("on_customer_validate", customer_events["validate"])

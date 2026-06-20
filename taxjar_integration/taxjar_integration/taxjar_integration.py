@@ -1160,6 +1160,30 @@ def _has_taxjar_fields_changed(doc):
 	return old_regions != new_regions
 
 
+def on_customer_validate(doc, method):
+	"""Preserve read-only TaxJar fields from being overwritten by stale form data.
+
+	Background jobs set taxjar_customer_id via frappe.db.set_value, but the browser
+	never sees the update. On the next form save, the browser sends the old empty
+	value, overwriting the DB. This hook restores it before the save hits the DB.
+	"""
+	if doc.is_new():
+		return
+
+	db_values = frappe.db.get_value(
+		"Customer", doc.name,
+		["taxjar_customer_id", "taxjar_customer_sync_status", "taxjar_last_synced"],
+		as_dict=True,
+	)
+	if not db_values:
+		return
+
+	for field in ("taxjar_customer_id", "taxjar_customer_sync_status", "taxjar_last_synced"):
+		db_val = db_values.get(field)
+		if db_val and not doc.get(field):
+			doc.set(field, db_val)
+
+
 def on_customer_update(doc, method):
 	"""Enqueue TaxJar customer sync when exemption fields change."""
 	if not (
