@@ -1,7 +1,7 @@
 import hashlib
 import json
+import re
 import traceback
-from urllib.parse import quote
 
 import frappe
 import taxjar
@@ -1027,6 +1027,20 @@ def sanitize_error_response(response):
 
 # ── TaxJar Customer API ──────────────────────────────────────────────────────
 
+
+def _make_safe_customer_id(customer_name):
+	"""Generate a URL-safe customer_id from an ERPNext customer name.
+
+	The python-taxjar client concatenates customer_id directly into the URL
+	path (e.g. "customers/" + customer_id). Names with spaces or special
+	characters break the PUT/DELETE endpoints. This function creates a
+	deterministic, URL-safe ID that is consistent between POST body and
+	URL path.
+	"""
+	safe = re.sub(r"[^a-zA-Z0-9]+", "-", str(customer_name))
+	return safe.strip("-") or customer_name
+
+
 _EXEMPTION_TYPE_MAP = {
 	"Wholesale": "wholesale",
 	"Government": "government",
@@ -1078,19 +1092,21 @@ def sync_customer_to_taxjar(customer_name, company=None):
 		for r in (customer_doc.get("taxjar_exempt_regions") or [])
 	]
 
+	existing_customer_id = customer_doc.get("taxjar_customer_id")
+	safe_id = existing_customer_id or _make_safe_customer_id(customer_name)
+
 	customer_data = {
-		"customer_id": customer_name,
+		"customer_id": safe_id,
 		"exemption_type": exemption_type,
 		"name": customer_doc.customer_name,
 		"exempt_regions": exempt_regions,
 	}
 
 	ctx = {"doctype": "Customer", "name": customer_name, "company": company}
-	existing_customer_id = customer_doc.get("taxjar_customer_id")
 
 	try:
 		if existing_customer_id:
-			response = _update_taxjar_customer(client, customer_name, customer_data, ctx)
+			response = _update_taxjar_customer(client, safe_id, customer_data, ctx)
 		else:
 			response = _create_taxjar_customer(client, customer_data, ctx)
 	except taxjar.exceptions.TaxJarConnectionError:
@@ -1107,7 +1123,7 @@ def sync_customer_to_taxjar(customer_name, company=None):
 		return
 
 	_set_customer_sync_status(customer_name, "Synced")
-	frappe.db.set_value("Customer", customer_name, "taxjar_customer_id", customer_name, update_modified=False)
+	frappe.db.set_value("Customer", customer_name, "taxjar_customer_id", safe_id, update_modified=False)
 	frappe.db.set_value("Customer", customer_name, "taxjar_last_synced", frappe.utils.now(), update_modified=False)
 
 
@@ -1130,7 +1146,7 @@ def _update_taxjar_customer(client, customer_id, customer_data, ctx):
 	"""PUT an existing customer to TaxJar. Falls back to create on 404."""
 	log_taxjar_call(action="update_customer", status="request", payload=customer_data, context=ctx)
 	try:
-		response = client.update_customer(quote(str(customer_id), safe=""), customer_data)
+		response = client.update_customer(customer_id, customer_data)
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
 		if full.get("status_code") == 404:
@@ -1249,7 +1265,7 @@ def delete_customer_from_taxjar(taxjar_customer_id, company=None):
 	ctx = {"doctype": "Customer", "name": taxjar_customer_id, "company": company}
 	log_taxjar_call(action="delete_customer", status="request", context=ctx)
 	try:
-		response = client.delete_customer(quote(str(taxjar_customer_id), safe=""))
+		response = client.delete_customer(taxjar_customer_id)
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
 		if full.get("status_code") == 404:

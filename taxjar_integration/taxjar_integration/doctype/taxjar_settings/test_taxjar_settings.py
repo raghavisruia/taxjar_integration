@@ -12,6 +12,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_format_address_suggestion,
 	_get_customer_name,
 	_has_taxjar_fields_changed,
+	_make_safe_customer_id,
 	_is_taxjar_enabled,
 	_remove_taxjar_rows,
 	_set_customer_sync_status,
@@ -1369,7 +1370,7 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client.create_customer.assert_called_once()
 		mock_client.update_customer.assert_not_called()
 		payload = mock_client.create_customer.call_args[0][0]
-		self.assertEqual(payload["customer_id"], "CUST-001")
+		self.assertEqual(payload["customer_id"], "CUST-001")  # already URL-safe
 		self.assertEqual(payload["exemption_type"], "wholesale")
 		self.assertEqual(payload["name"], "Acme Corp")
 
@@ -1377,9 +1378,29 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		self.assertTrue(len(success_calls) > 0)
 		self.assertTrue(mock_set.called)
 
+	def test_new_customer_with_spaces_uses_safe_id(self):
+		"""Customer names with spaces should get a URL-safe customer_id."""
+		customer_doc = self._make_customer_doc(customer_id="")
+		customer_doc.customer_name = "Denna Jaina"
+		mock_client = MagicMock()
+		mock_client.create_customer.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set:
+			sync_customer_to_taxjar("Denna Jaina", company="Test Co")
+
+		payload = mock_client.create_customer.call_args[0][0]
+		self.assertEqual(payload["customer_id"], "Denna-Jaina")
+		self.assertEqual(payload["name"], "Denna Jaina")
+		# taxjar_customer_id stored as the safe ID
+		id_set_calls = [c for c in mock_set.call_args_list if len(c[0]) >= 4 and c[0][2] == "taxjar_customer_id"]
+		self.assertEqual(id_set_calls[0][0][3], "Denna-Jaina")
+
 	def test_existing_customer_uses_update(self):
-		"""When taxjar_customer_id is set, should call update_customer."""
-		customer_doc = self._make_customer_doc(customer_id="CUST-001")
+		"""When taxjar_customer_id is set, should call update_customer with the stored safe ID."""
+		customer_doc = self._make_customer_doc(customer_id="Denna-Jaina")
 		mock_client = MagicMock()
 		mock_client.update_customer.return_value = MagicMock()
 
@@ -1387,9 +1408,11 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value"):
-			sync_customer_to_taxjar("CUST-001", company="Test Co")
+			sync_customer_to_taxjar("Denna Jaina", company="Test Co")
 
 		mock_client.update_customer.assert_called_once()
+		# The safe ID (from taxjar_customer_id) should be used, not the raw name
+		self.assertEqual(mock_client.update_customer.call_args[0][0], "Denna-Jaina")
 		mock_client.create_customer.assert_not_called()
 
 	def test_update_fallback_to_create_on_404(self):
@@ -2766,6 +2789,47 @@ class TestOnCustomerDelete(UnitTestCase):
 		customer_events = hooks.doc_events.get("Customer", {})
 		self.assertIn("on_trash", customer_events)
 		self.assertIn("on_customer_delete", customer_events["on_trash"])
+
+
+# ── TaxJar Customer API — _make_safe_customer_id ──────────────────────────
+
+
+class TestMakeSafeCustomerId(UnitTestCase):
+
+	def test_simple_name_unchanged(self):
+		self.assertEqual(_make_safe_customer_id("Acme"), "Acme")
+
+	def test_alphanumeric_with_digits(self):
+		self.assertEqual(_make_safe_customer_id("Customer123"), "Customer123")
+
+	def test_spaces_replaced_with_hyphens(self):
+		self.assertEqual(_make_safe_customer_id("Denna Jaina"), "Denna-Jaina")
+
+	def test_multiple_spaces_collapsed(self):
+		self.assertEqual(_make_safe_customer_id("Don  Bosco"), "Don-Bosco")
+
+	def test_apostrophe_replaced(self):
+		self.assertEqual(_make_safe_customer_id("O'Brien"), "O-Brien")
+
+	def test_ampersand_replaced(self):
+		self.assertEqual(_make_safe_customer_id("AT&T Corp"), "AT-T-Corp")
+
+	def test_mixed_special_chars(self):
+		self.assertEqual(_make_safe_customer_id("Smith & O'Neal (LLC)"), "Smith-O-Neal-LLC")
+
+	def test_leading_trailing_specials_stripped(self):
+		self.assertEqual(_make_safe_customer_id(" -Test- "), "Test")
+
+	def test_already_safe_id_unchanged(self):
+		self.assertEqual(_make_safe_customer_id("CUST-001"), "CUST-001")
+
+	def test_hyphens_preserved(self):
+		self.assertEqual(_make_safe_customer_id("some-id"), "some-id")
+
+	def test_unicode_replaced(self):
+		result = _make_safe_customer_id("Müller GmbH")
+		self.assertNotIn("ü", result)
+		self.assertIn("ller", result)
 
 
 # ── TaxJar Customer API — _has_taxjar_fields_changed with customer_name ────
