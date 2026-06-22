@@ -713,6 +713,8 @@ def set_sales_tax(doc, method):
 				doc.get("items")[cint(item.id) - 1].tax_collectable = item.tax_collectable
 				doc.get("items")[cint(item.id) - 1].taxable_amount = item.taxable_amount
 
+			_store_breakdown_data(tax_data, doc)
+
 			doc.run_method("calculate_taxes_and_totals")
 			doc.run_method("set_total_in_words")
 
@@ -739,8 +741,143 @@ def _remove_taxjar_rows(doc, company_config):
 		tax for tax in doc.taxes
 		if tax.account_head != company_config.tax_account_head
 	]
+	_clear_breakdown_data(doc)
 	doc.run_method("calculate_taxes_and_totals")
 	doc.run_method("set_total_in_words")
+
+
+def _clear_breakdown_data(doc):
+	if hasattr(doc, "taxjar_breakdown_json"):
+		doc.taxjar_breakdown_json = None
+	for item in (doc.get("items") or []):
+		if hasattr(item, "taxjar_item_breakdown_json"):
+			item.taxjar_item_breakdown_json = None
+
+
+def _extract_breakdown_from_obj(obj, item_amount=None):
+	"""Extract jurisdiction rows from a TaxJar breakdown or line_item object.
+
+	Works for both transaction-level (TaxJarBreakdown) and per-item
+	(TaxJarBreakdownLineItem) objects. The attribute naming differs between
+	the two (e.g. state_tax_collectable vs state_amount, state_tax_rate vs
+	state_sales_tax_rate), so we select the correct attribute set based on
+	whether item_amount is provided (line item) or not (transaction).
+	"""
+	rows = []
+	is_line_item = item_amount is not None
+
+	# US jurisdictions — attribute names differ between transaction and line item
+	_us_jurisdictions = [
+		("State", "state_taxable_amount",
+		 "state_sales_tax_rate" if is_line_item else "state_tax_rate",
+		 "state_amount" if is_line_item else "state_tax_collectable"),
+		("County", "county_taxable_amount", "county_tax_rate",
+		 "county_amount" if is_line_item else "county_tax_collectable"),
+		("City", "city_taxable_amount", "city_tax_rate",
+		 "city_amount" if is_line_item else "city_tax_collectable"),
+		("Special", "special_district_taxable_amount", "special_tax_rate",
+		 "special_district_amount" if is_line_item else "special_district_tax_collectable"),
+	]
+	for label, taxable_attr, rate_attr, tax_attr in _us_jurisdictions:
+		taxable = flt(getattr(obj, taxable_attr, 0))
+		rate = flt(getattr(obj, rate_attr, 0))
+		tax_amt = flt(getattr(obj, tax_attr, 0))
+		if taxable or rate or tax_amt:
+			row = {"jurisdiction": label, "rate": rate, "tax_amount": tax_amt}
+			if is_line_item:
+				row["taxable_amount"] = taxable
+				row["exempt_or_non_taxable"] = flt(item_amount - taxable)
+			rows.append(row)
+
+	# Canadian GST/PST/QST — same attribute names for both levels
+	_ca_jurisdictions = [
+		("GST", "gst_taxable_amount", "gst_tax_rate", "gst"),
+		("PST", "pst_taxable_amount", "pst_tax_rate", "pst"),
+		("QST", "qst_taxable_amount", "qst_tax_rate", "qst"),
+	]
+	for label, taxable_attr, rate_attr, tax_attr in _ca_jurisdictions:
+		taxable = flt(getattr(obj, taxable_attr, 0))
+		rate = flt(getattr(obj, rate_attr, 0))
+		tax_amt = flt(getattr(obj, tax_attr, 0))
+		if taxable or rate or tax_amt:
+			row = {"jurisdiction": label, "rate": rate, "tax_amount": tax_amt}
+			if is_line_item:
+				row["taxable_amount"] = taxable
+				row["exempt_or_non_taxable"] = flt(item_amount - taxable)
+			rows.append(row)
+
+	# Country-level (EU / AU) — same attribute names for both levels
+	country_taxable = flt(getattr(obj, "country_taxable_amount", 0))
+	country_rate = flt(getattr(obj, "country_tax_rate", 0))
+	country_tax = flt(getattr(obj, "country_tax_collectable", 0))
+	if country_taxable or country_rate or country_tax:
+		row = {"jurisdiction": "Country", "rate": country_rate, "tax_amount": country_tax}
+		if is_line_item:
+			row["taxable_amount"] = country_taxable
+			row["exempt_or_non_taxable"] = flt(item_amount - country_taxable)
+		rows.append(row)
+
+	return rows
+
+
+def _extract_breakdown_data(tax_data, doc):
+	"""Build structured breakdown dict from a TaxJar tax_for_order response."""
+	breakdown = tax_data.breakdown
+	if not breakdown:
+		return None
+
+	transaction_rows = _extract_breakdown_from_obj(breakdown)
+	jurisdictions = tax_data.jurisdictions
+	if jurisdictions and transaction_rows:
+		name_map = {"State": jurisdictions.state, "County": jurisdictions.county,
+		            "City": jurisdictions.city}
+		for row in transaction_rows:
+			row["name"] = name_map.get(row["jurisdiction"], "")
+
+	result = {
+		"transaction": transaction_rows,
+		"totals": {
+			"rate": flt(tax_data.rate),
+			"amount_to_collect": flt(tax_data.amount_to_collect),
+			"taxable_amount": flt(tax_data.taxable_amount),
+		},
+		"line_items": [],
+	}
+
+	for li in (breakdown.line_items or []):
+		item_idx = cint(li.id) - 1
+		item_amount = 0
+		if 0 <= item_idx < len(doc.items):
+			item = doc.items[item_idx]
+			item_amount = flt(item.get("qty")) * flt(item.get("rate"))
+
+		li_rows = _extract_breakdown_from_obj(li, item_amount=item_amount)
+		result["line_items"].append({
+			"id": li.id,
+			"tax_collectable": flt(li.tax_collectable),
+			"taxable_amount": flt(li.taxable_amount),
+			"item_amount": item_amount,
+			"breakdown": li_rows,
+		})
+
+	return result
+
+
+def _store_breakdown_data(tax_data, doc):
+	"""Extract breakdown from tax_data and store JSON on doc and items."""
+	breakdown_data = _extract_breakdown_data(tax_data, doc)
+	if not breakdown_data:
+		return
+
+	if hasattr(doc, "taxjar_breakdown_json"):
+		doc.taxjar_breakdown_json = json.dumps(breakdown_data)
+
+	for li_data in breakdown_data.get("line_items", []):
+		item_idx = cint(li_data["id"]) - 1
+		if 0 <= item_idx < len(doc.items):
+			item = doc.items[item_idx]
+			if hasattr(item, "taxjar_item_breakdown_json"):
+				item.taxjar_item_breakdown_json = json.dumps(li_data)
 
 
 def check_for_nexus(doc, tax_dict):

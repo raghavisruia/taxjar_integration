@@ -9,6 +9,9 @@ from frappe.tests import UnitTestCase
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
 	TAXJAR_ROW_DESCRIPTION,
+	_clear_breakdown_data,
+	_extract_breakdown_data,
+	_extract_breakdown_from_obj,
 	_format_address_suggestion,
 	_get_customer_name,
 	_has_taxjar_fields_changed,
@@ -17,6 +20,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_remove_taxjar_rows,
 	_set_customer_sync_status,
 	_set_sync_status,
+	_store_breakdown_data,
 	_validate_address_with_taxjar,
 	check_for_nexus,
 	check_sales_tax_exemption,
@@ -41,6 +45,8 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
 	TaxJarSettings,
+	_ITEM_BREAKDOWN_FIELDS,
+	_TRANSACTION_BREAKDOWN_FIELDS,
 	_US_STATE_CODE_OPTIONS,
 	make_custom_fields,
 )
@@ -82,6 +88,10 @@ class _FakeItem:
 		self.product_tax_category = None
 		self.tax_collectable = 0.0
 		self.taxable_amount = 0.0
+		self.taxjar_item_breakdown_json = None
+
+	def get(self, field):
+		return getattr(self, field, None)
 
 
 class _FakeDoc:
@@ -102,6 +112,7 @@ class _FakeDoc:
 		self.customer_address = None
 		self.items = [_FakeItem()]   # must be non-empty to pass the early-return guard
 		self.taxes = list(taxes) if taxes else []
+		self.taxjar_breakdown_json = None
 
 	def append(self, field, data):
 		if field == "taxes":
@@ -472,6 +483,7 @@ class TestSetSalesTax(UnitTestCase):
 		tax_data = MagicMock()
 		tax_data.amount_to_collect = 85.0
 		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
@@ -495,6 +507,7 @@ class TestSetSalesTax(UnitTestCase):
 		tax_data = MagicMock()
 		tax_data.amount_to_collect = 90.0
 		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
@@ -3101,3 +3114,560 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 			ws = json.load(f)
 		page_links = [l for l in ws["links"] if l.get("link_to") == "taxjar-customers"]
 		self.assertTrue(len(page_links) > 0)
+
+
+# ── Tax Breakdown: helpers ──────────────────────────────────────────────────
+
+def _make_us_breakdown():
+	"""Return a MagicMock mimicking TaxJar's US tax_for_order breakdown."""
+	breakdown = MagicMock()
+	breakdown.state_taxable_amount = 100.0
+	breakdown.state_tax_rate = 0.0625
+	breakdown.state_tax_collectable = 6.25
+	breakdown.county_taxable_amount = 100.0
+	breakdown.county_tax_rate = 0.01
+	breakdown.county_tax_collectable = 1.0
+	breakdown.city_taxable_amount = 100.0
+	breakdown.city_tax_rate = 0.0
+	breakdown.city_tax_collectable = 0.0
+	breakdown.special_district_taxable_amount = 100.0
+	breakdown.special_tax_rate = 0.025
+	breakdown.special_district_tax_collectable = 2.5
+
+	breakdown.country_taxable_amount = 0
+	breakdown.country_tax_rate = 0
+	breakdown.country_tax_collectable = 0
+	breakdown.gst_taxable_amount = 0
+	breakdown.gst_tax_rate = 0
+	breakdown.gst = 0
+	breakdown.pst_taxable_amount = 0
+	breakdown.pst_tax_rate = 0
+	breakdown.pst = 0
+	breakdown.qst_taxable_amount = 0
+	breakdown.qst_tax_rate = 0
+	breakdown.qst = 0
+
+	li = MagicMock()
+	li.id = 1
+	li.tax_collectable = 9.75
+	li.taxable_amount = 100.0
+	li.combined_tax_rate = 0.0975
+	li.state_taxable_amount = 100.0
+	li.state_sales_tax_rate = 0.0625
+	li.state_amount = 6.25
+	li.county_taxable_amount = 100.0
+	li.county_tax_rate = 0.01
+	li.county_amount = 1.0
+	li.city_taxable_amount = 100.0
+	li.city_tax_rate = 0.0
+	li.city_amount = 0.0
+	li.special_district_taxable_amount = 100.0
+	li.special_tax_rate = 0.025
+	li.special_district_amount = 2.5
+	li.country_taxable_amount = 0
+	li.country_tax_rate = 0
+	li.country_tax_collectable = 0
+	li.gst_taxable_amount = 0
+	li.gst_tax_rate = 0
+	li.gst = 0
+	li.pst_taxable_amount = 0
+	li.pst_tax_rate = 0
+	li.pst = 0
+	li.qst_taxable_amount = 0
+	li.qst_tax_rate = 0
+	li.qst = 0
+	breakdown.line_items = [li]
+
+	tax_data = MagicMock()
+	tax_data.amount_to_collect = 9.75
+	tax_data.rate = 0.0975
+	tax_data.taxable_amount = 100.0
+	tax_data.breakdown = breakdown
+
+	jurisdictions = MagicMock()
+	jurisdictions.state = "CA"
+	jurisdictions.county = "LOS ANGELES"
+	jurisdictions.city = "LOS ANGELES"
+	tax_data.jurisdictions = jurisdictions
+
+	return tax_data
+
+
+def _make_ca_breakdown():
+	"""Return a MagicMock mimicking TaxJar's Canadian GST/PST breakdown."""
+	breakdown = MagicMock()
+	breakdown.state_taxable_amount = 0
+	breakdown.state_tax_rate = 0
+	breakdown.state_tax_collectable = 0
+	breakdown.county_taxable_amount = 0
+	breakdown.county_tax_rate = 0
+	breakdown.county_tax_collectable = 0
+	breakdown.city_taxable_amount = 0
+	breakdown.city_tax_rate = 0
+	breakdown.city_tax_collectable = 0
+	breakdown.special_district_taxable_amount = 0
+	breakdown.special_tax_rate = 0
+	breakdown.special_district_tax_collectable = 0
+	breakdown.country_taxable_amount = 0
+	breakdown.country_tax_rate = 0
+	breakdown.country_tax_collectable = 0
+
+	breakdown.gst_taxable_amount = 200.0
+	breakdown.gst_tax_rate = 0.05
+	breakdown.gst = 10.0
+	breakdown.pst_taxable_amount = 200.0
+	breakdown.pst_tax_rate = 0.07
+	breakdown.pst = 14.0
+	breakdown.qst_taxable_amount = 0
+	breakdown.qst_tax_rate = 0
+	breakdown.qst = 0
+
+	li = MagicMock()
+	li.id = 1
+	li.tax_collectable = 24.0
+	li.taxable_amount = 200.0
+	li.combined_tax_rate = 0.12
+	li.state_taxable_amount = 0
+	li.state_sales_tax_rate = 0
+	li.state_amount = 0
+	li.county_taxable_amount = 0
+	li.county_tax_rate = 0
+	li.county_amount = 0
+	li.city_taxable_amount = 0
+	li.city_tax_rate = 0
+	li.city_amount = 0
+	li.special_district_taxable_amount = 0
+	li.special_tax_rate = 0
+	li.special_district_amount = 0
+	li.country_taxable_amount = 0
+	li.country_tax_rate = 0
+	li.country_tax_collectable = 0
+	li.gst_taxable_amount = 200.0
+	li.gst_tax_rate = 0.05
+	li.gst = 10.0
+	li.pst_taxable_amount = 200.0
+	li.pst_tax_rate = 0.07
+	li.pst = 14.0
+	li.qst_taxable_amount = 0
+	li.qst_tax_rate = 0
+	li.qst = 0
+	breakdown.line_items = [li]
+
+	tax_data = MagicMock()
+	tax_data.amount_to_collect = 24.0
+	tax_data.rate = 0.12
+	tax_data.taxable_amount = 200.0
+	tax_data.breakdown = breakdown
+	tax_data.jurisdictions = MagicMock(state="", county="", city="")
+
+	return tax_data
+
+
+# ── Tax Breakdown: _extract_breakdown_data tests ────────────────────────────
+
+class TestExtractBreakdownData(UnitTestCase):
+
+	def test_us_breakdown_transaction_rows(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		self.assertIsNotNone(result)
+		self.assertEqual(len(result["transaction"]), 4)
+		jurisdictions = [r["jurisdiction"] for r in result["transaction"]]
+		self.assertEqual(jurisdictions, ["State", "County", "City", "Special"])
+
+	def test_us_breakdown_transaction_values(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		state_row = result["transaction"][0]
+		self.assertEqual(state_row["jurisdiction"], "State")
+		self.assertEqual(state_row["name"], "CA")
+		self.assertAlmostEqual(state_row["rate"], 0.0625)
+		self.assertAlmostEqual(state_row["tax_amount"], 6.25)
+
+	def test_us_breakdown_totals(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		self.assertAlmostEqual(result["totals"]["rate"], 0.0975)
+		self.assertAlmostEqual(result["totals"]["amount_to_collect"], 9.75)
+		self.assertAlmostEqual(result["totals"]["taxable_amount"], 100.0)
+
+	def test_us_breakdown_line_items(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		self.assertEqual(len(result["line_items"]), 1)
+		li = result["line_items"][0]
+		self.assertEqual(li["id"], 1)
+		self.assertAlmostEqual(li["tax_collectable"], 9.75)
+		self.assertAlmostEqual(li["taxable_amount"], 100.0)
+		self.assertEqual(len(li["breakdown"]), 4)
+
+	def test_us_item_exempt_or_non_taxable(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		li = result["line_items"][0]
+		for row in li["breakdown"]:
+			self.assertAlmostEqual(row["exempt_or_non_taxable"], 0.0)
+			self.assertAlmostEqual(row["taxable_amount"], 100.0)
+
+	def test_us_item_partial_exemption(self):
+		"""When item_amount > taxable_amount, exempt_or_non_taxable should be the difference."""
+		tax_data = _make_us_breakdown()
+		tax_data.breakdown.line_items[0].state_taxable_amount = 60.0
+		tax_data.breakdown.line_items[0].county_taxable_amount = 60.0
+		tax_data.breakdown.line_items[0].city_taxable_amount = 60.0
+		tax_data.breakdown.line_items[0].special_district_taxable_amount = 60.0
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		li = result["line_items"][0]
+		for row in li["breakdown"]:
+			self.assertAlmostEqual(row["taxable_amount"], 60.0)
+			self.assertAlmostEqual(row["exempt_or_non_taxable"], 40.0)
+
+	def test_canadian_gst_pst_breakdown(self):
+		tax_data = _make_ca_breakdown()
+		doc = _make_doc()
+		doc.items[0].qty = 2
+		doc.items[0].rate = 100.0
+		result = _extract_breakdown_data(tax_data, doc)
+
+		self.assertIsNotNone(result)
+		jurisdictions = [r["jurisdiction"] for r in result["transaction"]]
+		self.assertIn("GST", jurisdictions)
+		self.assertIn("PST", jurisdictions)
+		self.assertNotIn("State", jurisdictions)
+
+	def test_canadian_breakdown_values(self):
+		tax_data = _make_ca_breakdown()
+		doc = _make_doc()
+		doc.items[0].qty = 2
+		doc.items[0].rate = 100.0
+		result = _extract_breakdown_data(tax_data, doc)
+
+		gst = next(r for r in result["transaction"] if r["jurisdiction"] == "GST")
+		self.assertAlmostEqual(gst["rate"], 0.05)
+		self.assertAlmostEqual(gst["tax_amount"], 10.0)
+
+		pst = next(r for r in result["transaction"] if r["jurisdiction"] == "PST")
+		self.assertAlmostEqual(pst["rate"], 0.07)
+		self.assertAlmostEqual(pst["tax_amount"], 14.0)
+
+	def test_no_breakdown_returns_none(self):
+		tax_data = MagicMock()
+		tax_data.breakdown = None
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+		self.assertIsNone(result)
+
+	def test_jurisdiction_names_from_tax_data(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		state_row = next(r for r in result["transaction"] if r["jurisdiction"] == "State")
+		self.assertEqual(state_row["name"], "CA")
+		county_row = next(r for r in result["transaction"] if r["jurisdiction"] == "County")
+		self.assertEqual(county_row["name"], "LOS ANGELES")
+
+
+# ── Tax Breakdown: _clear_breakdown_data tests ──────────────────────────────
+
+class TestClearBreakdownData(UnitTestCase):
+
+	def test_clears_doc_breakdown_json(self):
+		doc = _make_doc()
+		doc.taxjar_breakdown_json = '{"transaction": []}'
+		_clear_breakdown_data(doc)
+		self.assertIsNone(doc.taxjar_breakdown_json)
+
+	def test_clears_item_breakdown_json(self):
+		doc = _make_doc()
+		doc.items[0].taxjar_item_breakdown_json = '{"breakdown": []}'
+		_clear_breakdown_data(doc)
+		self.assertIsNone(doc.items[0].taxjar_item_breakdown_json)
+
+	def test_handles_doc_without_breakdown_field(self):
+		doc = MagicMock()
+		doc.get.return_value = []
+		del doc.taxjar_breakdown_json
+		_clear_breakdown_data(doc)
+
+
+# ── Tax Breakdown: _store_breakdown_data tests ──────────────────────────────
+
+class TestStoreBreakdownData(UnitTestCase):
+
+	def test_stores_json_on_doc(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+
+		self.assertIsNotNone(doc.taxjar_breakdown_json)
+		data = json.loads(doc.taxjar_breakdown_json)
+		self.assertIn("transaction", data)
+		self.assertIn("totals", data)
+		self.assertIn("line_items", data)
+
+	def test_stores_json_on_items(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+
+		self.assertIsNotNone(doc.items[0].taxjar_item_breakdown_json)
+		data = json.loads(doc.items[0].taxjar_item_breakdown_json)
+		self.assertIn("breakdown", data)
+		self.assertEqual(data["id"], 1)
+
+	def test_no_breakdown_leaves_none(self):
+		tax_data = MagicMock()
+		tax_data.breakdown = None
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		self.assertIsNone(doc.taxjar_breakdown_json)
+
+
+# ── Tax Breakdown: set_sales_tax integration ────────────────────────────────
+
+class TestSetSalesTaxBreakdown(UnitTestCase):
+
+	def test_breakdown_json_populated_on_tax_calc(self):
+		"""set_sales_tax should populate taxjar_breakdown_json when tax is calculated."""
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertIsNotNone(doc.taxjar_breakdown_json)
+		data = json.loads(doc.taxjar_breakdown_json)
+		self.assertEqual(len(data["transaction"]), 4)
+		self.assertAlmostEqual(data["totals"]["amount_to_collect"], 9.75)
+
+	def test_breakdown_json_populated_on_items(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertIsNotNone(doc.items[0].taxjar_item_breakdown_json)
+		data = json.loads(doc.items[0].taxjar_item_breakdown_json)
+		self.assertEqual(len(data["breakdown"]), 4)
+
+	def test_breakdown_cleared_when_zero_tax(self):
+		"""When TaxJar returns zero tax, breakdown should be cleared."""
+		doc = _make_doc()
+		doc.taxjar_breakdown_json = '{"old": "data"}'
+		doc.items[0].taxjar_item_breakdown_json = '{"old": "item_data"}'
+
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 0
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertIsNone(doc.taxjar_breakdown_json)
+		self.assertIsNone(doc.items[0].taxjar_item_breakdown_json)
+
+	def test_breakdown_cleared_when_outside_nexus(self):
+		"""When delivery is outside nexus, breakdown should be cleared."""
+		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Tax", 80.0)])
+		doc.taxjar_breakdown_json = '{"old": "data"}'
+		doc.items[0].taxjar_item_breakdown_json = '{"old": "item_data"}'
+		company_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=company_config), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"to_state": "TX", "dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None):
+			set_sales_tax(doc, None)
+
+		self.assertIsNone(doc.taxjar_breakdown_json)
+		self.assertIsNone(doc.items[0].taxjar_item_breakdown_json)
+
+
+# ── Tax Breakdown: Custom field schema tests ────────────────────────────────
+
+class TestTaxBreakdownCustomFields(UnitTestCase):
+
+	def test_transaction_breakdown_fields_defined(self):
+		self.assertEqual(len(_TRANSACTION_BREAKDOWN_FIELDS), 3)
+		fieldnames = [f["fieldname"] for f in _TRANSACTION_BREAKDOWN_FIELDS]
+		self.assertIn("taxjar_breakdown_section", fieldnames)
+		self.assertIn("taxjar_breakdown_json", fieldnames)
+		self.assertIn("taxjar_breakdown_html", fieldnames)
+
+	def test_item_breakdown_fields_defined(self):
+		self.assertEqual(len(_ITEM_BREAKDOWN_FIELDS), 3)
+		fieldnames = [f["fieldname"] for f in _ITEM_BREAKDOWN_FIELDS]
+		self.assertIn("taxjar_item_tax_section", fieldnames)
+		self.assertIn("taxjar_item_breakdown_json", fieldnames)
+		self.assertIn("taxjar_item_breakdown_html", fieldnames)
+
+	def test_breakdown_fields_on_all_transaction_doctypes(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+		import inspect
+		source = inspect.getsource(make_custom_fields)
+		for dt in ("Quotation", "Sales Order", "Sales Invoice"):
+			self.assertIn(dt, source, f"make_custom_fields should reference {dt}")
+
+	def test_item_breakdown_fields_on_all_item_tables(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+		import inspect
+		source = inspect.getsource(make_custom_fields)
+		for dt in ("Quotation Item", "Sales Order Item", "Sales Invoice Item"):
+			self.assertIn(dt, source, f"make_custom_fields should reference {dt}")
+
+	def test_sales_invoice_breakdown_json_allows_on_submit(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+		import inspect
+		source = inspect.getsource(make_custom_fields)
+		self.assertIn("allow_on_submit", source)
+
+	def test_transaction_fields_insert_after_other_charges(self):
+		for f in _TRANSACTION_BREAKDOWN_FIELDS:
+			if f["fieldname"] == "taxjar_breakdown_section":
+				self.assertEqual(f["insert_after"], "other_charges_calculation")
+
+	def test_item_fields_insert_after_taxable_amount(self):
+		for f in _ITEM_BREAKDOWN_FIELDS:
+			if f["fieldname"] == "taxjar_item_tax_section":
+				self.assertEqual(f["insert_after"], "taxable_amount")
+
+
+# ── Tax Breakdown: JS structure tests ───────────────────────────────────────
+
+class TestTaxBreakdownJS(UnitTestCase):
+
+	def test_quotation_js_exists(self):
+		import os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/public/js/quotation.js"
+		)
+		self.assertTrue(os.path.isfile(path))
+
+	def test_sales_order_js_exists(self):
+		import os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/public/js/sales_order.js"
+		)
+		self.assertTrue(os.path.isfile(path))
+
+	def test_quotation_js_has_render_functions(self):
+		import os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/public/js/quotation.js"
+		)
+		with open(path) as f:
+			js = f.read()
+		self.assertIn("_render_tax_breakdown", js)
+		self.assertIn("_render_item_tax_breakdown", js)
+		self.assertIn("taxjar_breakdown_json", js)
+		self.assertIn("taxjar_item_breakdown_json", js)
+
+	def test_sales_order_js_has_render_functions(self):
+		import os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/public/js/sales_order.js"
+		)
+		with open(path) as f:
+			js = f.read()
+		self.assertIn("_render_tax_breakdown", js)
+		self.assertIn("_render_item_tax_breakdown", js)
+		self.assertIn("taxjar_breakdown_json", js)
+
+	def test_sales_invoice_js_has_render_functions(self):
+		import os
+		path = os.path.join(
+			"/home/raghav/frappe-work/benches/v16-bench-group"
+			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+			"/public/js/sales_invoice.js"
+		)
+		with open(path) as f:
+			js = f.read()
+		self.assertIn("_render_tax_breakdown", js)
+		self.assertIn("_render_item_tax_breakdown", js)
+
+	def test_hooks_register_quotation_js(self):
+		from taxjar_integration.hooks import doctype_js
+		self.assertIn("Quotation", doctype_js)
+		self.assertIn("quotation.js", doctype_js["Quotation"])
+
+	def test_hooks_register_sales_order_js(self):
+		from taxjar_integration.hooks import doctype_js
+		self.assertIn("Sales Order", doctype_js)
+		self.assertIn("sales_order.js", doctype_js["Sales Order"])
+
+	def test_js_renders_jurisdiction_columns(self):
+		import os
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			path = os.path.join(
+				"/home/raghav/frappe-work/benches/v16-bench-group"
+				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+				"/public/js",
+				filename,
+			)
+			with open(path) as f:
+				js = f.read()
+			self.assertIn("Jurisdiction", js, f"{filename} should render Jurisdiction column")
+			self.assertIn("Rate", js, f"{filename} should render Rate column")
+			self.assertIn("Tax Amount", js, f"{filename} should render Tax Amount column")
+
+	def test_item_js_renders_exempt_columns(self):
+		import os
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			path = os.path.join(
+				"/home/raghav/frappe-work/benches/v16-bench-group"
+				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+				"/public/js",
+				filename,
+			)
+			with open(path) as f:
+				js = f.read()
+			self.assertIn("Exempt/Non-Taxable", js, f"{filename} should render Exempt column")
+			self.assertIn("Taxable", js, f"{filename} should render Taxable column")

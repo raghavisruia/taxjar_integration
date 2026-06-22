@@ -188,6 +188,52 @@ _US_STATE_CODE_OPTIONS = (
 )
 
 
+_TRANSACTION_BREAKDOWN_FIELDS = [
+	dict(
+		fieldname="taxjar_breakdown_section",
+		fieldtype="Section Break",
+		insert_after="other_charges_calculation",
+		label="TaxJar Tax Breakdown",
+		collapsible=1,
+	),
+	dict(
+		fieldname="taxjar_breakdown_json",
+		fieldtype="Long Text",
+		insert_after="taxjar_breakdown_section",
+		hidden=1,
+		read_only=1,
+	),
+	dict(
+		fieldname="taxjar_breakdown_html",
+		fieldtype="HTML",
+		insert_after="taxjar_breakdown_json",
+	),
+]
+
+_ITEM_BREAKDOWN_FIELDS = [
+	dict(
+		fieldname="taxjar_item_tax_section",
+		fieldtype="Section Break",
+		insert_after="taxable_amount",
+		label="TaxJar Tax Detail",
+		collapsible=1,
+	),
+	dict(
+		fieldname="taxjar_item_breakdown_json",
+		fieldtype="Long Text",
+		insert_after="taxjar_item_tax_section",
+		hidden=1,
+		read_only=1,
+	),
+	dict(
+		fieldname="taxjar_item_breakdown_html",
+		fieldtype="HTML",
+		insert_after="taxjar_item_breakdown_json",
+		read_only=1,
+	),
+]
+
+
 def make_custom_fields(update=True):
 	custom_fields = {
 		"Sales Invoice Item": [
@@ -215,6 +261,62 @@ def make_custom_fields(update=True):
 				read_only=1,
 				options="currency",
 			),
+			*[{**f, "allow_on_submit": 1} if f["fieldname"] == "taxjar_item_breakdown_json" else f
+			  for f in _ITEM_BREAKDOWN_FIELDS],
+		],
+		"Quotation Item": [
+			dict(
+				fieldname="product_tax_category",
+				fieldtype="Link",
+				insert_after="description",
+				options="Product Tax Category",
+				label="Product Tax Category",
+				fetch_from="item_code.product_tax_category",
+			),
+			dict(
+				fieldname="tax_collectable",
+				fieldtype="Currency",
+				insert_after="net_amount",
+				label="Tax Collectable",
+				read_only=1,
+				options="currency",
+			),
+			dict(
+				fieldname="taxable_amount",
+				fieldtype="Currency",
+				insert_after="tax_collectable",
+				label="Taxable Amount",
+				read_only=1,
+				options="currency",
+			),
+			*_ITEM_BREAKDOWN_FIELDS,
+		],
+		"Sales Order Item": [
+			dict(
+				fieldname="product_tax_category",
+				fieldtype="Link",
+				insert_after="description",
+				options="Product Tax Category",
+				label="Product Tax Category",
+				fetch_from="item_code.product_tax_category",
+			),
+			dict(
+				fieldname="tax_collectable",
+				fieldtype="Currency",
+				insert_after="net_amount",
+				label="Tax Collectable",
+				read_only=1,
+				options="currency",
+			),
+			dict(
+				fieldname="taxable_amount",
+				fieldtype="Currency",
+				insert_after="tax_collectable",
+				label="Taxable Amount",
+				read_only=1,
+				options="currency",
+			),
+			*_ITEM_BREAKDOWN_FIELDS,
 		],
 		"Item": [
 			dict(
@@ -225,6 +327,8 @@ def make_custom_fields(update=True):
 				label="Product Tax Category",
 			)
 		],
+		"Quotation": _TRANSACTION_BREAKDOWN_FIELDS,
+		"Sales Order": _TRANSACTION_BREAKDOWN_FIELDS,
 		"Address": [
 			dict(
 				fieldname="taxjar_state_code",
@@ -237,6 +341,8 @@ def make_custom_fields(update=True):
 			)
 		],
 		"Sales Invoice": [
+			*[{**f, "allow_on_submit": 1} if f["fieldname"] == "taxjar_breakdown_json" else f
+			  for f in _TRANSACTION_BREAKDOWN_FIELDS],
 			dict(
 				fieldname="taxjar_tab",
 				fieldtype="Tab Break",
