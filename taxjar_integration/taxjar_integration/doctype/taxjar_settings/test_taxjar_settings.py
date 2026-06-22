@@ -3604,7 +3604,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 		with open(path) as f:
 			js = f.read()
 		self.assertIn("_render_tax_breakdown", js)
-		self.assertIn("_render_item_tax_breakdown", js)
+		self.assertIn("_render_single_item_breakdown", js)
 		self.assertIn("taxjar_breakdown_json", js)
 		self.assertIn("taxjar_item_breakdown_json", js)
 
@@ -3618,7 +3618,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 		with open(path) as f:
 			js = f.read()
 		self.assertIn("_render_tax_breakdown", js)
-		self.assertIn("_render_item_tax_breakdown", js)
+		self.assertIn("_render_single_item_breakdown", js)
 		self.assertIn("taxjar_breakdown_json", js)
 
 	def test_sales_invoice_js_has_render_functions(self):
@@ -3631,7 +3631,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 		with open(path) as f:
 			js = f.read()
 		self.assertIn("_render_tax_breakdown", js)
-		self.assertIn("_render_item_tax_breakdown", js)
+		self.assertIn("_render_single_item_breakdown", js)
 
 	def test_hooks_register_quotation_js(self):
 		from taxjar_integration.hooks import doctype_js
@@ -3671,3 +3671,22 @@ class TestTaxBreakdownJS(UnitTestCase):
 				js = f.read()
 			self.assertIn("Exempt/Non-Taxable", js, f"{filename} should render Exempt column")
 			self.assertIn("Taxable", js, f"{filename} should render Taxable column")
+
+	def test_item_breakdown_uses_form_render_event(self):
+		import os
+		child_doctypes = {
+			"quotation.js": "Quotation Item",
+			"sales_order.js": "Sales Order Item",
+			"sales_invoice.js": "Sales Invoice Item",
+		}
+		for filename, child_dt in child_doctypes.items():
+			path = os.path.join(
+				"/home/raghav/frappe-work/benches/v16-bench-group"
+				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+				"/public/js",
+				filename,
+			)
+			with open(path) as f:
+				js = f.read()
+			self.assertIn(child_dt, js, f"{filename} should register handler on {child_dt}")
+			self.assertIn("form_render", js, f"{filename} should use form_render event")
