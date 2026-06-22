@@ -10,10 +10,13 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
 	TAXJAR_ROW_DESCRIPTION,
 	_clear_breakdown_data,
+	_convert_breakdown_amounts,
 	_extract_breakdown_data,
 	_extract_breakdown_from_obj,
 	_format_address_suggestion,
 	_get_customer_name,
+	_get_transaction_date,
+	_get_usd_exchange_rate,
 	_has_taxjar_fields_changed,
 	_make_safe_customer_id,
 	_is_taxjar_enabled,
@@ -96,7 +99,7 @@ class _FakeItem:
 
 class _FakeDoc:
 	"""Minimal stand-in for a Frappe document that supports append() on taxes."""
-	def __init__(self, company="Test Co", taxes=None):
+	def __init__(self, company="Test Co", taxes=None, currency="USD"):
 		self.company = company
 		self.doctype = "Sales Invoice"
 		self.name = "SINV-TEST-001"
@@ -104,12 +107,14 @@ class _FakeDoc:
 		self.is_return = False
 		self.return_against = None
 		self.posting_date = "2025-06-01"
+		self.transaction_date = "2025-06-01"
 		self.net_total = 1000.0
 		self.total = 1000.0
 		self.exempt_from_sales_tax = 0
 		self.customer = "_Test Customer"
 		self.shipping_address_name = None
 		self.customer_address = None
+		self.currency = currency
 		self.items = [_FakeItem()]   # must be non-empty to pass the early-return guard
 		self.taxes = list(taxes) if taxes else []
 		self.taxjar_breakdown_json = None
@@ -130,8 +135,8 @@ class _FakeDoc:
 		return getattr(self, field, [])
 
 
-def _make_doc(company="Test Co", taxes=None):
-	return _FakeDoc(company=company, taxes=taxes)
+def _make_doc(company="Test Co", taxes=None, currency="USD"):
+	return _FakeDoc(company=company, taxes=taxes, currency=currency)
 
 
 # ── Phase 1: Schema & Validation ──────────────────────────────────────────────
@@ -3581,14 +3586,13 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		data = json.loads(doc.items[0].taxjar_item_breakdown_json)
 		self.assertEqual(len(data["breakdown"]), 4)
 
-	def test_breakdown_cleared_when_zero_tax(self):
-		"""When TaxJar returns zero tax, breakdown should be cleared."""
+	def test_zero_tax_keeps_row_and_stores_breakdown(self):
+		"""When TaxJar returns zero tax, a $0 row should be added and breakdown stored."""
+		import json
+		tax_data = _make_us_breakdown()
+		tax_data.amount_to_collect = 0.0
+		tax_data.rate = 0.0
 		doc = _make_doc()
-		doc.taxjar_breakdown_json = '{"old": "data"}'
-		doc.items[0].taxjar_item_breakdown_json = '{"old": "item_data"}'
-
-		tax_data = MagicMock()
-		tax_data.amount_to_collect = 0
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
@@ -3600,8 +3604,12 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
-		self.assertIsNone(doc.taxjar_breakdown_json)
-		self.assertIsNone(doc.items[0].taxjar_item_breakdown_json)
+		tax_rows = [t for t in doc.taxes if t.account_head == "Sales Tax - TC"]
+		self.assertEqual(len(tax_rows), 1)
+		self.assertEqual(tax_rows[0].tax_amount, 0.0)
+		self.assertIsNotNone(doc.taxjar_breakdown_json)
+		data = json.loads(doc.taxjar_breakdown_json)
+		self.assertIn("transaction", data)
 
 	def test_breakdown_cleared_when_outside_nexus(self):
 		"""When delivery is outside nexus, breakdown should be cleared."""
@@ -3789,3 +3797,183 @@ class TestTaxBreakdownJS(UnitTestCase):
 				js = f.read()
 			self.assertIn(child_dt, js, f"{filename} should register handler on {child_dt}")
 			self.assertIn("form_render", js, f"{filename} should use form_render event")
+
+	def test_js_has_no_breakdown_message(self):
+		import os
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			path = os.path.join(
+				"/home/raghav/frappe-work/benches/v16-bench-group"
+				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+				"/public/js",
+				filename,
+			)
+			with open(path) as f:
+				js = f.read()
+			self.assertIn("No TaxJar tax breakdown available", js, f"{filename} should have no-breakdown message")
+
+	def test_js_has_multi_currency_support(self):
+		import os
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			path = os.path.join(
+				"/home/raghav/frappe-work/benches/v16-bench-group"
+				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+				"/public/js",
+				filename,
+			)
+			with open(path) as f:
+				js = f.read()
+			self.assertIn("data.usd", js, f"{filename} should check for USD breakdown data")
+			self.assertIn("Tax Calculation (USD)", js, f"{filename} should have USD table heading")
+			self.assertIn("Equivalent in Transaction Currency", js, f"{filename} should have converted table heading")
+
+	def test_js_uses_erpnext_table_styling(self):
+		import os
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			path = os.path.join(
+				"/home/raghav/frappe-work/benches/v16-bench-group"
+				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+				"/public/js",
+				filename,
+			)
+			with open(path) as f:
+				js = f.read()
+			self.assertIn("table-hover", js, f"{filename} should use table-hover class")
+			self.assertIn("tax-break-up", js, f"{filename} should use tax-break-up wrapper")
+			self.assertIn("overflow-x: auto", js, f"{filename} should have overflow-x auto")
+			self.assertNotIn("table-sm", js, f"{filename} should not use table-sm class")
+
+
+# ── Tax Breakdown: Multi-currency tests ─────────────────────────────────────
+
+class TestGetTransactionDate(UnitTestCase):
+
+	def test_uses_posting_date_for_sales_invoice(self):
+		doc = _make_doc()
+		doc.posting_date = "2026-01-15"
+		doc.transaction_date = "2026-01-10"
+		self.assertEqual(_get_transaction_date(doc), "2026-01-15")
+
+	def test_falls_back_to_transaction_date(self):
+		doc = _make_doc()
+		doc.posting_date = None
+		doc.transaction_date = "2026-01-10"
+		self.assertEqual(_get_transaction_date(doc), "2026-01-10")
+
+
+class TestGetUsdExchangeRate(UnitTestCase):
+
+	def test_returns_none_for_usd(self):
+		doc = _make_doc(currency="USD")
+		self.assertIsNone(_get_usd_exchange_rate(doc))
+
+	def test_returns_rate_for_non_usd(self):
+		doc = _make_doc(currency="EUR")
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_exchange_rate", return_value=1.0856):
+			rate = _get_usd_exchange_rate(doc)
+		self.assertAlmostEqual(rate, 1.0856)
+
+	def test_throws_when_rate_not_found(self):
+		doc = _make_doc(currency="EUR")
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_exchange_rate", return_value=0), \
+		     self.assertRaises(Exception):
+			_get_usd_exchange_rate(doc)
+
+
+class TestConvertBreakdownAmounts(UnitTestCase):
+
+	def test_converts_transaction_rows(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		usd_data = _extract_breakdown_data(tax_data, doc)
+		converted = _convert_breakdown_amounts(usd_data, 1.1)
+
+		state = converted["transaction"][0]
+		self.assertAlmostEqual(state["tax_amount"], 6.25 / 1.1, places=2)
+
+	def test_converts_totals(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		usd_data = _extract_breakdown_data(tax_data, doc)
+		converted = _convert_breakdown_amounts(usd_data, 1.1)
+
+		self.assertAlmostEqual(converted["totals"]["amount_to_collect"], 9.75 / 1.1, places=2)
+		self.assertEqual(converted["totals"]["rate"], usd_data["totals"]["rate"])
+
+	def test_converts_line_item_amounts(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		usd_data = _extract_breakdown_data(tax_data, doc)
+		converted = _convert_breakdown_amounts(usd_data, 1.1)
+
+		li = converted["line_items"][0]
+		self.assertAlmostEqual(li["tax_collectable"], 9.75 / 1.1, places=2)
+		self.assertAlmostEqual(li["item_amount"], 100.0 / 1.1, places=2)
+
+	def test_converts_item_breakdown_rows(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		usd_data = _extract_breakdown_data(tax_data, doc)
+		converted = _convert_breakdown_amounts(usd_data, 2.0)
+
+		li_row = converted["line_items"][0]["breakdown"][0]
+		self.assertAlmostEqual(li_row["taxable_amount"], 50.0)
+		self.assertAlmostEqual(li_row["exempt_or_non_taxable"], 0.0)
+
+
+class TestStoreBreakdownMultiCurrency(UnitTestCase):
+
+	def test_usd_doc_stores_currency_field(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc(currency="USD")
+		_store_breakdown_data(tax_data, doc)
+
+		data = json.loads(doc.taxjar_breakdown_json)
+		self.assertEqual(data["currency"], "USD")
+		self.assertNotIn("usd", data)
+
+	def test_non_usd_doc_stores_both(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc(currency="EUR")
+		_store_breakdown_data(tax_data, doc, usd_rate=1.1)
+
+		data = json.loads(doc.taxjar_breakdown_json)
+		self.assertEqual(data["currency"], "EUR")
+		self.assertEqual(data["base_currency"], "USD")
+		self.assertAlmostEqual(data["exchange_rate"], 1.1)
+		self.assertIn("usd", data)
+		self.assertIn("transaction", data["usd"])
+		self.assertIn("totals", data["usd"])
+
+	def test_non_usd_doc_converted_amounts_differ(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc(currency="EUR")
+		_store_breakdown_data(tax_data, doc, usd_rate=1.1)
+
+		data = json.loads(doc.taxjar_breakdown_json)
+		usd_total = data["usd"]["totals"]["amount_to_collect"]
+		converted_total = data["totals"]["amount_to_collect"]
+		self.assertAlmostEqual(usd_total, 9.75)
+		self.assertAlmostEqual(converted_total, 9.75 / 1.1, places=2)
+
+	def test_non_usd_item_json_has_usd_key(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc(currency="EUR")
+		_store_breakdown_data(tax_data, doc, usd_rate=1.1)
+
+		item_data = json.loads(doc.items[0].taxjar_item_breakdown_json)
+		self.assertIn("usd", item_data)
+		self.assertEqual(item_data["currency"], "EUR")
+		self.assertAlmostEqual(item_data["exchange_rate"], 1.1)
+
+	def test_non_usd_stores_exchange_date(self):
+		import json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc(currency="EUR")
+		_store_breakdown_data(tax_data, doc, usd_rate=1.1)
+
+		data = json.loads(doc.taxjar_breakdown_json)
+		self.assertEqual(data["exchange_date"], "2025-06-01")

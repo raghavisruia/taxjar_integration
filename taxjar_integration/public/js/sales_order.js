@@ -10,12 +10,85 @@ frappe.ui.form.on("Sales Order Item", {
 	},
 });
 
+function _build_transaction_table(rows, totals, currency) {
+	const body = rows
+		.map(
+			(r) =>
+				`<tr>
+				<td>${frappe.utils.escape_html(r.jurisdiction)}</td>
+				<td>${frappe.utils.escape_html(r.name || "")}</td>
+				<td class="text-right">${(r.rate * 100).toFixed(3)}%</td>
+				<td class="text-right">${format_currency(r.tax_amount, currency)}</td>
+			</tr>`
+		)
+		.join("");
+
+	return `
+		<div class="tax-break-up" style="overflow-x: auto;">
+			<table class="table table-bordered table-hover">
+				<thead><tr>
+					<th class="text-left">${__("Jurisdiction")}</th>
+					<th class="text-left">${__("Name")}</th>
+					<th class="text-right">${__("Rate")}</th>
+					<th class="text-right">${__("Tax Amount")}</th>
+				</tr></thead>
+				<tbody>${body}</tbody>
+				<tfoot><tr style="font-weight:bold">
+					<td>${__("Total")}</td>
+					<td></td>
+					<td class="text-right">${((totals.rate || 0) * 100).toFixed(3)}%</td>
+					<td class="text-right">${format_currency(totals.amount_to_collect || 0, currency)}</td>
+				</tr></tfoot>
+			</table>
+		</div>`;
+}
+
+function _build_item_table(rows, currency) {
+	const body = rows
+		.map(
+			(r) =>
+				`<tr>
+				<td>${frappe.utils.escape_html(r.jurisdiction)}</td>
+				<td class="text-right">${format_currency(r.exempt_or_non_taxable || 0, currency)}</td>
+				<td class="text-right">${format_currency(r.taxable_amount || 0, currency)}</td>
+				<td class="text-right">${(r.rate * 100).toFixed(3)}%</td>
+				<td class="text-right">${format_currency(r.tax_amount, currency)}</td>
+			</tr>`
+		)
+		.join("");
+
+	return `
+		<div class="tax-break-up" style="overflow-x: auto;">
+			<table class="table table-bordered table-hover">
+				<thead><tr>
+					<th class="text-left">${__("Jurisdiction")}</th>
+					<th class="text-right">${__("Exempt/Non-Taxable")}</th>
+					<th class="text-right">${__("Taxable")}</th>
+					<th class="text-right">${__("Rate")}</th>
+					<th class="text-right">${__("Tax Amount")}</th>
+				</tr></thead>
+				<tbody>${body}</tbody>
+			</table>
+		</div>`;
+}
+
+function _no_breakdown_msg() {
+	return `<p class="text-muted">${__("No TaxJar tax breakdown available for this transaction.")}</p>`;
+}
+
+function _multi_currency_note(data) {
+	return `<p class="text-muted small">${
+		__("This is a multi-currency transaction. Amounts were converted from {0} to USD at a rate of {1} ({2}) for TaxJar tax calculation.",
+			[data.currency, data.exchange_rate, data.exchange_date])
+	}</p>`;
+}
+
 function _render_tax_breakdown(frm) {
 	if (!frm.fields_dict.taxjar_breakdown_html) return;
 	const wrapper = frm.fields_dict.taxjar_breakdown_html.$wrapper;
 
 	if (!frm.doc.taxjar_breakdown_json) {
-		wrapper.html("");
+		wrapper.html(_no_breakdown_msg());
 		return;
 	}
 
@@ -23,40 +96,24 @@ function _render_tax_breakdown(frm) {
 	try {
 		data = JSON.parse(frm.doc.taxjar_breakdown_json);
 	} catch (e) {
-		wrapper.html("");
+		wrapper.html(_no_breakdown_msg());
 		return;
 	}
 
-	const rows = (data.transaction || [])
-		.map(
-			(r) =>
-				`<tr>
-				<td>${frappe.utils.escape_html(r.jurisdiction)}</td>
-				<td>${frappe.utils.escape_html(r.name || "")}</td>
-				<td style="text-align:right">${(r.rate * 100).toFixed(3)}%</td>
-				<td style="text-align:right">${format_currency(r.tax_amount, frm.doc.currency)}</td>
-			</tr>`
-		)
-		.join("");
+	let html = "";
+	const currency = data.currency || frm.doc.currency;
 
-	const totals = data.totals || {};
-	wrapper.html(`
-		<table class="table table-bordered table-sm" style="max-width:600px">
-			<thead><tr>
-				<th>${__("Jurisdiction")}</th>
-				<th>${__("Name")}</th>
-				<th style="text-align:right">${__("Rate")}</th>
-				<th style="text-align:right">${__("Tax Amount")}</th>
-			</tr></thead>
-			<tbody>${rows}</tbody>
-			<tfoot><tr style="font-weight:bold">
-				<td>${__("Total")}</td>
-				<td></td>
-				<td style="text-align:right">${((totals.rate || 0) * 100).toFixed(3)}%</td>
-				<td style="text-align:right">${format_currency(totals.amount_to_collect || 0, frm.doc.currency)}</td>
-			</tr></tfoot>
-		</table>
-	`);
+	if (data.usd) {
+		html += _multi_currency_note(data);
+		html += `<p class="text-muted small" style="margin-bottom:4px"><strong>${__("Tax Calculation (USD)")}</strong></p>`;
+		html += _build_transaction_table(data.usd.transaction || [], data.usd.totals || {}, "USD");
+		html += `<p class="text-muted small" style="margin-top:12px;margin-bottom:4px"><strong>${
+			__("Equivalent in Transaction Currency ({0})", [currency])
+		}</strong></p>`;
+	}
+
+	html += _build_transaction_table(data.transaction || [], data.totals || {}, currency);
+	wrapper.html(html);
 }
 
 function _render_single_item_breakdown(frm, cdn) {
@@ -66,7 +123,7 @@ function _render_single_item_breakdown(frm, cdn) {
 
 	const item = frappe.get_doc("Sales Order Item", cdn);
 	if (!item?.taxjar_item_breakdown_json) {
-		field.$wrapper.html("");
+		field.$wrapper.html(_no_breakdown_msg());
 		return;
 	}
 
@@ -74,33 +131,21 @@ function _render_single_item_breakdown(frm, cdn) {
 	try {
 		data = JSON.parse(item.taxjar_item_breakdown_json);
 	} catch (e) {
-		field.$wrapper.html("");
+		field.$wrapper.html(_no_breakdown_msg());
 		return;
 	}
 
-	const rows = (data.breakdown || [])
-		.map(
-			(r) =>
-				`<tr>
-				<td>${frappe.utils.escape_html(r.jurisdiction)}</td>
-				<td style="text-align:right">${format_currency(r.exempt_or_non_taxable || 0, frm.doc.currency)}</td>
-				<td style="text-align:right">${format_currency(r.taxable_amount || 0, frm.doc.currency)}</td>
-				<td style="text-align:right">${(r.rate * 100).toFixed(3)}%</td>
-				<td style="text-align:right">${format_currency(r.tax_amount, frm.doc.currency)}</td>
-			</tr>`
-		)
-		.join("");
+	let html = "";
+	const currency = data.currency || frm.doc.currency;
 
-	field.$wrapper.html(`
-		<table class="table table-bordered table-sm">
-			<thead><tr>
-				<th>${__("Jurisdiction")}</th>
-				<th style="text-align:right">${__("Exempt/Non-Taxable")}</th>
-				<th style="text-align:right">${__("Taxable")}</th>
-				<th style="text-align:right">${__("Rate")}</th>
-				<th style="text-align:right">${__("Tax Amount")}</th>
-			</tr></thead>
-			<tbody>${rows}</tbody>
-		</table>
-	`);
+	if (data.usd) {
+		html += `<p class="text-muted small" style="margin-bottom:4px"><strong>${__("Tax Calculation (USD)")}</strong></p>`;
+		html += _build_item_table(data.usd.breakdown || [], "USD");
+		html += `<p class="text-muted small" style="margin-top:12px;margin-bottom:4px"><strong>${
+			__("Equivalent in Transaction Currency ({0})", [currency])
+		}</strong></p>`;
+	}
+
+	html += _build_item_table(data.breakdown || [], currency);
+	field.$wrapper.html(html);
 }

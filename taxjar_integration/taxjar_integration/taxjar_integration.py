@@ -11,6 +11,7 @@ from frappe.utils import cint, flt
 from frappe.utils.password import get_decrypted_password
 
 from erpnext import get_region
+from erpnext.setup.utils import get_exchange_rate
 
 SUPPORTED_COUNTRY_CODES = [
 	"AT",
@@ -520,6 +521,26 @@ def delete_transaction_manual(invoice_name):
 		frappe.throw(_("Failed to delete from TaxJar: {0}").format(str(e)))
 
 
+def _get_transaction_date(doc):
+	return getattr(doc, "posting_date", None) or getattr(doc, "transaction_date", None)
+
+
+def _get_usd_exchange_rate(doc):
+	"""Return the exchange rate from doc.currency to USD, or None if already USD."""
+	currency = getattr(doc, "currency", None) or "USD"
+	if currency == "USD":
+		return None
+	txn_date = _get_transaction_date(doc)
+	rate = flt(get_exchange_rate(currency, "USD", txn_date, args="for_selling"))
+	if not rate:
+		frappe.throw(
+			_("Could not find exchange rate from {0} to USD for {1}. "
+			  "Please add it in Currency Exchange or configure Currency Exchange Settings."
+			).format(currency, txn_date)
+		)
+	return rate
+
+
 def get_tax_data(doc):
 	company_config = get_company_config(doc.company)
 	if not company_config:
@@ -548,6 +569,16 @@ def get_tax_data(doc):
 	if to_shipping_state not in SUPPORTED_STATE_CODES:
 		to_shipping_state = get_state_code(to_address, "Shipping")
 
+	usd_rate = _get_usd_exchange_rate(doc)
+	if usd_rate:
+		shipping = flt(shipping * usd_rate, 2)
+		for li in line_items:
+			li["unit_price"] = flt(li["unit_price"] * usd_rate, 2)
+			if "discount" in li:
+				li["discount"] = flt(li["discount"] * usd_rate, 2)
+			if "sales_tax" in li:
+				li["sales_tax"] = flt(li["sales_tax"] * usd_rate, 2)
+
 	tax_dict = {
 		"from_country": from_country_code,
 		"from_zip": from_address.pincode,
@@ -560,7 +591,7 @@ def get_tax_data(doc):
 		"to_street": to_address.address_line1,
 		"to_state": to_shipping_state,
 		"shipping": shipping,
-		"amount": doc.net_total,
+		"amount": flt(doc.net_total * usd_rate, 2) if usd_rate else doc.net_total,
 		"plugin": "erpnext",
 		"line_items": line_items,
 	}
@@ -691,32 +722,39 @@ def set_sales_tax(doc, method):
 		tax_data = validate_tax_request(tax_dict)
 		if tax_data is not None:
 			frappe.cache().set_value(cache_key, tax_data, expires_in_sec=300)
-	if tax_data is not None:
-		if not tax_data.amount_to_collect:
-			_remove_taxjar_rows(doc, company_config)
-		elif tax_data.amount_to_collect > 0:
-			# Remove all existing rows for this company's tax account (template rows + previous TaxJar row)
-			_remove_taxjar_rows(doc, company_config)
+	if tax_data is not None and tax_data.amount_to_collect is not None:
+		_remove_taxjar_rows(doc, company_config)
 
-			doc.append(
-				"taxes",
-				{
-					"charge_type": "Actual",
-					"description": TAXJAR_ROW_DESCRIPTION,
-					"account_head": company_config.tax_account_head,
-					"tax_amount": tax_data.amount_to_collect,
-				},
-			)
+		usd_rate = _get_usd_exchange_rate(doc)
+		tax_amount = flt(tax_data.amount_to_collect)
+		if usd_rate:
+			tax_amount = flt(tax_amount / usd_rate)
 
-			# Assign tax_collectable and taxable_amount per line item
-			for item in tax_data.breakdown.line_items:
-				doc.get("items")[cint(item.id) - 1].tax_collectable = item.tax_collectable
-				doc.get("items")[cint(item.id) - 1].taxable_amount = item.taxable_amount
+		doc.append(
+			"taxes",
+			{
+				"charge_type": "Actual",
+				"description": TAXJAR_ROW_DESCRIPTION,
+				"account_head": company_config.tax_account_head,
+				"tax_amount": tax_amount,
+			},
+		)
 
-			_store_breakdown_data(tax_data, doc)
+		for item in (tax_data.breakdown.line_items if tax_data.breakdown else []):
+			idx = cint(item.id) - 1
+			if 0 <= idx < len(doc.items):
+				tc = flt(item.tax_collectable)
+				ta = flt(item.taxable_amount)
+				if usd_rate:
+					tc = flt(tc / usd_rate)
+					ta = flt(ta / usd_rate)
+				doc.get("items")[idx].tax_collectable = tc
+				doc.get("items")[idx].taxable_amount = ta
 
-			doc.run_method("calculate_taxes_and_totals")
-			doc.run_method("set_total_in_words")
+		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
+
+		doc.run_method("calculate_taxes_and_totals")
+		doc.run_method("set_total_in_words")
 
 
 def validate_return_against(doc, method):
@@ -863,11 +901,69 @@ def _extract_breakdown_data(tax_data, doc):
 	return result
 
 
-def _store_breakdown_data(tax_data, doc):
+def _convert_breakdown_amounts(data, usd_rate):
+	"""Convert monetary amounts in a breakdown dict from USD to transaction currency."""
+	rate = usd_rate
+
+	def _convert_rows(rows):
+		converted = []
+		for r in rows:
+			cr = dict(r)
+			cr["tax_amount"] = flt(r["tax_amount"] / rate)
+			if "taxable_amount" in r:
+				cr["taxable_amount"] = flt(r["taxable_amount"] / rate)
+			if "exempt_or_non_taxable" in r:
+				cr["exempt_or_non_taxable"] = flt(r["exempt_or_non_taxable"] / rate)
+			converted.append(cr)
+		return converted
+
+	result = {
+		"transaction": _convert_rows(data["transaction"]),
+		"totals": {
+			"rate": data["totals"]["rate"],
+			"amount_to_collect": flt(data["totals"]["amount_to_collect"] / rate),
+			"taxable_amount": flt(data["totals"]["taxable_amount"] / rate),
+		},
+		"line_items": [],
+	}
+	for li in data.get("line_items", []):
+		result["line_items"].append({
+			"id": li["id"],
+			"tax_collectable": flt(li["tax_collectable"] / rate),
+			"taxable_amount": flt(li["taxable_amount"] / rate),
+			"item_amount": flt(li["item_amount"] / rate),
+			"breakdown": _convert_rows(li["breakdown"]),
+		})
+	return result
+
+
+def _store_breakdown_data(tax_data, doc, usd_rate=None):
 	"""Extract breakdown from tax_data and store JSON on doc and items."""
-	breakdown_data = _extract_breakdown_data(tax_data, doc)
-	if not breakdown_data:
+	usd_data = _extract_breakdown_data(tax_data, doc)
+	if not usd_data:
 		return
+
+	currency = getattr(doc, "currency", None) or "USD"
+
+	if usd_rate:
+		converted = _convert_breakdown_amounts(usd_data, usd_rate)
+		breakdown_data = {
+			"currency": currency,
+			"base_currency": "USD",
+			"exchange_rate": usd_rate,
+			"exchange_date": str(_get_transaction_date(doc)),
+			**converted,
+			"usd": {
+				"transaction": usd_data["transaction"],
+				"totals": usd_data["totals"],
+				"line_items": usd_data["line_items"],
+			},
+		}
+	else:
+		breakdown_data = {
+			"currency": "USD",
+			**usd_data,
+		}
 
 	if hasattr(doc, "taxjar_breakdown_json"):
 		doc.taxjar_breakdown_json = json.dumps(breakdown_data)
@@ -877,7 +973,18 @@ def _store_breakdown_data(tax_data, doc):
 		if 0 <= item_idx < len(doc.items):
 			item = doc.items[item_idx]
 			if hasattr(item, "taxjar_item_breakdown_json"):
-				item.taxjar_item_breakdown_json = json.dumps(li_data)
+				item_json = dict(li_data)
+				if usd_rate:
+					usd_li = next(
+						(u for u in breakdown_data["usd"]["line_items"] if u["id"] == li_data["id"]),
+						None,
+					)
+					if usd_li:
+						item_json["usd"] = usd_li
+					item_json["currency"] = currency
+					item_json["base_currency"] = "USD"
+					item_json["exchange_rate"] = usd_rate
+				item.taxjar_item_breakdown_json = json.dumps(item_json)
 
 
 def check_for_nexus(doc, tax_dict):

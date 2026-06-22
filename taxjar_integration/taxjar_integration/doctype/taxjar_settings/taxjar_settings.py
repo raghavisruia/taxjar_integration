@@ -195,6 +195,7 @@ _TRANSACTION_BREAKDOWN_FIELDS = [
 		insert_after="other_charges_calculation",
 		label="TaxJar Tax Breakdown",
 		collapsible=1,
+		depends_on="eval: doc.taxjar_breakdown_json",
 	),
 	dict(
 		fieldname="taxjar_breakdown_json",
@@ -217,6 +218,7 @@ _ITEM_BREAKDOWN_FIELDS = [
 		insert_after="taxable_amount",
 		label="TaxJar Tax Detail",
 		collapsible=1,
+		depends_on="eval: doc.taxjar_item_breakdown_json",
 	),
 	dict(
 		fieldname="taxjar_item_breakdown_json",
