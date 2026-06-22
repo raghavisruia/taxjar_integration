@@ -2401,70 +2401,169 @@ class TestRetryAllFailedSyncs(UnitTestCase):
 		self.assertEqual(count, 3)
 
 
-# ── Phase 7: Script Report structure ─────────────────────────────────────────
+# ── Phase 7: Transaction Sync page ───────────────────────────────────────────
 
 
-class TestTaxJarTransactionSyncReport(UnitTestCase):
+class TestTaxJarTransactionSyncPage(UnitTestCase):
 
-	def test_report_py_exists(self):
+	def test_page_files_exist(self):
 		import os
-		report_dir = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/taxjar_integration/report/taxjar_transaction_sync"
+		page_dir = os.path.join(
+			os.path.dirname(__file__),
+			"..", "..", "page", "taxjar_transactions",
 		)
-		self.assertTrue(os.path.isfile(os.path.join(report_dir, "taxjar_transaction_sync.py")))
-		self.assertTrue(os.path.isfile(os.path.join(report_dir, "taxjar_transaction_sync.js")))
-		self.assertTrue(os.path.isfile(os.path.join(report_dir, "taxjar_transaction_sync.json")))
+		page_dir = os.path.normpath(page_dir)
+		self.assertTrue(os.path.isfile(os.path.join(page_dir, "taxjar_transactions.py")))
+		self.assertTrue(os.path.isfile(os.path.join(page_dir, "taxjar_transactions.js")))
+		self.assertTrue(os.path.isfile(os.path.join(page_dir, "taxjar_transactions.json")))
 
-	def test_report_returns_columns_and_data(self):
-		from taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync import execute
-		with patch("taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync.frappe.get_all", return_value=[]):
-			columns, data, _, _, summary = execute(filters={})
-		self.assertTrue(len(columns) > 0)
-		self.assertEqual(len(data), 0)
-		self.assertTrue(len(summary) > 0)
-
-	def test_report_summary_counts(self):
-		from taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync import get_summary
-		data = [
-			{"taxjar_sync_status": "Synced"},
-			{"taxjar_sync_status": "Synced"},
-			{"taxjar_sync_status": "Failed"},
-			{"taxjar_sync_status": "Queued"},
-			{"taxjar_sync_status": "Not Applicable"},
+	def test_get_transactions_returns_paginated_response(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
+		mock_rows = [
+			frappe._dict(
+				name=f"SINV-{i}", posting_date="2026-06-01", customer_name="Test",
+				grand_total=100, is_return=False, is_debit_note=False,
+				taxjar_sync_status="Synced", taxjar_last_synced=None, taxjar_sync_error="",
+			)
+			for i in range(3)
 		]
-		summary = get_summary(data)
-		values = {s["label"]: s["value"] for s in summary}
-		self.assertEqual(values["Total Invoices"], 5)
-		self.assertEqual(values["Synced"], 2)
-		self.assertEqual(values["Failed"], 1)
-		self.assertEqual(values["Queued"], 1)
+		with patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			return_value=mock_rows,
+		), patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			return_value=3,
+		):
+			result = get_transactions(filters={}, page=1)
 
-	def test_report_transaction_type_derivation(self):
-		from taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync import get_data
-		row_invoice = frappe._dict(is_return=False, is_debit_note=False, taxjar_sync_status="Synced", taxjar_sync_error="")
-		row_credit = frappe._dict(is_return=True, is_debit_note=False, taxjar_sync_status="Synced", taxjar_sync_error="")
+		self.assertEqual(result["total"], 3)
+		self.assertEqual(result["page"], 1)
+		self.assertEqual(len(result["invoices"]), 3)
+		self.assertIn("total_pages", result)
+		self.assertIn("page_size", result)
 
-		with patch("taxjar_integration.taxjar_integration.report.taxjar_transaction_sync.taxjar_transaction_sync.frappe.get_all", return_value=[row_invoice, row_credit]):
-			data = get_data({})
+	def test_get_transactions_derives_transaction_type(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
+		mock_rows = [
+			frappe._dict(
+				name="SINV-001", posting_date="2026-06-01", customer_name="A",
+				grand_total=100, is_return=False, is_debit_note=False,
+				taxjar_sync_status="Synced", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+			frappe._dict(
+				name="SINV-002", posting_date="2026-06-01", customer_name="B",
+				grand_total=50, is_return=True, is_debit_note=False,
+				taxjar_sync_status="Synced", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+			frappe._dict(
+				name="SINV-003", posting_date="2026-06-01", customer_name="C",
+				grand_total=75, is_return=False, is_debit_note=True,
+				taxjar_sync_status="Synced", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+		]
+		with patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			return_value=mock_rows,
+		), patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			return_value=3,
+		):
+			result = get_transactions(filters={}, page=1)
 
-		types = [r["transaction_type"] for r in data]
-		self.assertIn("Invoice", types)
-		self.assertIn("Credit Note", types)
+		types = [r["transaction_type"] for r in result["invoices"]]
+		self.assertEqual(types, ["Invoice", "Credit Note", "Debit Note"])
 
-	def test_report_js_has_retry_all_button(self):
+	def test_get_transactions_truncates_long_error(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
+		long_error = "x" * 200
+		mock_rows = [
+			frappe._dict(
+				name="SINV-001", posting_date="2026-06-01", customer_name="A",
+				grand_total=100, is_return=False, is_debit_note=False,
+				taxjar_sync_status="Failed", taxjar_last_synced=None,
+				taxjar_sync_error=long_error,
+			),
+		]
+		with patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			return_value=mock_rows,
+		), patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			return_value=1,
+		):
+			result = get_transactions(filters={}, page=1)
+
+		self.assertTrue(result["invoices"][0]["taxjar_sync_error"].endswith("..."))
+		self.assertEqual(len(result["invoices"][0]["taxjar_sync_error"]), 103)
+
+	def test_get_summary_counts(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_summary
+		mock_rows = [
+			frappe._dict(taxjar_sync_status="Synced"),
+			frappe._dict(taxjar_sync_status="Synced"),
+			frappe._dict(taxjar_sync_status="Failed"),
+			frappe._dict(taxjar_sync_status="Queued"),
+			frappe._dict(taxjar_sync_status="Not Applicable"),
+		]
+		with patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			return_value=mock_rows,
+		):
+			result = get_summary(filters={})
+
+		self.assertEqual(result["total"], 5)
+		self.assertEqual(result["synced"], 2)
+		self.assertEqual(result["failed"], 1)
+		self.assertEqual(result["queued"], 1)
+
+	def test_build_conditions_date_range(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import _build_conditions
+
+		conditions = _build_conditions({"from_date": "2026-01-01", "to_date": "2026-06-30"})
+		self.assertEqual(conditions["posting_date"], ("between", ("2026-01-01", "2026-06-30")))
+
+		conditions = _build_conditions({"from_date": "2026-01-01"})
+		self.assertEqual(conditions["posting_date"], (">=", "2026-01-01"))
+
+		conditions = _build_conditions({"to_date": "2026-06-30"})
+		self.assertEqual(conditions["posting_date"], ("<=", "2026-06-30"))
+
+		conditions = _build_conditions({})
+		self.assertNotIn("posting_date", conditions)
+
+	def test_build_conditions_always_includes_docstatus(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import _build_conditions
+		conditions = _build_conditions({})
+		self.assertEqual(conditions["docstatus"], ("in", (1, 2)))
+
+	def test_build_conditions_with_company_and_sync_status(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import _build_conditions
+		conditions = _build_conditions({"company": "Test Co", "sync_status": "Failed"})
+		self.assertEqual(conditions["company"], "Test Co")
+		self.assertEqual(conditions["taxjar_sync_status"], "Failed")
+
+	def test_get_transactions_page_clamped_to_min_1(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
+		with patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			return_value=[],
+		), patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			return_value=0,
+		):
+			result = get_transactions(filters={}, page=-5)
+		self.assertEqual(result["page"], 1)
+
+	def test_js_has_retry_button(self):
 		import os
 		js_path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/taxjar_integration/report/taxjar_transaction_sync"
-			"/taxjar_transaction_sync.js"
+			os.path.dirname(__file__),
+			"..", "..", "page", "taxjar_transactions", "taxjar_transactions.js",
 		)
-		with open(js_path) as f:
+		with open(os.path.normpath(js_path)) as f:
 			js = f.read()
-		self.assertIn("Retry All Failed", js)
-		self.assertIn("retry_all_failed_syncs", js)
+		self.assertIn("Retry Selected", js)
+		self.assertIn("bulk_retry", js)
 
 
 # ── Hooks registration — updated hooks ───────────────────────────────────────

@@ -1,0 +1,20 @@
+.taxjar-table-wrapper .table th {
+	background-color: var(--subtle-fg);
+	font-size: var(--text-sm);
+	font-weight: 600;
+}
+
+.taxjar-table-wrapper .table td {
+	vertical-align: middle;
+}
+
+.taxjar-summary {
+	border-bottom: 1px solid var(--border-color);
+}
+
+.taxjar-summary-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: var(--text-sm);
+}
