@@ -45,7 +45,7 @@ function _build_transaction_table(rows, totals, currency) {
 		.join("");
 
 	return `
-		<div class="tax-break-up" style="overflow-x: auto;">
+		<div class="tax-break-up" style="overflow-x: auto; background-color: var(--subtle-fg); border-radius: var(--border-radius); padding: 1px;">
 			<table class="table table-bordered table-hover">
 				<thead><tr>
 					<th class="text-left">${__("Jurisdiction")}</th>
@@ -79,7 +79,7 @@ function _build_item_table(rows, currency) {
 		.join("");
 
 	return `
-		<div class="tax-break-up" style="overflow-x: auto;">
+		<div class="tax-break-up" style="overflow-x: auto; background-color: var(--subtle-fg); border-radius: var(--border-radius); padding: 1px;">
 			<table class="table table-bordered table-hover">
 				<thead><tr>
 					<th class="text-left">${__("Jurisdiction")}</th>
