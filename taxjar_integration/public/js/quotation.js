@@ -24,9 +24,9 @@ function _build_transaction_table(rows, totals, currency) {
 		.join("");
 
 	return `
-		<div class="tax-break-up" style="overflow-x: auto; background-color: var(--subtle-fg); border-radius: var(--border-radius); padding: 1px;">
+		<div class="tax-break-up" style="overflow-x: auto;">
 			<table class="table table-bordered table-hover">
-				<thead><tr>
+				<thead style="background-color: var(--subtle-fg);"><tr>
 					<th class="text-left">${__("Jurisdiction")}</th>
 					<th class="text-left">${__("Name")}</th>
 					<th class="text-right">${__("Rate")}</th>
@@ -58,9 +58,9 @@ function _build_item_table(rows, currency) {
 		.join("");
 
 	return `
-		<div class="tax-break-up" style="overflow-x: auto; background-color: var(--subtle-fg); border-radius: var(--border-radius); padding: 1px;">
+		<div class="tax-break-up" style="overflow-x: auto;">
 			<table class="table table-bordered table-hover">
-				<thead><tr>
+				<thead style="background-color: var(--subtle-fg);"><tr>
 					<th class="text-left">${__("Jurisdiction")}</th>
 					<th class="text-right">${__("Exempt/Non-Taxable")}</th>
 					<th class="text-right">${__("Taxable")}</th>
