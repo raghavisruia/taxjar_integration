@@ -226,8 +226,9 @@ class TaxJarTransactionSync {
 		this.invoices.forEach((inv) => {
 			const checked = this.selected.has(inv.name) ? "checked" : "";
 			const status_color = STATUS_COLORS[inv.taxjar_sync_status] || "grey";
+			const status_label = inv.taxjar_sync_status === "Not Applicable" ? __("NA") : __(inv.taxjar_sync_status);
 			const status_html = inv.taxjar_sync_status
-				? `<span class="indicator-pill ${status_color}">${__(inv.taxjar_sync_status)}</span>`
+				? `<span class="indicator-pill ${status_color}">${status_label}</span>`
 				: "";
 
 			const last_synced = inv.taxjar_last_synced
