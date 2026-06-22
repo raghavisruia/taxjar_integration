@@ -115,7 +115,7 @@ class TaxJarTransactionSync {
 
 	make_summary() {
 		this.summary_area = $(`
-			<div class="taxjar-summary" style="padding: 8px 15px; display: flex; gap: 16px; flex-wrap: wrap;"></div>
+			<div class="report-summary" style="padding: 20px 15px; display: flex; border-bottom: 1px solid var(--border-color);"></div>
 		`).appendTo(this.page.main);
 	}
 
@@ -193,7 +193,7 @@ class TaxJarTransactionSync {
 
 	render_summary(summary) {
 		const items = [
-			{ label: __("Total"), value: summary.total, color: "" },
+			{ label: __("Total Invoices"), value: summary.total, color: "" },
 			{ label: __("Synced"), value: summary.synced, color: "green" },
 			{ label: __("Failed"), value: summary.failed, color: "red" },
 			{ label: __("Queued"), value: summary.queued, color: "blue" },
@@ -201,12 +201,14 @@ class TaxJarTransactionSync {
 
 		this.summary_area.empty();
 		items.forEach((item) => {
-			const indicator = item.color ? `indicator-pill ${item.color}` : "text-muted";
+			const value_color = item.color ? `var(--text-on-${item.color})` : "var(--text-color)";
 			this.summary_area.append(`
-				<span class="taxjar-summary-item">
-					<span class="text-muted">${item.label}:</span>
-					<span class="${indicator}" style="font-weight: 600;">${item.value}</span>
-				</span>
+				<div class="summary-item" style="flex: 1; text-align: center;">
+					<div class="text-muted" style="font-size: var(--text-sm);">${item.label}</div>
+					<div style="font-size: var(--text-2xl); font-weight: 600; color: ${value_color}; margin-top: 4px;">
+						${item.value}
+					</div>
+				</div>
 			`);
 		});
 	}

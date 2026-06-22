@@ -8,13 +8,6 @@
 	vertical-align: middle;
 }
 
-.taxjar-summary {
-	border-bottom: 1px solid var(--border-color);
-}
-
-.taxjar-summary-item {
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	font-size: var(--text-sm);
+.report-summary .summary-item + .summary-item {
+	border-left: 1px solid var(--border-color);
 }
