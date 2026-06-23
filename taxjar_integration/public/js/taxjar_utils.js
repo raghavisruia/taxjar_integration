@@ -196,14 +196,14 @@ taxjar_integration.render_status_cards = function (frm) {
 	let card2, card3;
 
 	if (!has_nexus && frm.doc.taxjar_nexus_reason) {
-		card2 = { question: __("Is your customer taxable?"), answer: __("N/A"), reason: __("Not evaluated — no nexus"), color: "grey" };
+		card2 = { question: __("Is the customer taxable?"), answer: __("N/A"), reason: __("Not evaluated — no nexus"), color: "grey" };
 		card3 = { question: __("Is the product taxable?"), answer: __("N/A"), reason: __("Not evaluated — no nexus"), color: "grey" };
 	} else if (!customer_taxable && frm.doc.taxjar_customer_taxable_reason) {
-		card2 = { question: __("Is your customer taxable?"), answer: __("No"), reason: frm.doc.taxjar_customer_taxable_reason || "", color: "orange" };
+		card2 = { question: __("Is the customer taxable?"), answer: __("No"), reason: frm.doc.taxjar_customer_taxable_reason || "", color: "orange" };
 		card3 = { question: __("Is the product taxable?"), answer: __("N/A"), reason: __("Not evaluated — customer exempt"), color: "grey" };
 	} else {
 		card2 = {
-			question: __("Is your customer taxable?"),
+			question: __("Is the customer taxable?"),
 			answer: customer_taxable ? __("Yes") : __("No"),
 			reason: frm.doc.taxjar_customer_taxable_reason || "",
 			color: customer_taxable ? "green" : "orange",
@@ -224,23 +224,68 @@ taxjar_integration.render_status_cards = function (frm) {
 		};
 	}
 
+	taxjar_integration._inject_status_card_styles();
+
 	const cards = [card1, card2, card3];
-	let html = '<div style="display:flex;gap:12px;flex-wrap:wrap">';
+	let html = '<div class="taxjar-status-cards">';
 	cards.forEach((card, i) => {
 		html += `
-			<div style="flex:1;min-width:200px;border:1px solid var(--border-color);
-						border-radius:var(--border-radius-lg);padding:16px;
-						background:var(--fg-color)">
-				<div class="text-muted" style="font-size:var(--text-sm);margin-bottom:8px;font-style:italic">${card.question}</div>
-				<div style="font-size:var(--text-lg);font-weight:600;margin-bottom:4px">
+			<div class="taxjar-status-card">
+				<div class="text-muted taxjar-status-card-q">${card.question}</div>
+				<div class="taxjar-status-card-a">
 					<span class="indicator-pill ${card.color}">${card.answer}</span>
 				</div>
-				${card.reason ? `<div class="text-muted" style="font-size:var(--text-sm)">${frappe.utils.escape_html(card.reason)}</div>` : ""}
 			</div>
-			${i < 2 ? '<div style="display:flex;align-items:center;font-size:20px;color:var(--text-muted)">→</div>' : ""}`;
+			${i < 2 ? '<div class="taxjar-status-arrow">→</div>' : ""}`;
 	});
 	html += "</div>";
 	wrapper.html(html);
+};
+
+// Responsive layout for the status cards. On wide screens the three cards sit
+// side by side with → connectors; on narrow screens they stack and the arrows
+// rotate to point downward. Injected once.
+taxjar_integration._inject_status_card_styles = function () {
+	if (document.getElementById("taxjar-status-card-styles")) return;
+	const style = document.createElement("style");
+	style.id = "taxjar-status-card-styles";
+	style.textContent = `
+		.taxjar-status-cards {
+			display: flex;
+			gap: 12px;
+			flex-wrap: wrap;
+			align-items: stretch;
+			margin-bottom: 16px;
+		}
+		.taxjar-status-card {
+			flex: 1 1 200px;
+			border: 1px solid var(--border-color);
+			border-radius: var(--border-radius-lg);
+			padding: 16px;
+			background: var(--fg-color);
+		}
+		.taxjar-status-card-q {
+			font-size: var(--text-sm);
+			margin-bottom: 8px;
+			font-style: italic;
+		}
+		.taxjar-status-card-a {
+			font-size: var(--text-lg);
+			font-weight: 600;
+		}
+		.taxjar-status-arrow {
+			display: flex;
+			align-items: center;
+			font-size: 20px;
+			color: var(--text-muted);
+		}
+		@media (max-width: 991px) {
+			.taxjar-status-cards { flex-direction: column; }
+			.taxjar-status-card { flex-basis: auto; }
+			.taxjar-status-arrow { justify-content: center; transform: rotate(90deg); }
+		}
+	`;
+	document.head.appendChild(style);
 };
 
 taxjar_integration.render_addresses = function (frm) {

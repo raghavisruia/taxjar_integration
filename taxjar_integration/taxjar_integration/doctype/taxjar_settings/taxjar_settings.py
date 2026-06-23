@@ -199,10 +199,10 @@ def _make_status_fields(insert_after_tab, allow_on_submit=False):
 		("taxjar_product_taxable_reason", "Small Text", None, None),
 		("taxjar_ship_from", "Small Text", None, None),
 		("taxjar_ship_to", "Small Text", None, None),
-		("taxjar_status_section", "Section Break", "Tax Calculation Status", None),
-		("taxjar_status_html", "HTML", None, None),
 		("taxjar_addresses_section", "Section Break", "Addresses", None),
 		("taxjar_addresses_html", "HTML", None, None),
+		("taxjar_status_section", "Section Break", "Tax Applicability Matrix", None),
+		("taxjar_status_html", "HTML", None, None),
 	]
 	result = []
 	prev = insert_after_tab
@@ -401,7 +401,7 @@ def make_custom_fields(update=True):
 			dict(
 				fieldname="taxjar_sync_section",
 				fieldtype="Section Break",
-				insert_after="taxjar_addresses_html",
+				insert_after="taxjar_status_html",
 				label="Transaction Sync",
 				allow_on_submit=1,
 			),
