@@ -647,62 +647,44 @@ def get_line_item_dict(item, docstatus):
 
 
 def set_sales_tax(doc, method):
+	_ctx = {"doctype": doc.doctype, "name": doc.name, "company": doc.company}
 	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
 
 	if not TAXJAR_CALCULATE_TAX:
-		log_taxjar_call(
-			action="tax_for_order",
-			status="skipped",
-			error="taxjar_calculate_tax is disabled",
-			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-		)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="taxjar_calculate_tax is disabled", context=_ctx)
 		return
 
 	if get_region(doc.company) != "United States":
-		log_taxjar_call(
-			action="tax_for_order",
-			status="skipped",
-			error="Company region is not United States",
-			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-		)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="Company region is not United States", context=_ctx)
 		return
 
 	if not doc.items:
-		log_taxjar_call(
-			action="tax_for_order",
-			status="skipped",
-			error="Document has no items",
-			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-		)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="Document has no items", context=_ctx)
 		return
 
 	company_config = get_company_config(doc.company)
 	if not company_config:
-		log_taxjar_call(
-			action="tax_for_order",
-			status="skipped",
-			error="No TaxJar Company Config found for company {0}".format(doc.company),
-			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-		)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="No TaxJar Company Config found for company {0}".format(doc.company), context=_ctx)
 		return
 
-	if check_sales_tax_exemption(doc, company_config):
-		log_taxjar_call(
-			action="tax_for_order",
-			status="skipped",
-			error="Document or customer is exempt from sales tax",
-			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-		)
+	is_exempt, exempt_reason = check_sales_tax_exemption(doc, company_config)
+	if is_exempt:
+		_set_tax_status_fields(doc,
+			customer_taxable=False, customer_reason=exempt_reason)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="Document or customer is exempt from sales tax", context=_ctx)
 		return
 
 	if not doc.shipping_address_name and not doc.customer_address:
 		if doc.doctype == "Quotation":
-			log_taxjar_call(
-				action="tax_for_order",
-				status="skipped",
-				error="No shipping or billing address set on Quotation",
-				context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-			)
+			_set_tax_status_fields(doc,
+				nexus_reason="No shipping or billing address set")
+			log_taxjar_call(action="tax_for_order", status="skipped",
+				error="No shipping or billing address set on Quotation", context=_ctx)
 			_remove_taxjar_rows(doc, company_config)
 			return
 
@@ -714,16 +696,11 @@ def set_sales_tax(doc, method):
 	tax_dict = get_tax_data(doc)
 
 	if not tax_dict:
-		log_taxjar_call(
-			action="tax_for_order",
-			status="skipped",
-			error="No TaxJar payload generated from addresses/items",
-			context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
-		)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="No TaxJar payload generated from addresses/items", context=_ctx)
 		_remove_taxjar_rows(doc, company_config)
 		return
 
-	# Check if delivering within a nexus; clears TaxJar rows if not
 	if not check_for_nexus(doc, tax_dict):
 		return
 
@@ -769,6 +746,17 @@ def set_sales_tax(doc, method):
 
 		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
 
+		product_status, product_reason = _compute_product_taxable(doc)
+		to_state = tax_dict.get("to_state", "")
+		_set_tax_status_fields(doc,
+			has_nexus=True,
+			nexus_reason=f"Nexus in {to_state}" if to_state else "Nexus in destination state",
+			customer_taxable=True, customer_reason="Taxable",
+			product_taxable=product_status, product_reason=product_reason,
+			ship_from=_format_address_short(tax_dict, "from"),
+			ship_to=_format_address_short(tax_dict, "to"),
+		)
+
 		doc.run_method("calculate_taxes_and_totals")
 		doc.run_method("set_total_in_words")
 
@@ -806,6 +794,59 @@ def _clear_breakdown_data(doc):
 	for item in (doc.get("items") or []):
 		if hasattr(item, "taxjar_item_breakdown_json"):
 			item.taxjar_item_breakdown_json = None
+
+
+def _set_tax_status_fields(doc, *, has_nexus=None, nexus_reason=None,
+                           customer_taxable=None, customer_reason=None,
+                           product_taxable=None, product_reason=None,
+                           ship_from=None, ship_to=None):
+	"""Populate persistent TaxJar status fields on a transaction document."""
+	_pairs = [
+		("taxjar_has_nexus", 1 if has_nexus else 0 if has_nexus is not None else None),
+		("taxjar_nexus_reason", nexus_reason),
+		("taxjar_customer_taxable", 1 if customer_taxable else 0 if customer_taxable is not None else None),
+		("taxjar_customer_taxable_reason", customer_reason),
+		("taxjar_product_taxable", product_taxable),
+		("taxjar_product_taxable_reason", product_reason),
+		("taxjar_ship_from", ship_from),
+		("taxjar_ship_to", ship_to),
+	]
+	for field, value in _pairs:
+		if value is not None and hasattr(doc, field):
+			setattr(doc, field, value)
+
+
+def _format_address_short(tax_dict, prefix):
+	"""Return 'City, STATE ZIP' from tax_dict keys with the given prefix (from/to)."""
+	city = tax_dict.get(f"{prefix}_city") or ""
+	state = tax_dict.get(f"{prefix}_state") or ""
+	zipcode = tax_dict.get(f"{prefix}_zip") or ""
+	parts = [p for p in [city, state] if p]
+	result = ", ".join(parts)
+	if zipcode:
+		result += " " + zipcode
+	return result.strip()
+
+
+def _compute_product_taxable(doc):
+	"""Return (status, reason) for product taxability based on item tax categories."""
+	total = len(doc.items)
+	if not total:
+		return "", ""
+	taxable_count = 0
+	for item in doc.items:
+		ptc = item.get("product_tax_category") or (
+			frappe.db.get_value("Item", item.get("item_code"), "product_tax_category", cache=True)
+			if item.get("item_code") else None
+		)
+		if not ptc or ptc != "99999":
+			taxable_count += 1
+	if taxable_count == total:
+		return "Yes", f"{taxable_count} of {total} items taxable"
+	elif taxable_count == 0:
+		return "No", f"0 of {total} items taxable"
+	else:
+		return "Partially", f"{taxable_count} of {total} items taxable"
 
 
 def _extract_breakdown_from_obj(obj, item_amount=None):
@@ -1014,13 +1055,21 @@ def check_for_nexus(doc, tax_dict):
 	if not in_nexus:
 		if company_config:
 			_remove_taxjar_rows(doc, company_config)
+		to_state = tax_dict.get("to_state", "")
+		_set_tax_status_fields(
+			doc,
+			has_nexus=False,
+			nexus_reason=f"No nexus in {to_state}" if to_state else "No nexus in destination state",
+			ship_from=_format_address_short(tax_dict, "from"),
+			ship_to=_format_address_short(tax_dict, "to"),
+		)
 		return False
 
 	return True
 
 
 def check_sales_tax_exemption(doc, company_config):
-	"""Return True if the document or customer is blanket-exempt; remove TaxJar rows if so.
+	"""Return (is_exempt, reason) tuple. Removes TaxJar rows if exempt.
 
 	State-specific exemptions (via TaxJar Customer API exempt_regions) are NOT
 	handled here — they flow through to TaxJar via customer_id in the API payload.
@@ -1029,17 +1078,27 @@ def check_sales_tax_exemption(doc, company_config):
 
 	customer_name = _get_customer_name(doc)
 	customer_exempt = False
+	exemption_type = None
 	if not doc_exempt and customer_name:
 		customer_exempt = (
 			frappe.db.has_column("Customer", "exempt_from_sales_tax")
 			and frappe.db.get_value("Customer", customer_name, "exempt_from_sales_tax", cache=True)
 		)
+		if customer_exempt and frappe.db.has_column("Customer", "taxjar_exemption_type"):
+			exemption_type = frappe.db.get_value("Customer", customer_name, "taxjar_exemption_type", cache=True)
 
-	if doc_exempt or customer_exempt:
+	if doc_exempt:
 		_remove_taxjar_rows(doc, company_config)
-		return True
+		return True, "Document is marked exempt from sales tax"
 
-	return False
+	if customer_exempt:
+		_remove_taxjar_rows(doc, company_config)
+		reason = "Customer is exempt"
+		if exemption_type:
+			reason = f"Customer is exempt ({exemption_type})"
+		return True, reason
+
+	return False, None
 
 
 def validate_tax_request(tax_dict):

@@ -188,6 +188,43 @@ _US_STATE_CODE_OPTIONS = (
 )
 
 
+def _make_status_fields(insert_after_tab, allow_on_submit=False):
+	"""Return chained list of TaxJar status custom field dicts."""
+	_fields = [
+		("taxjar_has_nexus", "Check", None, "0"),
+		("taxjar_nexus_reason", "Small Text", None, None),
+		("taxjar_customer_taxable", "Check", None, "0"),
+		("taxjar_customer_taxable_reason", "Small Text", None, None),
+		("taxjar_product_taxable", "Select", None, None),
+		("taxjar_product_taxable_reason", "Small Text", None, None),
+		("taxjar_ship_from", "Small Text", None, None),
+		("taxjar_ship_to", "Small Text", None, None),
+		("taxjar_status_section", "Section Break", "Tax Calculation Status", None),
+		("taxjar_status_html", "HTML", None, None),
+		("taxjar_addresses_section", "Section Break", "Addresses", None),
+		("taxjar_addresses_html", "HTML", None, None),
+	]
+	result = []
+	prev = insert_after_tab
+	for fieldname, fieldtype, label, default in _fields:
+		d = dict(fieldname=fieldname, fieldtype=fieldtype, insert_after=prev)
+		is_data = fieldtype in ("Check", "Small Text", "Select")
+		if is_data:
+			d["hidden"] = 1
+			d["read_only"] = 1
+		if label:
+			d["label"] = label
+		if default is not None:
+			d["default"] = default
+		if fieldtype == "Select" and fieldname == "taxjar_product_taxable":
+			d["options"] = "\nYes\nNo\nPartially"
+		if allow_on_submit:
+			d["allow_on_submit"] = 1
+		prev = fieldname
+		result.append(d)
+	return result
+
+
 _TRANSACTION_BREAKDOWN_FIELDS = [
 	dict(
 		fieldname="taxjar_breakdown_section",
@@ -195,7 +232,6 @@ _TRANSACTION_BREAKDOWN_FIELDS = [
 		insert_after="other_charges_calculation",
 		label="TaxJar Tax Breakdown",
 		collapsible=1,
-		depends_on="eval: doc.taxjar_breakdown_json",
 	),
 	dict(
 		fieldname="taxjar_breakdown_json",
@@ -329,8 +365,18 @@ def make_custom_fields(update=True):
 				label="Product Tax Category",
 			)
 		],
-		"Quotation": _TRANSACTION_BREAKDOWN_FIELDS,
-		"Sales Order": _TRANSACTION_BREAKDOWN_FIELDS,
+		"Quotation": [
+			*_TRANSACTION_BREAKDOWN_FIELDS,
+			dict(fieldname="taxjar_tab", fieldtype="Tab Break",
+				insert_after="company_contact_person", label="TaxJar"),
+			*_make_status_fields("taxjar_tab"),
+		],
+		"Sales Order": [
+			*_TRANSACTION_BREAKDOWN_FIELDS,
+			dict(fieldname="taxjar_tab", fieldtype="Tab Break",
+				insert_after="company_contact_person", label="TaxJar"),
+			*_make_status_fields("taxjar_tab"),
+		],
 		"Address": [
 			dict(
 				fieldname="taxjar_state_code",
@@ -351,10 +397,18 @@ def make_custom_fields(update=True):
 				insert_after="loyalty_amount",
 				label="TaxJar",
 			),
+			*_make_status_fields("taxjar_tab", allow_on_submit=True),
+			dict(
+				fieldname="taxjar_sync_section",
+				fieldtype="Section Break",
+				insert_after="taxjar_addresses_html",
+				label="Transaction Sync",
+				allow_on_submit=1,
+			),
 			dict(
 				fieldname="taxjar_sync_status",
 				fieldtype="Select",
-				insert_after="taxjar_tab",
+				insert_after="taxjar_sync_section",
 				label="Sync Status",
 				options="Not Applicable\nQueued\nSynced\nFailed",
 				default="Not Applicable",

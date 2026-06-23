@@ -3,6 +3,9 @@ frappe.ui.form.on("Sales Invoice", {
 		_render_taxjar_response(frm);
 		_render_tax_breakdown(frm);
 		_add_taxjar_buttons(frm);
+		taxjar_integration.render_status_cards(frm);
+		taxjar_integration.render_addresses(frm);
+		taxjar_integration.show_no_address_tax_message(frm);
 	},
 
 	validate(frm) {
