@@ -11,16 +11,6 @@ def get_transactions(filters=None, page=1):
 	page = max(1, int(page))
 
 	conditions = _build_conditions(filters)
-	transaction_type = filters.get("transaction_type")
-
-	if transaction_type:
-		if transaction_type == "Credit Note":
-			conditions["is_return"] = 1
-		elif transaction_type == "Debit Note":
-			conditions["is_debit_note"] = 1
-		else:
-			conditions["is_return"] = 0
-			conditions["is_debit_note"] = 0
 
 	total = frappe.db.count("Sales Invoice", conditions)
 
@@ -61,16 +51,6 @@ def get_transactions(filters=None, page=1):
 def get_summary(filters=None):
 	filters = frappe.parse_json(filters) if filters else {}
 	conditions = _build_conditions(filters)
-	transaction_type = filters.get("transaction_type")
-
-	if transaction_type:
-		if transaction_type == "Credit Note":
-			conditions["is_return"] = 1
-		elif transaction_type == "Debit Note":
-			conditions["is_debit_note"] = 1
-		else:
-			conditions["is_return"] = 0
-			conditions["is_debit_note"] = 0
 
 	all_invoices = frappe.get_all(
 		"Sales Invoice",
@@ -135,5 +115,15 @@ def _build_conditions(filters):
 
 	if filters.get("sync_status"):
 		conditions["taxjar_sync_status"] = filters["sync_status"]
+
+	transaction_type = filters.get("transaction_type")
+	if transaction_type:
+		if transaction_type == "Credit Note":
+			conditions["is_return"] = 1
+		elif transaction_type == "Debit Note":
+			conditions["is_debit_note"] = 1
+		else:
+			conditions["is_return"] = 0
+			conditions["is_debit_note"] = 0
 
 	return conditions

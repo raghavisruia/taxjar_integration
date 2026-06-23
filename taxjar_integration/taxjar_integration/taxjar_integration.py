@@ -104,6 +104,11 @@ SUPPORTED_STATE_CODES = [
 # Any row with this description is owned by TaxJar and will be replaced on recalculation.
 TAXJAR_ROW_DESCRIPTION = "TaxJar Sales Tax"
 
+# Provider identifier sent to TaxJar so transactions/refunds created via ERPNext
+# are addressable (show/delete) under the ERPNext provider namespace.
+TAXJAR_PROVIDER = "ERPNext"
+PROVIDER_PARAMS = {"provider": TAXJAR_PROVIDER}
+
 
 def _get_taxjar_logger():
 	return frappe.logger("taxjar_integration", allow_site=True, file_count=20)
@@ -295,7 +300,7 @@ def sync_transaction_to_taxjar(invoice_name):
 	tax_dict["transaction_date"] = str(doc.posting_date)
 	tax_dict["sales_tax"] = sales_tax
 	tax_dict["amount"] = doc.total + tax_dict["shipping"]
-	tax_dict["provider"] = "ERPNext"
+	tax_dict["provider"] = TAXJAR_PROVIDER
 
 	if doc.is_return and doc.return_against:
 		tax_dict["transaction_reference_id"] = doc.return_against
@@ -337,7 +342,7 @@ def delete_transaction_from_taxjar(invoice_name):
 	is_refund = doc.is_return
 	action = "delete_refund" if is_refund else "delete_order"
 	payload = {"transaction_id": doc.name}
-	provider_params = {"provider": "ERPNext"}
+	provider_params = PROVIDER_PARAMS
 
 	try:
 		log_taxjar_call(action=action, status="request", payload=payload, context=ctx)
@@ -463,7 +468,7 @@ def fetch_transaction_from_taxjar(invoice_name):
 
 	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
 
-	provider_params = {"provider": "ERPNext"}
+	provider_params = PROVIDER_PARAMS
 
 	try:
 		if doc.is_return:
@@ -505,7 +510,7 @@ def delete_transaction_manual(invoice_name):
 	is_refund = doc.is_return
 	action = "delete_refund" if is_refund else "delete_order"
 
-	provider_params = {"provider": "ERPNext"}
+	provider_params = PROVIDER_PARAMS
 
 	try:
 		log_taxjar_call(action=action, status="request", payload={"transaction_id": doc.name}, context=ctx)
@@ -614,16 +619,23 @@ def get_state_code(address, location):
 	return state_code
 
 
-def get_line_item_dict(item, docstatus):
-	# Prefer the value already on the line item (populated by fetch_from on Sales Invoice Item).
-	# Fall back to the Item master for doctypes whose item table doesn't carry the custom field
-	# (Quotation Item, Sales Order Item) and for programmatically created documents where the
-	# client-side fetch_from never fired.
-	product_tax_code = item.get("product_tax_category") or (
+def _get_item_product_tax_category(item):
+	"""Return the product tax category for a transaction line item.
+
+	Prefer the value already on the line item (populated by fetch_from on Sales
+	Invoice Item). Fall back to the Item master for doctypes whose item table
+	doesn't carry the custom field (Quotation Item, Sales Order Item) and for
+	programmatically created documents where the client-side fetch_from never fired.
+	"""
+	return item.get("product_tax_category") or (
 		frappe.db.get_value("Item", item.get("item_code"), "product_tax_category", cache=True)
 		if item.get("item_code")
 		else None
 	)
+
+
+def get_line_item_dict(item, docstatus):
+	product_tax_code = _get_item_product_tax_category(item)
 
 	unit_price = flt(item.get("rate"))
 	price_list_rate = flt(item.get("price_list_rate"))
@@ -835,10 +847,7 @@ def _compute_product_taxable(doc):
 		return "", ""
 	taxable_count = 0
 	for item in doc.items:
-		ptc = item.get("product_tax_category") or (
-			frappe.db.get_value("Item", item.get("item_code"), "product_tax_category", cache=True)
-			if item.get("item_code") else None
-		)
+		ptc = _get_item_product_tax_category(item)
 		if not ptc or ptc != "99999":
 			taxable_count += 1
 	if taxable_count == total:
@@ -1552,12 +1561,9 @@ def on_customer_validate(doc, method):
 	_validate_exempt_regions(doc)
 
 
-_US_STATES = {
-	"AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN",
-	"IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
-	"NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT",
-	"VT","VA","WA","WV","WI","WY",
-}
+# Single source of truth: derive from SUPPORTED_STATE_CODES so exempt-region
+# validation stays in lockstep with tax-calculation state validation.
+_US_STATES = set(SUPPORTED_STATE_CODES)
 
 _CA_PROVINCES = {
 	"AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT",
@@ -1581,10 +1587,7 @@ def _validate_exempt_regions(doc):
 
 def on_customer_update(doc, method):
 	"""Enqueue TaxJar customer sync when exemption fields change."""
-	if not (
-		frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
-		or frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")
-	):
+	if not _is_taxjar_enabled():
 		return
 
 	if not _has_taxjar_fields_changed(doc):
@@ -1614,10 +1617,7 @@ def on_customer_delete(doc, method):
 	if not taxjar_customer_id:
 		return
 
-	if not (
-		frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
-		or frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")
-	):
+	if not _is_taxjar_enabled():
 		return
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
