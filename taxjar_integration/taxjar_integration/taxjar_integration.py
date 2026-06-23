@@ -695,6 +695,22 @@ def set_sales_tax(doc, method):
 		)
 		return
 
+	if not doc.shipping_address_name and not doc.customer_address:
+		if doc.doctype == "Quotation":
+			log_taxjar_call(
+				action="tax_for_order",
+				status="skipped",
+				error="No shipping or billing address set on Quotation",
+				context={"doctype": doc.doctype, "name": doc.name, "company": doc.company},
+			)
+			_remove_taxjar_rows(doc, company_config)
+			return
+
+		frappe.throw(
+			_("Please set a Shipping Address or Billing Address on this transaction before saving."),
+			title=_("Address Required"),
+		)
+
 	tax_dict = get_tax_data(doc)
 
 	if not tax_dict:
@@ -1108,6 +1124,33 @@ def check_nexus(shipping_address_name):
 		return
 
 
+@frappe.whitelist()
+def get_customer_addresses(customer):
+	frappe.has_permission("Address", "read", throw=True)
+	return frappe.get_all(
+		"Address",
+		filters=[
+			["Dynamic Link", "link_doctype", "=", "Customer"],
+			["Dynamic Link", "link_name", "=", customer],
+			["disabled", "=", 0],
+		],
+		fields=[
+			"name", "address_title", "address_line1", "city", "state",
+			"pincode", "country", "address_type", "is_shipping_address",
+			"is_primary_address",
+		],
+		order_by="is_shipping_address DESC, is_primary_address DESC",
+	)
+
+
+@frappe.whitelist()
+def mark_address_as_shipping(address_name):
+	address = frappe.get_doc("Address", address_name)
+	address.check_permission("write")
+	address.is_shipping_address = 1
+	address.save()
+
+
 def get_shipping_address_details(doc):
 	"""Return customer shipping address details"""
 
@@ -1116,7 +1159,11 @@ def get_shipping_address_details(doc):
 	elif doc.customer_address:
 		shipping_address = frappe.get_doc("Address", doc.customer_address)
 	else:
-		shipping_address = get_company_address_details(doc)
+		frappe.throw(
+			_("No Shipping Address or Billing Address is set on this transaction. "
+			  "Please add an address to the Customer and select it on the transaction."),
+			title=_("Address Required"),
+		)
 
 	return shipping_address
 
