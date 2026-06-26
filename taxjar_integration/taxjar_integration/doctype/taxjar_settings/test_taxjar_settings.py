@@ -2526,12 +2526,13 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 
 	def test_get_summary_counts(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_summary
+		# get_summary now aggregates in SQL (group_by status), so the mock returns
+		# one row per status with a count.
 		mock_rows = [
-			frappe._dict(taxjar_sync_status="Synced"),
-			frappe._dict(taxjar_sync_status="Synced"),
-			frappe._dict(taxjar_sync_status="Failed"),
-			frappe._dict(taxjar_sync_status="Queued"),
-			frappe._dict(taxjar_sync_status="Not Applicable"),
+			frappe._dict(taxjar_sync_status="Synced", cnt=2),
+			frappe._dict(taxjar_sync_status="Failed", cnt=1),
+			frappe._dict(taxjar_sync_status="Queued", cnt=1),
+			frappe._dict(taxjar_sync_status="Not Applicable", cnt=1),
 		]
 		with patch(
 			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",

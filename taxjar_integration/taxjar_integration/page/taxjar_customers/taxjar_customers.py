@@ -41,11 +41,22 @@ def get_customers(filters=None, page=1):
 		limit_page_length=PAGE_SIZE,
 	)
 
-	for c in customers:
-		c["exempt_region_count"] = frappe.db.count(
+	# Fetch all region counts in one grouped query instead of one count per row.
+	names = [c["name"] for c in customers]
+	region_counts = {}
+	if names:
+		for row in frappe.get_all(
 			"TaxJar Customer Exempt Region",
-			{"parent": c["name"], "parenttype": "Customer"},
-		)
+			filters={"parenttype": "Customer", "parent": ("in", names)},
+			fields=["parent", {"COUNT": "*"}],
+			group_by="parent",
+		):
+			region_counts[row.get("parent")] = next(
+				(v for k, v in row.items() if k != "parent"), 0
+			)
+
+	for c in customers:
+		c["exempt_region_count"] = region_counts.get(c["name"], 0)
 
 	return {
 		"customers": customers,

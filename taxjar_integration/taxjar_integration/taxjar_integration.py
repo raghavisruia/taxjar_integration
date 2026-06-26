@@ -531,10 +531,21 @@ def _get_transaction_date(doc):
 
 
 def _get_usd_exchange_rate(doc):
-	"""Return the exchange rate from doc.currency to USD, or None if already USD."""
+	"""Return the exchange rate from doc.currency to USD, or None if already USD.
+
+	The looked-up rate is memoized on doc.flags so the repeated calls within a
+	single document (get_tax_data and set_sales_tax both need it) hit Currency
+	Exchange only once. Documents without a flags container (e.g. plain test
+	stubs) simply skip the cache and behave as before.
+	"""
 	currency = getattr(doc, "currency", None) or "USD"
 	if currency == "USD":
 		return None
+
+	flags = getattr(doc, "flags", None)
+	if flags is not None and flags.get("taxjar_usd_rate") is not None:
+		return flags.get("taxjar_usd_rate")
+
 	txn_date = _get_transaction_date(doc)
 	rate = flt(get_exchange_rate(currency, "USD", txn_date, args="for_selling"))
 	if not rate:
@@ -543,6 +554,9 @@ def _get_usd_exchange_rate(doc):
 			  "Please add it in Currency Exchange or configure Currency Exchange Settings."
 			).format(currency, txn_date)
 		)
+
+	if flags is not None:
+		flags.taxjar_usd_rate = rate
 	return rate
 
 

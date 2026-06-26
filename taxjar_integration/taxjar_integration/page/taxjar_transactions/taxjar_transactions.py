@@ -52,22 +52,23 @@ def get_summary(filters=None):
 	filters = frappe.parse_json(filters) if filters else {}
 	conditions = _build_conditions(filters)
 
-	all_invoices = frappe.get_all(
+	# Aggregate counts in SQL instead of pulling every row into Python.
+	rows = frappe.get_all(
 		"Sales Invoice",
 		filters=conditions,
-		fields=["taxjar_sync_status"],
+		fields=["taxjar_sync_status", {"COUNT": "*"}],
+		group_by="taxjar_sync_status",
 	)
-
-	total = len(all_invoices)
-	synced = sum(1 for r in all_invoices if r.taxjar_sync_status == "Synced")
-	failed = sum(1 for r in all_invoices if r.taxjar_sync_status == "Failed")
-	queued = sum(1 for r in all_invoices if r.taxjar_sync_status == "Queued")
+	by_status = {}
+	for r in rows:
+		status = r.get("taxjar_sync_status")
+		by_status[status] = next((v for k, v in r.items() if k != "taxjar_sync_status"), 0)
 
 	return {
-		"total": total,
-		"synced": synced,
-		"failed": failed,
-		"queued": queued,
+		"total": sum(by_status.values()),
+		"synced": by_status.get("Synced", 0),
+		"failed": by_status.get("Failed", 0),
+		"queued": by_status.get("Queued", 0),
 	}
 
 
