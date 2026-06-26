@@ -3697,6 +3697,26 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 
 class TestTaxBreakdownJS(UnitTestCase):
 
+	JS_DIR = (
+		"/home/raghav/frappe-work/benches/v16-bench-group"
+		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
+		"/public/js"
+	)
+
+	def _read_js(self, filename):
+		import os
+		with open(os.path.join(self.JS_DIR, filename)) as f:
+			return f.read()
+
+	def test_shared_utils_defines_render_functions(self):
+		# Breakdown rendering is shared in the globally-bundled taxjar_utils.js;
+		# the per-doctype scripts call the namespaced helpers (see tests below).
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn("taxjar_integration.render_tax_breakdown", js)
+		self.assertIn("taxjar_integration.render_single_item_breakdown", js)
+		self.assertIn("taxjar_breakdown_json", js)
+		self.assertIn("taxjar_item_breakdown_json", js)
+
 	def test_quotation_js_exists(self):
 		import os
 		path = os.path.join(
@@ -3716,43 +3736,19 @@ class TestTaxBreakdownJS(UnitTestCase):
 		self.assertTrue(os.path.isfile(path))
 
 	def test_quotation_js_has_render_functions(self):
-		import os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/public/js/quotation.js"
-		)
-		with open(path) as f:
-			js = f.read()
-		self.assertIn("_render_tax_breakdown", js)
-		self.assertIn("_render_single_item_breakdown", js)
-		self.assertIn("taxjar_breakdown_json", js)
-		self.assertIn("taxjar_item_breakdown_json", js)
+		js = self._read_js("quotation.js")
+		self.assertIn("taxjar_integration.render_tax_breakdown", js)
+		self.assertIn('taxjar_integration.render_single_item_breakdown(frm, cdn, "Quotation Item")', js)
 
 	def test_sales_order_js_has_render_functions(self):
-		import os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/public/js/sales_order.js"
-		)
-		with open(path) as f:
-			js = f.read()
-		self.assertIn("_render_tax_breakdown", js)
-		self.assertIn("_render_single_item_breakdown", js)
-		self.assertIn("taxjar_breakdown_json", js)
+		js = self._read_js("sales_order.js")
+		self.assertIn("taxjar_integration.render_tax_breakdown", js)
+		self.assertIn('taxjar_integration.render_single_item_breakdown(frm, cdn, "Sales Order Item")', js)
 
 	def test_sales_invoice_js_has_render_functions(self):
-		import os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/public/js/sales_invoice.js"
-		)
-		with open(path) as f:
-			js = f.read()
-		self.assertIn("_render_tax_breakdown", js)
-		self.assertIn("_render_single_item_breakdown", js)
+		js = self._read_js("sales_invoice.js")
+		self.assertIn("taxjar_integration.render_tax_breakdown", js)
+		self.assertIn('taxjar_integration.render_single_item_breakdown(frm, cdn, "Sales Invoice Item")', js)
 
 	def test_hooks_register_quotation_js(self):
 		from taxjar_integration.hooks import doctype_js
@@ -3765,33 +3761,15 @@ class TestTaxBreakdownJS(UnitTestCase):
 		self.assertIn("sales_order.js", doctype_js["Sales Order"])
 
 	def test_js_renders_jurisdiction_columns(self):
-		import os
-		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
-			path = os.path.join(
-				"/home/raghav/frappe-work/benches/v16-bench-group"
-				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-				"/public/js",
-				filename,
-			)
-			with open(path) as f:
-				js = f.read()
-			self.assertIn("Jurisdiction", js, f"{filename} should render Jurisdiction column")
-			self.assertIn("Rate", js, f"{filename} should render Rate column")
-			self.assertIn("Tax Amount", js, f"{filename} should render Tax Amount column")
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn("Jurisdiction", js, "taxjar_utils.js should render Jurisdiction column")
+		self.assertIn("Rate", js, "taxjar_utils.js should render Rate column")
+		self.assertIn("Tax Amount", js, "taxjar_utils.js should render Tax Amount column")
 
 	def test_item_js_renders_exempt_columns(self):
-		import os
-		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
-			path = os.path.join(
-				"/home/raghav/frappe-work/benches/v16-bench-group"
-				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-				"/public/js",
-				filename,
-			)
-			with open(path) as f:
-				js = f.read()
-			self.assertIn("Exempt/Non-Taxable", js, f"{filename} should render Exempt column")
-			self.assertIn("Taxable", js, f"{filename} should render Taxable column")
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn("Exempt/Non-Taxable", js, "taxjar_utils.js should render Exempt column")
+		self.assertIn("Taxable", js, "taxjar_utils.js should render Taxable column")
 
 	def test_item_breakdown_uses_form_render_event(self):
 		import os
@@ -3813,48 +3791,21 @@ class TestTaxBreakdownJS(UnitTestCase):
 			self.assertIn("form_render", js, f"{filename} should use form_render event")
 
 	def test_js_has_no_breakdown_message(self):
-		import os
-		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
-			path = os.path.join(
-				"/home/raghav/frappe-work/benches/v16-bench-group"
-				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-				"/public/js",
-				filename,
-			)
-			with open(path) as f:
-				js = f.read()
-			self.assertIn("No TaxJar tax breakdown available", js, f"{filename} should have no-breakdown message")
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn("No TaxJar tax breakdown available", js, "taxjar_utils.js should have no-breakdown message")
 
 	def test_js_has_multi_currency_support(self):
-		import os
-		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
-			path = os.path.join(
-				"/home/raghav/frappe-work/benches/v16-bench-group"
-				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-				"/public/js",
-				filename,
-			)
-			with open(path) as f:
-				js = f.read()
-			self.assertIn("data.usd", js, f"{filename} should check for USD breakdown data")
-			self.assertIn("Tax Calculation (USD)", js, f"{filename} should have USD table heading")
-			self.assertIn("Equivalent in Transaction Currency", js, f"{filename} should have converted table heading")
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn("data.usd", js, "taxjar_utils.js should check for USD breakdown data")
+		self.assertIn("Tax Calculation (USD)", js, "taxjar_utils.js should have USD table heading")
+		self.assertIn("Equivalent in Transaction Currency", js, "taxjar_utils.js should have converted table heading")
 
 	def test_js_uses_erpnext_table_styling(self):
-		import os
-		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
-			path = os.path.join(
-				"/home/raghav/frappe-work/benches/v16-bench-group"
-				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-				"/public/js",
-				filename,
-			)
-			with open(path) as f:
-				js = f.read()
-			self.assertIn("table-hover", js, f"{filename} should use table-hover class")
-			self.assertIn("tax-break-up", js, f"{filename} should use tax-break-up wrapper")
-			self.assertIn("overflow-x: auto", js, f"{filename} should have overflow-x auto")
-			self.assertNotIn("table-sm", js, f"{filename} should not use table-sm class")
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn("table-hover", js, "taxjar_utils.js should use table-hover class")
+		self.assertIn("tax-break-up", js, "taxjar_utils.js should use tax-break-up wrapper")
+		self.assertIn("overflow-x: auto", js, "taxjar_utils.js should have overflow-x auto")
+		self.assertNotIn("table-sm", js, "taxjar_utils.js should not use table-sm class")
 
 
 # ── Tax Breakdown: Multi-currency tests ─────────────────────────────────────
