@@ -2,6 +2,30 @@ if (!window.taxjar_integration) {
 	window.taxjar_integration = {};
 }
 
+// ── Shared geography constants ──
+// Single source of truth for US state + Canadian province codes used across the
+// Address, Customer, and exempt-region client scripts. (The page-level customer
+// console keeps its own copy as it may load independently.)
+taxjar_integration.US_STATE_NAMES = {
+	AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas",
+	CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware",
+	DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii",
+	ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
+	KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine",
+	MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota",
+	MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska",
+	NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico",
+	NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio",
+	OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island",
+	SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas",
+	UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington",
+	WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+};
+taxjar_integration.US_STATE_CODES = Object.keys(taxjar_integration.US_STATE_NAMES);
+taxjar_integration.CA_PROVINCE_CODES = [
+	"AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
+];
+
 taxjar_integration.check_shipping_address = function (frm) {
 	if (frm.doc.shipping_address_name) {
 		return;

@@ -977,10 +977,19 @@ class TestAddressClientScript(UnitTestCase):
 		self.assertIn("_has_state_code_field", js, "Missing field-existence guard in address.js")
 
 	def test_address_js_has_all_supported_state_codes(self):
-		"""Every code in SUPPORTED_STATE_CODES must appear as a key in the JS map."""
-		js = self._read_js()
+		"""Every code in SUPPORTED_STATE_CODES must appear in the shared state map.
+
+		The map lives in taxjar_utils.js (loaded globally via the app bundle) and is
+		referenced by address.js as taxjar_integration.US_STATE_NAMES.
+		"""
+		import os
+		path = os.path.join(self._APP_ROOT, "public", "js", "taxjar_utils.js")
+		with open(path) as f:
+			js = f.read()
+		# address.js must reference the shared map rather than hardcode its own copy.
+		self.assertIn("taxjar_integration.US_STATE_NAMES", self._read_js())
 		for code in SUPPORTED_STATE_CODES:
-			self.assertIn(code, js, f"State code {code!r} missing from address.js")
+			self.assertIn(code, js, f"State code {code!r} missing from taxjar_utils.js")
 
 	def test_address_js_makes_pincode_mandatory_for_us(self):
 		"""pincode must be set as required when country is United States."""

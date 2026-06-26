@@ -17,7 +17,11 @@ from frappe.permissions import add_permission, update_permission_property
 
 import taxjar
 
-from taxjar_integration.taxjar_integration.taxjar_integration import get_client, log_taxjar_call
+from taxjar_integration.taxjar_integration.taxjar_integration import (
+	SUPPORTED_STATE_CODES,
+	get_client,
+	log_taxjar_call,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -181,11 +185,8 @@ def create_tax_categories(data):
 			tax_category.db_insert()
 
 
-_US_STATE_CODE_OPTIONS = (
-	"\nAL\nAK\nAZ\nAR\nCA\nCO\nCT\nDE\nDC\nFL\nGA\nHI\nID\nIL\nIN\nIA"
-	"\nKS\nKY\nLA\nME\nMD\nMA\nMI\nMN\nMS\nMO\nMT\nNE\nNV\nNH\nNJ\nNM"
-	"\nNY\nNC\nND\nOH\nOK\nOR\nPA\nRI\nSC\nSD\nTN\nTX\nUT\nVT\nVA\nWA\nWV\nWI\nWY"
-)
+# Single source of truth: the leading "" yields a blank first option in the Select.
+_US_STATE_CODE_OPTIONS = "\n" + "\n".join(SUPPORTED_STATE_CODES)
 
 
 def _make_status_fields(insert_after_tab, allow_on_submit=False):
@@ -272,90 +273,52 @@ _ITEM_BREAKDOWN_FIELDS = [
 ]
 
 
+def _item_tax_fields(*, allow_breakdown_on_submit=False):
+	"""Custom fields shared by the Sales Invoice / Quotation / Sales Order Item tables.
+
+	Sales Invoice needs allow_on_submit on the breakdown JSON (it is written when the
+	invoice is recalculated after submission); the other two item tables do not.
+	"""
+	breakdown = _ITEM_BREAKDOWN_FIELDS
+	if allow_breakdown_on_submit:
+		breakdown = [
+			{**f, "allow_on_submit": 1} if f["fieldname"] == "taxjar_item_breakdown_json" else f
+			for f in _ITEM_BREAKDOWN_FIELDS
+		]
+	return [
+		dict(
+			fieldname="product_tax_category",
+			fieldtype="Link",
+			insert_after="description",
+			options="Product Tax Category",
+			label="Product Tax Category",
+			fetch_from="item_code.product_tax_category",
+		),
+		dict(
+			fieldname="tax_collectable",
+			fieldtype="Currency",
+			insert_after="net_amount",
+			label="Tax Collectable",
+			read_only=1,
+			options="currency",
+		),
+		dict(
+			fieldname="taxable_amount",
+			fieldtype="Currency",
+			insert_after="tax_collectable",
+			label="Taxable Amount",
+			read_only=1,
+			options="currency",
+		),
+		*breakdown,
+	]
+
+
 def make_custom_fields(update=True):
 	custom_fields = {
-		"Sales Invoice Item": [
-			dict(
-				fieldname="product_tax_category",
-				fieldtype="Link",
-				insert_after="description",
-				options="Product Tax Category",
-				label="Product Tax Category",
-				fetch_from="item_code.product_tax_category",
-			),
-			dict(
-				fieldname="tax_collectable",
-				fieldtype="Currency",
-				insert_after="net_amount",
-				label="Tax Collectable",
-				read_only=1,
-				options="currency",
-			),
-			dict(
-				fieldname="taxable_amount",
-				fieldtype="Currency",
-				insert_after="tax_collectable",
-				label="Taxable Amount",
-				read_only=1,
-				options="currency",
-			),
-			*[{**f, "allow_on_submit": 1} if f["fieldname"] == "taxjar_item_breakdown_json" else f
-			  for f in _ITEM_BREAKDOWN_FIELDS],
-		],
-		"Quotation Item": [
-			dict(
-				fieldname="product_tax_category",
-				fieldtype="Link",
-				insert_after="description",
-				options="Product Tax Category",
-				label="Product Tax Category",
-				fetch_from="item_code.product_tax_category",
-			),
-			dict(
-				fieldname="tax_collectable",
-				fieldtype="Currency",
-				insert_after="net_amount",
-				label="Tax Collectable",
-				read_only=1,
-				options="currency",
-			),
-			dict(
-				fieldname="taxable_amount",
-				fieldtype="Currency",
-				insert_after="tax_collectable",
-				label="Taxable Amount",
-				read_only=1,
-				options="currency",
-			),
-			*_ITEM_BREAKDOWN_FIELDS,
-		],
-		"Sales Order Item": [
-			dict(
-				fieldname="product_tax_category",
-				fieldtype="Link",
-				insert_after="description",
-				options="Product Tax Category",
-				label="Product Tax Category",
-				fetch_from="item_code.product_tax_category",
-			),
-			dict(
-				fieldname="tax_collectable",
-				fieldtype="Currency",
-				insert_after="net_amount",
-				label="Tax Collectable",
-				read_only=1,
-				options="currency",
-			),
-			dict(
-				fieldname="taxable_amount",
-				fieldtype="Currency",
-				insert_after="tax_collectable",
-				label="Taxable Amount",
-				read_only=1,
-				options="currency",
-			),
-			*_ITEM_BREAKDOWN_FIELDS,
-		],
+		"Sales Invoice Item": _item_tax_fields(allow_breakdown_on_submit=True),
+		"Quotation Item": _item_tax_fields(),
+		"Sales Order Item": _item_tax_fields(),
 		"Item": [
 			dict(
 				fieldname="product_tax_category",
