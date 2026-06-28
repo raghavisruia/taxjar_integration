@@ -10,6 +10,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 
 @frappe.whitelist()
 def get_customers(filters=None, page=1):
+	frappe.has_permission("Customer", "read", throw=True)
 	filters = parse_filters(filters)
 	page = max(1, int(page))
 

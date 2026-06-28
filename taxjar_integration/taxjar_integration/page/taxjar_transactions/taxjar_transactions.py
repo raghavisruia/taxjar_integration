@@ -10,6 +10,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 
 @frappe.whitelist()
 def get_transactions(filters=None, page=1):
+	frappe.has_permission("Sales Invoice", "read", throw=True)
 	filters = parse_filters(filters)
 	page = max(1, int(page))
 
@@ -46,6 +47,7 @@ def get_transactions(filters=None, page=1):
 
 @frappe.whitelist()
 def get_summary(filters=None):
+	frappe.has_permission("Sales Invoice", "read", throw=True)
 	filters = parse_filters(filters)
 	conditions = _build_conditions(filters)
 

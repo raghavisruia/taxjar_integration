@@ -2436,6 +2436,21 @@ class TestRetryAllFailedSyncs(UnitTestCase):
 
 class TestTaxJarTransactionSyncPage(UnitTestCase):
 
+	def test_read_methods_require_permission(self):
+		"""get_transactions / get_summary must reject users without Sales Invoice read."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			get_transactions,
+			get_summary,
+		)
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				get_transactions()
+			with self.assertRaises(frappe.PermissionError):
+				get_summary()
+		finally:
+			frappe.set_user("Administrator")
+
 	def test_page_files_exist(self):
 		import os
 		page_dir = os.path.join(
@@ -3074,6 +3089,15 @@ from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customer
 
 
 class TestCustomerConfigPageAPI(UnitTestCase):
+
+	def test_get_customers_requires_read_permission(self):
+		"""An unprivileged user must not be able to read customer data."""
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				get_customers()
+		finally:
+			frappe.set_user("Administrator")
 
 	def test_get_customers_returns_structure(self):
 		result = get_customers()
