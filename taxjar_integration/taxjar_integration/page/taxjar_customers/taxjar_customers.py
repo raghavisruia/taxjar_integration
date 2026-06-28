@@ -1,13 +1,16 @@
 import frappe
 from frappe import _
 
-
-PAGE_SIZE = 50
+from taxjar_integration.taxjar_integration.pagination import (
+	PAGE_SIZE,
+	paginated_response,
+	parse_filters,
+)
 
 
 @frappe.whitelist()
 def get_customers(filters=None, page=1):
-	filters = frappe.parse_json(filters) if filters else {}
+	filters = parse_filters(filters)
 	page = max(1, int(page))
 
 	conditions = {}
@@ -58,13 +61,7 @@ def get_customers(filters=None, page=1):
 	for c in customers:
 		c["exempt_region_count"] = region_counts.get(c["name"], 0)
 
-	return {
-		"customers": customers,
-		"total": total,
-		"page": page,
-		"page_size": PAGE_SIZE,
-		"total_pages": max(1, -(-total // PAGE_SIZE)),
-	}
+	return paginated_response("customers", customers, total, page)
 
 
 @frappe.whitelist()

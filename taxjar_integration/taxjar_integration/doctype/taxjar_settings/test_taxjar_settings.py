@@ -1340,7 +1340,8 @@ class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
 		config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=1):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		           return_value={"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"}):
 			is_exempt, reason = check_sales_tax_exemption(doc, config)
 
 		self.assertTrue(is_exempt)
@@ -1354,7 +1355,8 @@ class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
 		config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=0):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		           return_value={"exempt_from_sales_tax": 0, "taxjar_exemption_type": None}):
 			is_exempt, reason = check_sales_tax_exemption(doc, config)
 
 		self.assertFalse(is_exempt)
@@ -4094,7 +4096,8 @@ class TestExemptionReasonInTuple(UnitTestCase):
 		doc.exempt_from_sales_tax = 0
 		config = MagicMock(tax_account_head="Sales Tax - TC")
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=[1, "Wholesale"]):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		           return_value={"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"}):
 			is_exempt, reason = check_sales_tax_exemption(doc, config)
 		self.assertTrue(is_exempt)
 		self.assertIn("Wholesale", reason)

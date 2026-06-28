@@ -1,13 +1,16 @@
 import frappe
 from frappe import _
 
-
-PAGE_SIZE = 50
+from taxjar_integration.taxjar_integration.pagination import (
+	PAGE_SIZE,
+	paginated_response,
+	parse_filters,
+)
 
 
 @frappe.whitelist()
 def get_transactions(filters=None, page=1):
-	filters = frappe.parse_json(filters) if filters else {}
+	filters = parse_filters(filters)
 	page = max(1, int(page))
 
 	conditions = _build_conditions(filters)
@@ -38,18 +41,12 @@ def get_transactions(filters=None, page=1):
 		if row.taxjar_sync_error and len(row.taxjar_sync_error) > 100:
 			row["taxjar_sync_error"] = row.taxjar_sync_error[:100] + "..."
 
-	return {
-		"invoices": invoices,
-		"total": total,
-		"page": page,
-		"page_size": PAGE_SIZE,
-		"total_pages": max(1, -(-total // PAGE_SIZE)),
-	}
+	return paginated_response("invoices", invoices, total, page)
 
 
 @frappe.whitelist()
 def get_summary(filters=None):
-	filters = frappe.parse_json(filters) if filters else {}
+	filters = parse_filters(filters)
 	conditions = _build_conditions(filters)
 
 	# Aggregate counts in SQL instead of pulling every row into Python.

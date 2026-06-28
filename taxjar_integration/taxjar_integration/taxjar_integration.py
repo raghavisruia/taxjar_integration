@@ -1103,12 +1103,17 @@ def check_sales_tax_exemption(doc, company_config):
 	customer_exempt = False
 	exemption_type = None
 	if not doc_exempt and customer_name:
-		customer_exempt = (
-			frappe.db.has_column("Customer", "exempt_from_sales_tax")
-			and frappe.db.get_value("Customer", customer_name, "exempt_from_sales_tax", cache=True)
-		)
-		if customer_exempt and frappe.db.has_column("Customer", "taxjar_exemption_type"):
-			exemption_type = frappe.db.get_value("Customer", customer_name, "taxjar_exemption_type", cache=True)
+		fields = [
+			f for f in ("exempt_from_sales_tax", "taxjar_exemption_type")
+			if frappe.db.has_column("Customer", f)
+		]
+		if fields:
+			values = frappe.db.get_value(
+				"Customer", customer_name, fields, as_dict=True, cache=True
+			) or {}
+			customer_exempt = values.get("exempt_from_sales_tax")
+			if customer_exempt:
+				exemption_type = values.get("taxjar_exemption_type")
 
 	if doc_exempt:
 		_remove_taxjar_rows(doc, company_config)
@@ -1311,7 +1316,13 @@ def validate_address(doc, method):
 			_validate_address_with_taxjar(doc)
 
 
-def _is_taxjar_enabled():
+def _is_taxjar_enabled(settings=None):
+	"""Return whether either TaxJar feature (calculate tax / create transactions)
+	is enabled. Pass an already-loaded TaxJar Settings doc to read from it directly
+	and avoid two extra single-value lookups.
+	"""
+	if settings is not None:
+		return settings.taxjar_calculate_tax or settings.taxjar_create_transactions
 	return cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")) or \
 		cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions"))
 

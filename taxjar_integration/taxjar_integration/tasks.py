@@ -1,6 +1,8 @@
 import frappe
 from frappe.utils import cint
 
+from taxjar_integration.taxjar_integration.taxjar_integration import _is_taxjar_enabled
+
 
 def purge_old_api_logs():
 	retention_days = frappe.db.get_single_value("TaxJar Settings", "log_retention_days")
@@ -14,7 +16,7 @@ def sync_nexus_list():
 	"""Daily job: refresh nexus regions from TaxJar for all configured companies."""
 	doc = frappe.get_doc("TaxJar Settings", "TaxJar Settings")
 
-	if not (doc.taxjar_calculate_tax or doc.taxjar_create_transactions):
+	if not _is_taxjar_enabled(doc):
 		return
 	if not doc.company_config:
 		return
@@ -49,10 +51,7 @@ def retry_failed_taxjar_syncs():
 
 def retry_failed_taxjar_customer_syncs():
 	"""Every 15 min: re-enqueue all Customers with Failed TaxJar sync status."""
-	if not (
-		cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax"))
-		or cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions"))
-	):
+	if not _is_taxjar_enabled():
 		return
 
 	failed_customers = frappe.get_all(
