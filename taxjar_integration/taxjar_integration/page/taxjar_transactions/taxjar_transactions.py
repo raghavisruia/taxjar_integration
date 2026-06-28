@@ -3,14 +3,26 @@ from frappe import _
 
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
+	not_configured_response,
 	paginated_response,
 	parse_filters,
 )
+
+# A representative TaxJar custom field; if this column is absent the fields were
+# never created, so reads would hit MySQLdb (1054) Unknown column.
+_TAXJAR_INVOICE_COLUMN = "taxjar_sync_status"
+
+
+def _taxjar_invoice_fields_ready():
+	return frappe.db.has_column("Sales Invoice", _TAXJAR_INVOICE_COLUMN)
 
 
 @frappe.whitelist()
 def get_transactions(filters=None, page=1):
 	frappe.has_permission("Sales Invoice", "read", throw=True)
+	if not _taxjar_invoice_fields_ready():
+		return not_configured_response("invoices")
+
 	filters = parse_filters(filters)
 	page = max(1, int(page))
 
@@ -48,6 +60,9 @@ def get_transactions(filters=None, page=1):
 @frappe.whitelist()
 def get_summary(filters=None):
 	frappe.has_permission("Sales Invoice", "read", throw=True)
+	if not _taxjar_invoice_fields_ready():
+		return not_configured_response()
+
 	filters = parse_filters(filters)
 	conditions = _build_conditions(filters)
 
@@ -74,6 +89,11 @@ def get_summary(filters=None):
 @frappe.whitelist()
 def bulk_retry(invoices):
 	frappe.has_permission("Sales Invoice", "write", throw=True)
+	if not _taxjar_invoice_fields_ready():
+		frappe.throw(
+			_("TaxJar is not set up yet. Enable a TaxJar feature in TaxJar Settings first."),
+			title=_("TaxJar Not Configured"),
+		)
 	invoices = frappe.parse_json(invoices) if isinstance(invoices, str) else invoices
 
 	queued = 0

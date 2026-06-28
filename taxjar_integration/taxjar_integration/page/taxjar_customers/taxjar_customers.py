@@ -3,14 +3,34 @@ from frappe import _
 
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
+	not_configured_response,
 	paginated_response,
 	parse_filters,
 )
+
+# A representative TaxJar custom field; if this column is absent the fields were
+# never created, so reads would hit MySQLdb (1054) Unknown column.
+_TAXJAR_CUSTOMER_COLUMN = "taxjar_exemption_type"
+
+
+def _taxjar_customer_fields_ready():
+	return frappe.db.has_column("Customer", _TAXJAR_CUSTOMER_COLUMN)
+
+
+def _ensure_taxjar_customer_fields():
+	if not _taxjar_customer_fields_ready():
+		frappe.throw(
+			_("TaxJar is not set up yet. Enable a TaxJar feature in TaxJar Settings first."),
+			title=_("TaxJar Not Configured"),
+		)
 
 
 @frappe.whitelist()
 def get_customers(filters=None, page=1):
 	frappe.has_permission("Customer", "read", throw=True)
+	if not _taxjar_customer_fields_ready():
+		return not_configured_response("customers")
+
 	filters = parse_filters(filters)
 	page = max(1, int(page))
 
@@ -68,6 +88,7 @@ def get_customers(filters=None, page=1):
 @frappe.whitelist()
 def save_exemption_type(customer, exemption_type):
 	frappe.has_permission("Customer", "write", throw=True)
+	_ensure_taxjar_customer_fields()
 	doc = frappe.get_doc("Customer", customer)
 	doc.taxjar_exemption_type = exemption_type or ""
 	doc.save()
@@ -87,6 +108,7 @@ def get_exempt_regions(customer):
 @frappe.whitelist()
 def save_exempt_regions(customer, regions):
 	frappe.has_permission("Customer", "write", throw=True)
+	_ensure_taxjar_customer_fields()
 	regions = frappe.parse_json(regions) if isinstance(regions, str) else regions
 
 	doc = frappe.get_doc("Customer", customer)
@@ -100,6 +122,7 @@ def save_exempt_regions(customer, regions):
 @frappe.whitelist()
 def bulk_set_exemption_type(customers, exemption_type):
 	frappe.has_permission("Customer", "write", throw=True)
+	_ensure_taxjar_customer_fields()
 	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
 
 	for name in customers:
@@ -113,6 +136,7 @@ def bulk_set_exemption_type(customers, exemption_type):
 @frappe.whitelist()
 def bulk_clear_exemption(customers):
 	frappe.has_permission("Customer", "write", throw=True)
+	_ensure_taxjar_customer_fields()
 	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
 
 	for name in customers:
@@ -127,6 +151,7 @@ def bulk_clear_exemption(customers):
 @frappe.whitelist()
 def bulk_sync_to_taxjar(customers):
 	frappe.has_permission("Customer", "write", throw=True)
+	_ensure_taxjar_customer_fields()
 	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
 
 	queued = 0

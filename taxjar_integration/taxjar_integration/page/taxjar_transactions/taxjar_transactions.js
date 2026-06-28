@@ -144,6 +144,25 @@ class TaxJarTransactionSync {
 
 		this.tbody = this.table_wrapper.find(".taxjar-transactions-body");
 		this.pagination = this.table_wrapper.find(".taxjar-pagination");
+
+		this.not_configured_panel = $('<div class="taxjar-not-configured"></div>')
+			.hide()
+			.appendTo(this.page.main);
+	}
+
+	show_not_configured() {
+		this.bulk_area.hide();
+		this.summary_area.hide();
+		this.table_wrapper.hide();
+		taxjar_integration.render_not_configured_panel(this.not_configured_panel);
+		this.not_configured_panel.show();
+	}
+
+	hide_not_configured() {
+		this.not_configured_panel.hide();
+		this.bulk_area.show();
+		this.summary_area.show();
+		this.table_wrapper.show();
 	}
 
 	get_filters() {
@@ -180,6 +199,11 @@ class TaxJarTransactionSync {
 				{ filters },
 			),
 		]).then(([data, summary]) => {
+			if (data.not_configured) {
+				this.show_not_configured();
+				return;
+			}
+			this.hide_not_configured();
 			this.invoices = data.invoices;
 			this.total = data.total;
 			this.total_pages = data.total_pages;

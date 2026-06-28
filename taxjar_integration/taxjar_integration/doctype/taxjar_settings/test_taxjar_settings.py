@@ -3270,6 +3270,111 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		self.assertTrue(len(page_links) > 0)
 
 
+# ── Problem 1: pages tolerate missing TaxJar custom fields ───────────────────
+
+
+class TestNotConfiguredGuards(UnitTestCase):
+	"""When the TaxJar custom fields were never created, the desk pages must return
+	a not_configured envelope instead of querying non-existent columns (1054)."""
+
+	CUSTOMERS = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
+	TRANSACTIONS = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+
+	def test_not_configured_response_shape(self):
+		from taxjar_integration.taxjar_integration.pagination import not_configured_response
+
+		bare = not_configured_response()
+		self.assertEqual(bare, {"not_configured": True})
+
+		paged = not_configured_response("customers")
+		self.assertTrue(paged["not_configured"])
+		self.assertEqual(paged["customers"], [])
+		self.assertEqual(paged["total"], 0)
+		self.assertEqual(paged["page"], 1)
+		self.assertIn("total_pages", paged)
+
+	def test_get_customers_not_configured(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			get_customers,
+		)
+		with patch(f"{self.CUSTOMERS}.frappe.db.has_column", return_value=False):
+			result = get_customers()
+		self.assertTrue(result["not_configured"])
+		self.assertEqual(result["customers"], [])
+
+	def test_get_transactions_not_configured(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			get_transactions,
+		)
+		with patch(f"{self.TRANSACTIONS}.frappe.db.has_column", return_value=False):
+			result = get_transactions()
+		self.assertTrue(result["not_configured"])
+		self.assertEqual(result["invoices"], [])
+
+	def test_get_summary_not_configured(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			get_summary,
+		)
+		with patch(f"{self.TRANSACTIONS}.frappe.db.has_column", return_value=False):
+			result = get_summary()
+		self.assertEqual(result, {"not_configured": True})
+
+	def test_customer_mutator_throws_when_not_configured(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			save_exemption_type,
+		)
+		with patch(f"{self.CUSTOMERS}.frappe.db.has_column", return_value=False):
+			with self.assertRaises(frappe.ValidationError):
+				save_exemption_type("Any Customer", "Government")
+
+	def test_transaction_mutator_throws_when_not_configured(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			bulk_retry,
+		)
+		with patch(f"{self.TRANSACTIONS}.frappe.db.has_column", return_value=False):
+			with self.assertRaises(frappe.ValidationError):
+				bulk_retry(["SINV-0001"])
+
+	def test_page_js_handles_not_configured(self):
+		import os
+		base = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page",
+		)
+		for page in ("taxjar_customers", "taxjar_transactions"):
+			path = os.path.normpath(os.path.join(base, page, f"{page}.js"))
+			with open(path) as f:
+				js = f.read()
+			self.assertIn("not_configured", js)
+			self.assertIn("show_not_configured", js)
+
+	def test_taxjar_utils_has_not_configured_panel(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js",
+		))
+		with open(path) as f:
+			js = f.read()
+		self.assertIn("render_not_configured_panel", js)
+
+
+# ── Problem 1: after_install creates custom fields ───────────────────────────
+
+
+class TestAfterInstall(UnitTestCase):
+
+	def test_after_install_hook_registered(self):
+		from taxjar_integration import hooks
+		self.assertEqual(hooks.after_install, "taxjar_integration.install.after_install")
+
+	def test_after_install_creates_fields_and_hides_tax_category(self):
+		from taxjar_integration import install
+		with patch("taxjar_integration.install.make_custom_fields") as mock_make, \
+		     patch("taxjar_integration.install.toggle_tax_category_fields") as mock_toggle:
+			install.after_install()
+		mock_make.assert_called_once()
+		mock_toggle.assert_called_once_with(hidden=1)
+
+
 # ── Tax Breakdown: helpers ──────────────────────────────────────────────────
 
 def _make_us_breakdown():

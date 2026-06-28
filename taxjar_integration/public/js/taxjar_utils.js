@@ -482,3 +482,23 @@ taxjar_integration.render_single_item_breakdown = function (frm, cdn, item_docty
 	html += taxjar_integration.build_item_table(data.breakdown || [], currency);
 	field.$wrapper.html(html);
 };
+
+// ── "TaxJar not set up" panel ──
+// Rendered by the Customers / Transactions pages when their read methods report
+// not_configured (the TaxJar custom fields do not exist yet). Replaces the table
+// area with a friendly call to action instead of an empty grid or a server error.
+taxjar_integration.render_not_configured_panel = function ($container) {
+	$container.html(`
+		<div class="text-center text-muted" style="padding: 60px 20px;">
+			<div style="font-size: var(--text-2xl); font-weight: 600; margin-bottom: 8px;">
+				${__("TaxJar is not set up yet")}
+			</div>
+			<p style="max-width: 480px; margin: 0 auto 16px;">
+				${__("Enable a TaxJar feature in TaxJar Settings to start configuring customers and syncing transactions.")}
+			</p>
+			<a class="btn btn-primary btn-sm" href="/app/taxjar-settings">
+				${__("Open TaxJar Settings")}
+			</a>
+		</div>
+	`);
+};
