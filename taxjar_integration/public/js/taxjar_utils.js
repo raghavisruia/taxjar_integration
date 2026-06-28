@@ -4,8 +4,7 @@ if (!window.taxjar_integration) {
 
 // ── Shared geography constants ──
 // Single source of truth for US state + Canadian province codes used across the
-// Address, Customer, and exempt-region client scripts. (The page-level customer
-// console keeps its own copy as it may load independently.)
+// Address and Customer forms and the TaxJar Customers configuration page.
 taxjar_integration.US_STATE_NAMES = {
 	AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas",
 	CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware",

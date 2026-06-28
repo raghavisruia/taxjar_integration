@@ -11,16 +11,10 @@ frappe.pages["taxjar-customers"].on_page_load = function (wrapper) {
 const EXEMPTION_OPTIONS = ["", "Wholesale", "Government", "Non Exempt", "Other"];
 const SYNC_STATUS_OPTIONS = ["", "Queued", "Synced", "Failed"];
 
-const US_STATES = [
-	"AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN",
-	"IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH",
-	"NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT",
-	"VT","VA","WA","WV","WI","WY",
-];
-
-const CA_PROVINCES = [
-	"AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT",
-];
+// Defined once in taxjar_utils.js (loaded globally via the app bundle, which is
+// present on every desk page including this one).
+const US_STATES = taxjar_integration.US_STATE_CODES;
+const CA_PROVINCES = taxjar_integration.CA_PROVINCE_CODES;
 
 const STATUS_COLORS = {
 	Synced: "green",
