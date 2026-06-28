@@ -87,7 +87,7 @@ doctype_js = {
 
 # before_install = "taxjar_integration.install.before_install"
 after_install = "taxjar_integration.install.after_install"
-after_migrate = ["taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_custom_fields"]
+after_migrate = ["taxjar_integration.install.after_migrate"]
 
 # Uninstallation
 # ------------

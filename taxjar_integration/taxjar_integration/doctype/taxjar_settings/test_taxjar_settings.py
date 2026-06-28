@@ -55,6 +55,7 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 	_TRANSACTION_BREAKDOWN_FIELDS,
 	_US_STATE_CODE_OPTIONS,
 	make_custom_fields,
+	validate_taxjar_tokens,
 )
 
 
@@ -1185,6 +1186,9 @@ class TestAutoNexusEnqueue(UnitTestCase):
 			doc.set("nexus", [{"company": "_Test Company", "region": "California", "region_code": "CA", "country": "United States", "country_code": "US"}])
 		else:
 			doc.set("nexus", [])
+		# No credentials → the background token check is not enqueued, so the only
+		# enqueue under test is the nexus fetch.
+		doc.set("table_hvjw", [])
 		return doc
 
 	def _call_on_update(self, doc):
@@ -1935,56 +1939,80 @@ class TestGetLineItemDiscount(UnitTestCase):
 
 
 class TestTokenValidation(UnitTestCase):
+	"""Token validation runs in the background (validate_taxjar_tokens) and reports
+	problems via a realtime alert to the saving user instead of blocking the save."""
 
-	def test_valid_token_passes(self):
-		"""No error when categories() succeeds."""
+	MOD = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def _settings_with_cred(self, **cred):
+		settings = MagicMock()
+		settings.table_hvjw = [MagicMock(company="Test Co", **cred)]
+		return settings
+
+	def test_valid_token_no_alert(self):
+		"""categories() succeeds → no alert published."""
 		mock_client = MagicMock()
 		mock_client.categories.return_value = []
+		settings = self._settings_with_cred(sandbox_token="sk_test")
 
-		settings = MagicMock()
-		settings.taxjar_calculate_tax = 1
-		settings.taxjar_create_transactions = 0
-		settings.api_mode = "Sandbox"
-		settings.table_hvjw = [MagicMock(company="Test Co", sandbox_token="sk_test")]
-
-		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client", return_value=mock_client):
-			settings._validate_tokens = TaxJarSettings._validate_tokens.__get__(settings)
-			settings._validate_tokens()
+		with patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.frappe.get_single", return_value=settings), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_pub:
+			validate_taxjar_tokens(user="admin@example.com")
 
 		mock_client.categories.assert_called_once()
+		mock_pub.assert_not_called()
 
-	def test_invalid_token_throws(self):
-		"""401 response should throw."""
+	def test_invalid_token_alerts_red(self):
+		"""401 response → red realtime alert to the saving user, no exception."""
 		import taxjar.exceptions
 		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
 		err.full_response = {"status_code": 401}
 
 		mock_client = MagicMock()
 		mock_client.categories.side_effect = err
+		settings = self._settings_with_cred()
 
-		settings = MagicMock()
-		settings.table_hvjw = [MagicMock(company="Test Co")]
+		with patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.frappe.get_single", return_value=settings), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_pub:
+			validate_taxjar_tokens(user="admin@example.com")
 
-		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client", return_value=mock_client):
-			settings._validate_tokens = TaxJarSettings._validate_tokens.__get__(settings)
-			self.assertRaises(frappe.ValidationError, settings._validate_tokens)
+		mock_pub.assert_called_once()
+		payload = mock_pub.call_args[0][1]
+		self.assertEqual(payload["indicator"], "red")
+		self.assertEqual(mock_pub.call_args[1]["user"], "admin@example.com")
 
-	def test_connection_error_warns_but_saves(self):
-		"""Connection error should warn, not throw."""
+	def test_connection_error_alerts_orange(self):
+		"""Connection error → orange alert, not an exception."""
 		import taxjar.exceptions
-
 		mock_client = MagicMock()
 		mock_client.categories.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+		settings = self._settings_with_cred()
 
-		settings = MagicMock()
-		settings.table_hvjw = [MagicMock(company="Test Co")]
+		with patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.frappe.get_single", return_value=settings), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_pub:
+			validate_taxjar_tokens(user="admin@example.com")
 
-		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.msgprint") as mock_msg:
-			settings._validate_tokens = TaxJarSettings._validate_tokens.__get__(settings)
-			settings._validate_tokens()  # should not raise
+		mock_pub.assert_called_once()
+		self.assertEqual(mock_pub.call_args[0][1]["indicator"], "orange")
 
-		mock_msg.assert_called_once()
+	def test_no_alert_when_user_missing(self):
+		"""Without a user to notify (e.g. a system-triggered save) nothing is published."""
+		import taxjar.exceptions
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 401}
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = err
+		settings = self._settings_with_cred()
+
+		with patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.frappe.get_single", return_value=settings), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_pub:
+			validate_taxjar_tokens(user=None)
+
+		mock_pub.assert_not_called()
 
 
 # ── Phase 4: API Resilience (Items 6, 11) ────────────────────────────────────
@@ -3357,22 +3385,58 @@ class TestNotConfiguredGuards(UnitTestCase):
 		self.assertIn("render_not_configured_panel", js)
 
 
-# ── Problem 1: after_install creates custom fields ───────────────────────────
+# ── Problem 1 / 2: install-time setup ────────────────────────────────────────
 
 
-class TestAfterInstall(UnitTestCase):
+class TestInstallSetup(UnitTestCase):
 
 	def test_after_install_hook_registered(self):
 		from taxjar_integration import hooks
 		self.assertEqual(hooks.after_install, "taxjar_integration.install.after_install")
 
-	def test_after_install_creates_fields_and_hides_tax_category(self):
+	def test_after_migrate_hook_registered(self):
+		from taxjar_integration import hooks
+		self.assertIn("taxjar_integration.install.after_migrate", hooks.after_migrate)
+
+	def _run_setup(self, *, categories_exist, features_enabled):
 		from taxjar_integration import install
 		with patch("taxjar_integration.install.make_custom_fields") as mock_make, \
-		     patch("taxjar_integration.install.toggle_tax_category_fields") as mock_toggle:
+		     patch("taxjar_integration.install.add_product_tax_categories") as mock_cats, \
+		     patch("taxjar_integration.install.add_permissions") as mock_perms, \
+		     patch("taxjar_integration.install.toggle_tax_category_fields") as mock_toggle, \
+		     patch("taxjar_integration.install.frappe.db.exists", return_value=categories_exist), \
+		     patch("taxjar_integration.install.frappe.db.get_single_value", return_value=1 if features_enabled else 0):
+			install.setup_taxjar()
+		return mock_make, mock_cats, mock_perms, mock_toggle
+
+	def test_after_install_runs_full_setup_and_hides_fields(self):
+		from taxjar_integration import install
+		with patch("taxjar_integration.install.setup_taxjar") as mock_setup:
 			install.after_install()
+		mock_setup.assert_called_once()
+
+		mock_make, mock_cats, mock_perms, mock_toggle = self._run_setup(
+			categories_exist=False, features_enabled=False
+		)
 		mock_make.assert_called_once()
-		mock_toggle.assert_called_once_with(hidden=1)
+		mock_cats.assert_called_once()
+		mock_perms.assert_called_once()
+		mock_toggle.assert_called_once_with(hidden=True)
+
+	def test_setup_skips_category_seed_when_already_present(self):
+		mock_make, mock_cats, mock_perms, mock_toggle = self._run_setup(
+			categories_exist=True, features_enabled=False
+		)
+		mock_cats.assert_not_called()
+		mock_make.assert_called_once()
+		mock_perms.assert_called_once()
+
+	def test_setup_keeps_fields_visible_when_feature_enabled(self):
+		"""On migrate of a configured site, fields must stay visible."""
+		_make, _cats, _perms, mock_toggle = self._run_setup(
+			categories_exist=True, features_enabled=True
+		)
+		mock_toggle.assert_called_once_with(hidden=False)
 
 
 # ── Tax Breakdown: helpers ──────────────────────────────────────────────────

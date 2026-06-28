@@ -51,26 +51,21 @@ class TaxJarSettings(Document):
 	# end: auto-generated types
 
 	def on_update(self):
-		features_enabled = self.taxjar_calculate_tax or self.taxjar_create_transactions
+		features_enabled = bool(self.taxjar_calculate_tax or self.taxjar_create_transactions)
 
-		fields_already_exist = frappe.db.exists(
-			"Custom Field",
-			{
-				"dt": ["in", ["Item", "Sales Invoice Item"]],
-				"fieldname": "product_tax_category",
-			},
-		)
+		# Custom fields, the Product Tax Category master and permissions are all set up
+		# at install / migrate (see install.setup_taxjar), so on save we only flip field
+		# visibility — a couple of cheap db.set_value calls. The single slow piece, the
+		# live token check, runs in the background so it never blocks the save.
+		toggle_tax_category_fields(hidden=not features_enabled)
 
-		if features_enabled:
-			if not fields_already_exist:
-				add_product_tax_categories()
-				make_custom_fields()
-				add_permissions()
-				frappe.enqueue("erpnext.regional.united_states.setup.add_product_tax_categories", now=False)
-			else:
-				toggle_tax_category_fields(hidden=0)
-		elif fields_already_exist:
-			toggle_tax_category_fields(hidden=1)
+		if features_enabled and self.table_hvjw:
+			frappe.enqueue(
+				"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.validate_taxjar_tokens",
+				user=frappe.session.user,
+				queue="short",
+				now=frappe.flags.in_test,
+			)
 
 		# Auto-fetch nexus when first configured: features on, company config present, nexus empty.
 		if features_enabled and self.company_config and not self.nexus:
@@ -87,35 +82,15 @@ class TaxJarSettings(Document):
 		if not self.api_mode:
 			frappe.throw(frappe._("Please select an API Mode before enabling features."))
 
+		# Cheap, local credential-presence checks only. The live token check (an API
+		# round-trip per credential) runs in the background via validate_taxjar_tokens
+		# so it never blocks the save.
 		if self.api_mode == "Sandbox":
 			if not any(cred.sandbox_token for cred in (self.table_hvjw or [])):
 				frappe.throw(frappe._("At least one Sandbox Token is required in API Credentials for Sandbox mode."))
 		else:
 			if not any(cred.live_token for cred in (self.table_hvjw or [])):
 				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode."))
-
-		self._validate_tokens()
-
-	def _validate_tokens(self):
-		"""Test each credential by calling a lightweight TaxJar endpoint."""
-		for cred in self.table_hvjw or []:
-			company = cred.company
-			try:
-				test_client = get_client(company)
-				if test_client:
-					test_client.categories()
-			except taxjar.exceptions.TaxJarResponseError as err:
-				full = getattr(err, "full_response", None) or {}
-				status = full.get("status_code") if isinstance(full, dict) else None
-				if status == 401:
-					frappe.throw(frappe._("Invalid API token for company {0}. Please check your credentials.").format(company))
-			except taxjar.exceptions.TaxJarConnectionError:
-				frappe.msgprint(
-					frappe._("Could not reach TaxJar to verify credentials for {0}. Token not validated.").format(company),
-					indicator="orange",
-				)
-			except Exception:
-				pass
 
 	@frappe.whitelist()
 	def update_nexus_list(self):
@@ -154,6 +129,51 @@ class TaxJarSettings(Document):
 				})
 
 		self.save()
+
+def validate_taxjar_tokens(user=None):
+	"""Background job: verify each TaxJar credential against a lightweight endpoint.
+
+	Run from TaxJar Settings on_update so the save never waits on a network round
+	trip. On an invalid (401) or unreachable credential it pushes a realtime alert
+	to the user who saved the settings instead of blocking the save.
+	"""
+	settings = frappe.get_single("TaxJar Settings")
+
+	for cred in settings.table_hvjw or []:
+		company = cred.company
+		try:
+			client = get_client(company)
+			if client:
+				client.categories()
+		except taxjar.exceptions.TaxJarResponseError as err:
+			full = getattr(err, "full_response", None) or {}
+			status = full.get("status_code") if isinstance(full, dict) else None
+			if status == 401:
+				_alert_token_issue(
+					user,
+					frappe._("Invalid TaxJar API token for company {0}. Please check your credentials.").format(company),
+					indicator="red",
+				)
+		except taxjar.exceptions.TaxJarConnectionError:
+			_alert_token_issue(
+				user,
+				frappe._("Could not reach TaxJar to verify credentials for {0}. Token not validated.").format(company),
+				indicator="orange",
+			)
+		except Exception:
+			pass
+
+
+def _alert_token_issue(user, message, indicator):
+	"""Push a desk alert about a credential problem to the saving user."""
+	if not user:
+		return
+	frappe.publish_realtime(
+		"msgprint",
+		{"message": message, "title": frappe._("TaxJar"), "indicator": indicator, "alert": True},
+		user=user,
+	)
+
 
 def toggle_tax_category_fields(hidden):
 	hidden = 1 if hidden else 0
