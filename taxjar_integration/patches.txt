@@ -1,0 +1,4 @@
+[pre_model_sync]
+
+[post_model_sync]
+taxjar_integration.patches.remove_old_taxjar_workspace

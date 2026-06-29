@@ -9,13 +9,13 @@ app_description = "Taxjar Integration with ERPNext"
 app_email = "hello@frappe.io"
 app_license = "MIT"
 app_logo_url = "/assets/taxjar_integration/images/taxjar-integration.svg"
-app_home = "/app/taxjar"
+app_home = "/app/taxjar-integration"
 
 add_to_apps_screen = [
 	{
 		"name": app_name,
 		"logo": app_logo_url,
-		"title": "TaxJar",
+		"title": "Taxjar Integration",
 		"route": app_home,
 	}
 ]

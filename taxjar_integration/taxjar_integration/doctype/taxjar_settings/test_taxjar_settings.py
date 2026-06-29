@@ -3439,6 +3439,88 @@ class TestInstallSetup(UnitTestCase):
 		mock_toggle.assert_called_once_with(hidden=False)
 
 
+# ── Problem 3: single branded workspace ──────────────────────────────────────
+
+
+class TestWorkspaceBranding(UnitTestCase):
+
+	def _workspace(self):
+		import json, os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "workspace",
+			"taxjar_integration", "taxjar_integration.json",
+		))
+		with open(path) as f:
+			return json.load(f)
+
+	def test_branded_title_and_label(self):
+		ws = self._workspace()
+		self.assertEqual(ws["title"], "Taxjar Integration")
+		self.assertEqual(ws["label"], "Taxjar Integration")
+
+	def test_name_drives_branded_route(self):
+		"""The desk sidebar shows the workspace name and the route is its slug, so the
+		name is branded and app_home points at the matching /app/taxjar-integration."""
+		ws = self._workspace()
+		self.assertEqual(ws["name"], "Taxjar Integration")
+		self.assertEqual(frappe.get_hooks("app_home", app_name="taxjar_integration"), ["/app/taxjar-integration"])
+
+	def test_old_workspace_removed_by_patch(self):
+		import os
+		patches = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
+		))
+		with open(patches) as f:
+			self.assertIn("remove_old_taxjar_workspace", f.read())
+
+	def test_icon_is_valid_not_dollar_sign(self):
+		ws = self._workspace()
+		self.assertEqual(ws["icon"], "money-coins-1")
+
+	def test_sidebar_mirrors_card_groups(self):
+		"""The generated Workspace Sidebar mirrors the workspace card groups: each
+		card becomes a Section Break with its links as nested children, in the card
+		display (content) order."""
+		from taxjar_integration.install import sync_taxjar_workspace_sidebar
+
+		sync_taxjar_workspace_sidebar()
+		doc = frappe.get_doc("Workspace Sidebar", "Taxjar Integration")
+
+		structure = []
+		current = None
+		for item in doc.items:
+			if item.type == "Section Break":
+				current = {"group": item.label, "children": []}
+				structure.append(current)
+			elif item.type == "Link" and current is not None:
+				self.assertTrue(item.child)
+				current["children"].append(item.link_to)
+
+		self.assertEqual([g["group"] for g in structure], ["Setup", "Manage", "Transactions"])
+		groups = {g["group"]: g["children"] for g in structure}
+		self.assertEqual(groups["Setup"], ["TaxJar Settings", "TaxJar API Log"])
+		self.assertEqual(groups["Manage"], ["taxjar-customers", "Product Tax Category"])
+		self.assertEqual(groups["Transactions"], ["taxjar-transactions"])
+
+	def test_link_cards(self):
+		ws = self._workspace()
+		cards = {l["label"] for l in ws["links"] if l["type"] == "Card Break"}
+		self.assertEqual(cards, {"Setup", "Manage", "Transactions"})
+
+	def test_link_targets(self):
+		ws = self._workspace()
+		targets = {l["link_to"] for l in ws["links"] if l["type"] == "Link"}
+		self.assertEqual(
+			targets,
+			{"TaxJar Settings", "Product Tax Category", "taxjar-customers",
+			 "taxjar-transactions", "TaxJar API Log"},
+		)
+
+	def test_apps_screen_title_branded(self):
+		from taxjar_integration import hooks
+		self.assertEqual(hooks.add_to_apps_screen[0]["title"], "Taxjar Integration")
+
+
 # ── Tax Breakdown: helpers ──────────────────────────────────────────────────
 
 def _make_us_breakdown():
