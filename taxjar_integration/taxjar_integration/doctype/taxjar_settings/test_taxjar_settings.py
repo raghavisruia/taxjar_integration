@@ -3496,16 +3496,16 @@ class TestWorkspaceBranding(UnitTestCase):
 				self.assertTrue(item.child)
 				current["children"].append(item.link_to)
 
-		self.assertEqual([g["group"] for g in structure], ["Setup", "Manage", "Transactions"])
+		self.assertEqual([g["group"] for g in structure], ["Setup", "Manage", "Sync"])
 		groups = {g["group"]: g["children"] for g in structure}
 		self.assertEqual(groups["Setup"], ["TaxJar Settings", "TaxJar API Log"])
 		self.assertEqual(groups["Manage"], ["taxjar-customers", "Product Tax Category"])
-		self.assertEqual(groups["Transactions"], ["taxjar-transactions"])
+		self.assertEqual(groups["Sync"], ["taxjar-transactions"])
 
 	def test_link_cards(self):
 		ws = self._workspace()
 		cards = {l["label"] for l in ws["links"] if l["type"] == "Card Break"}
-		self.assertEqual(cards, {"Setup", "Manage", "Transactions"})
+		self.assertEqual(cards, {"Setup", "Manage", "Sync"})
 
 	def test_link_targets(self):
 		ws = self._workspace()

@@ -9,6 +9,14 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 
 WORKSPACE = "Taxjar Integration"
 
+# Lucide icon names shown next to each sidebar card group. Cards without an entry
+# fall back to no icon.
+SIDEBAR_CARD_ICONS = {
+	"Setup": "settings",
+	"Manage": "layers",
+	"Sync": "refresh-cw",
+}
+
 
 def after_install():
 	setup_taxjar()
@@ -85,12 +93,25 @@ def sync_taxjar_workspace_sidebar():
 	# Honour the visual (content) order, then any card only present in links.
 	ordered_cards = card_order + [card for card in grouped if card not in card_order]
 
-	items = []
+	# A Home entry routes back to the workspace itself, mirroring core desk sidebars.
+	items = [{
+		"type": "Link",
+		"label": "Home",
+		"link_to": WORKSPACE,
+		"link_type": "Workspace",
+		"icon": "home",
+	}]
 	for card in ordered_cards:
 		links = grouped.get(card)
 		if not links:
 			continue
-		items.append({"type": "Section Break", "label": card, "collapsible": 1, "indent": 1})
+		items.append({
+			"type": "Section Break",
+			"label": card,
+			"icon": SIDEBAR_CARD_ICONS.get(card),
+			"collapsible": 1,
+			"indent": 1,
+		})
 		for link in links:
 			items.append({
 				"type": "Link",
