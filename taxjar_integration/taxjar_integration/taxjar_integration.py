@@ -233,7 +233,7 @@ def get_client(company=None):
 
 def enqueue_taxjar_sync(doc, method):
 	"""on_submit hook: enqueue background TaxJar transaction sync."""
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+	if not company_creates_transactions(doc.company):
 		return
 	if not get_client(doc.company):
 		return
@@ -253,7 +253,7 @@ def enqueue_taxjar_sync(doc, method):
 
 def enqueue_taxjar_delete(doc, method):
 	"""on_cancel hook: enqueue background TaxJar transaction deletion."""
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+	if not company_creates_transactions(doc.company):
 		return
 	if not get_client(doc.company):
 		return
@@ -674,9 +674,8 @@ def get_line_item_dict(item, docstatus):
 
 def set_sales_tax(doc, method):
 	_ctx = {"doctype": doc.doctype, "name": doc.name, "company": doc.company}
-	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
 
-	if not TAXJAR_CALCULATE_TAX:
+	if not company_calculates_tax(doc.company):
 		log_taxjar_call(action="tax_for_order", status="skipped",
 			error="taxjar_calculate_tax is disabled", context=_ctx)
 		return
@@ -791,7 +790,7 @@ def validate_return_against(doc, method):
 	"""Enforce return_against on credit notes when TaxJar transaction reporting is enabled."""
 	if not getattr(doc, "is_return", False):
 		return
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+	if not company_creates_transactions(doc.company):
 		return
 	if not doc.return_against:
 		frappe.throw(
@@ -1194,8 +1193,7 @@ def check_nexus(shipping_address_name):
 	if not isinstance(shipping_address_name, str) or not shipping_address_name.strip():
 		return
 
-	TAXJAR_CALCULATE_TAX = frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
-	if not TAXJAR_CALCULATE_TAX:
+	if not _is_taxjar_enabled():
 		return
 
 	if not frappe.db.exists("Address", shipping_address_name):
@@ -1317,14 +1315,45 @@ def validate_address(doc, method):
 
 
 def _is_taxjar_enabled(settings=None):
-	"""Return whether either TaxJar feature (calculate tax / create transactions)
-	is enabled. Pass an already-loaded TaxJar Settings doc to read from it directly
-	and avoid two extra single-value lookups.
+	"""Return whether TaxJar is active at all: the master switch is on AND at least
+	one company has a feature (calculate tax / create transactions) enabled.
+
+	Feature flags are per-company (on the TaxJar Company Config rows); this "any
+	company" gate is for concerns that are not company-scoped — Item field
+	visibility, Address validation and Customer sync. Pass an already-loaded TaxJar
+	Settings doc to read from it directly.
 	"""
-	if settings is not None:
-		return settings.taxjar_calculate_tax or settings.taxjar_create_transactions
-	return cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")) or \
-		cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions"))
+	if settings is None:
+		# Cheap master-switch short-circuit before loading the full single doc.
+		if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+			return False
+		settings = frappe.get_single("TaxJar Settings")
+	elif not settings.taxjar_enabled:
+		return False
+	return any(
+		config.taxjar_calculate_tax or config.taxjar_create_transactions
+		for config in (settings.company_config or [])
+	)
+
+
+def company_calculates_tax(company, config=None):
+	"""Whether sales-tax calculation is on for a company (master switch AND the
+	company's own Calculate Sales Tax flag)."""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+		return False
+	if config is None:
+		config = get_company_config(company)
+	return bool(config and config.taxjar_calculate_tax)
+
+
+def company_creates_transactions(company, config=None):
+	"""Whether transaction filing is on for a company (master switch AND the
+	company's own File Transactions flag)."""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+		return False
+	if config is None:
+		config = get_company_config(company)
+	return bool(config and config.taxjar_create_transactions)
 
 
 def _validate_address_with_taxjar(doc):
@@ -1625,6 +1654,8 @@ def on_customer_update(doc, method):
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:
+		if not (config.taxjar_calculate_tax or config.taxjar_create_transactions):
+			continue
 		frappe.enqueue(
 			"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
 			customer_name=doc.name,
@@ -1647,6 +1678,8 @@ def on_customer_delete(doc, method):
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:
+		if not (config.taxjar_calculate_tax or config.taxjar_create_transactions):
+			continue
 		try:
 			delete_customer_from_taxjar(taxjar_customer_id, config.company)
 		except Exception:

@@ -1,7 +1,9 @@
 import frappe
-from frappe.utils import cint
 
-from taxjar_integration.taxjar_integration.taxjar_integration import _is_taxjar_enabled
+from taxjar_integration.taxjar_integration.taxjar_integration import (
+	_is_taxjar_enabled,
+	company_creates_transactions,
+)
 
 
 def purge_old_api_logs():
@@ -28,23 +30,26 @@ def sync_nexus_list():
 
 
 def retry_failed_taxjar_syncs():
-	"""Every 15 min: re-enqueue all Sales Invoices with Failed TaxJar sync status."""
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")):
+	"""Every 15 min: re-enqueue Failed Sales Invoices for companies that still have
+	transaction filing enabled."""
+	if not _is_taxjar_enabled():
 		return
 
 	failed_invoices = frappe.get_all(
 		"Sales Invoice",
 		filters={"taxjar_sync_status": "Failed", "docstatus": ("in", (1, 2))},
-		pluck="name",
+		fields=["name", "company"],
 		limit=50,
 	)
 
-	for invoice_name in failed_invoices:
+	for invoice in failed_invoices:
+		if not company_creates_transactions(invoice.company):
+			continue
 		frappe.enqueue(
 			"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
-			invoice_name=invoice_name,
+			invoice_name=invoice.name,
 			queue="short",
-			job_id=f"taxjar_retry_{invoice_name}",
+			job_id=f"taxjar_retry_{invoice.name}",
 			deduplicate=True,
 		)
 
@@ -64,6 +69,8 @@ def retry_failed_taxjar_customer_syncs():
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for customer_name in failed_customers:
 		for config in taxjar_settings.company_config or []:
+			if not (config.taxjar_calculate_tax or config.taxjar_create_transactions):
+				continue
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
 				customer_name=customer_name,

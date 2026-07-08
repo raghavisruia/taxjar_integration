@@ -16,6 +16,8 @@ class TaxJarCompanyConfig(Document):
 		parenttype: DF.Data
 		shipping_account_head: DF.Link
 		tax_account_head: DF.Link
+		taxjar_calculate_tax: DF.Check
+		taxjar_create_transactions: DF.Check
 	# end: auto-generated types
 
 	pass

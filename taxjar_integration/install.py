@@ -6,6 +6,7 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 	make_custom_fields,
 	toggle_tax_category_fields,
 )
+from taxjar_integration.taxjar_integration.taxjar_integration import _is_taxjar_enabled
 
 WORKSPACE = "Taxjar Integration"
 
@@ -46,11 +47,9 @@ def setup_taxjar():
 
 	add_permissions()
 
-	features_enabled = bool(
-		frappe.db.get_single_value("TaxJar Settings", "taxjar_calculate_tax")
-		or frappe.db.get_single_value("TaxJar Settings", "taxjar_create_transactions")
-	)
-	toggle_tax_category_fields(hidden=not features_enabled)
+	# Item Product Tax Category fields are not company-scoped, so they follow the
+	# "any company has a feature enabled" gate.
+	toggle_tax_category_fields(hidden=not _is_taxjar_enabled())
 
 	sync_taxjar_workspace_sidebar()
 

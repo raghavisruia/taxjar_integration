@@ -157,8 +157,7 @@ class TestTaxJarSettings(UnitTestCase):
 
 	def setUp(self):
 		self.settings = frappe.get_single("TaxJar Settings")
-		self.settings.taxjar_calculate_tax = 0
-		self.settings.taxjar_create_transactions = 0
+		self.settings.taxjar_enabled = 0
 		self.settings.api_mode = "Live"
 		self.settings.set("table_hvjw", [])
 		self.settings.set("company_config", [])
@@ -169,6 +168,18 @@ class TestTaxJarSettings(UnitTestCase):
 			"company": "_Test Company",
 			"sandbox_token": "test-sandbox-token",
 		})
+
+	def _enable_feature(self, calculate=0, create=0, company="_Test Company"):
+		"""Turn on the master switch and add a company config row carrying the
+		per-company feature flags."""
+		self.settings.taxjar_enabled = 1
+		self.settings.set("company_config", [{
+			"company": company,
+			"tax_account_head": "Sales Tax - _TC",
+			"shipping_account_head": "Freight - _TC",
+			"taxjar_calculate_tax": calculate,
+			"taxjar_create_transactions": create,
+		}])
 
 	# validate() — no features enabled: always passes regardless of api_mode or credentials
 
@@ -194,13 +205,13 @@ class TestTaxJarSettings(UnitTestCase):
 	def test_validate_blank_mode_with_calculate_tax_throws(self):
 		"""Enabling a feature without selecting an API Mode must throw."""
 		self.settings.api_mode = ""
-		self.settings.taxjar_calculate_tax = 1
+		self._enable_feature(calculate=1)
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
 	def test_validate_blank_mode_with_create_transactions_throws(self):
 		self.settings.api_mode = ""
-		self.settings.taxjar_create_transactions = 1
+		self._enable_feature(create=1)
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
@@ -208,21 +219,21 @@ class TestTaxJarSettings(UnitTestCase):
 
 	def test_validate_sandbox_requires_sandbox_token_when_features_enabled(self):
 		self.settings.api_mode = "Sandbox"
-		self.settings.taxjar_calculate_tax = 1
+		self._enable_feature(calculate=1)
 		self.settings.set("table_hvjw", [])
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
 	def test_validate_sandbox_passes_with_sandbox_token_and_features_enabled(self):
 		self.settings.api_mode = "Sandbox"
-		self.settings.taxjar_calculate_tax = 1
+		self._enable_feature(calculate=1)
 		self._add_sandbox_credential()
 		self.settings.validate()  # must not raise
 
 	def test_validate_sandbox_fails_when_only_live_token_present_and_features_enabled(self):
 		"""A row with only live_token is not enough for Sandbox mode."""
 		self.settings.api_mode = "Sandbox"
-		self.settings.taxjar_calculate_tax = 1
+		self._enable_feature(calculate=1)
 		self.settings.append("table_hvjw", {
 			"company": "_Test Company",
 			"live_token": "test-live-token",
@@ -234,14 +245,14 @@ class TestTaxJarSettings(UnitTestCase):
 
 	def test_validate_live_requires_credential_when_features_enabled(self):
 		self.settings.api_mode = "Live"
-		self.settings.taxjar_calculate_tax = 1
+		self._enable_feature(calculate=1)
 		self.settings.set("table_hvjw", [])
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
 	def test_validate_live_passes_with_credential_and_features_enabled(self):
 		self.settings.api_mode = "Live"
-		self.settings.taxjar_calculate_tax = 1
+		self._enable_feature(calculate=1)
 		self.settings.append("table_hvjw", {
 			"company": "_Test Company",
 			"live_token": "test-live-token",
@@ -251,8 +262,7 @@ class TestTaxJarSettings(UnitTestCase):
 	def test_validate_both_features_enabled_passes(self):
 		self.settings.api_mode = "Sandbox"
 		self._add_sandbox_credential()
-		self.settings.taxjar_calculate_tax = 1
-		self.settings.taxjar_create_transactions = 1
+		self._enable_feature(calculate=1, create=1)
 		self.settings.validate()  # must not raise
 
 	# validate() — feature independence
@@ -260,16 +270,14 @@ class TestTaxJarSettings(UnitTestCase):
 	def test_create_transactions_alone_enforces_credentials(self):
 		"""create_transactions alone (without calculate_tax) must still enforce credentials."""
 		self.settings.api_mode = "Live"
-		self.settings.taxjar_calculate_tax = 0
-		self.settings.taxjar_create_transactions = 1
+		self._enable_feature(create=1)
 		self.settings.set("table_hvjw", [])
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
 
 	def test_calculate_tax_alone_enforces_credentials(self):
 		self.settings.api_mode = "Sandbox"
-		self.settings.taxjar_calculate_tax = 1
-		self.settings.taxjar_create_transactions = 0
+		self._enable_feature(calculate=1)
 		self.settings.set("table_hvjw", [])
 		with self.assertRaises(frappe.exceptions.ValidationError):
 			self.settings.validate()
@@ -282,6 +290,15 @@ class TestTaxJarSettings(UnitTestCase):
 		self.assertIn("company", fieldnames)
 		self.assertIn("tax_account_head", fieldnames)
 		self.assertIn("shipping_account_head", fieldnames)
+		# Feature flags are per-company (moved off the TaxJar Settings single).
+		self.assertIn("taxjar_calculate_tax", fieldnames)
+		self.assertIn("taxjar_create_transactions", fieldnames)
+
+	def test_taxjar_settings_has_master_switch_not_per_feature_flags(self):
+		meta = frappe.get_meta("TaxJar Settings")
+		self.assertIsNotNone(meta.get_field("taxjar_enabled"))
+		self.assertIsNone(meta.get_field("taxjar_calculate_tax"))
+		self.assertIsNone(meta.get_field("taxjar_create_transactions"))
 
 	def test_taxjar_settings_has_company_config_table(self):
 		meta = frappe.get_meta("TaxJar Settings")
@@ -1084,9 +1101,14 @@ class TestSyncNexusList(UnitTestCase):
 
 	def _make_settings_doc(self, calculate_tax=1, create_transactions=0, has_company_config=True):
 		doc = MagicMock()
-		doc.taxjar_calculate_tax = calculate_tax
-		doc.taxjar_create_transactions = create_transactions
-		doc.company_config = [MagicMock()] if has_company_config else []
+		doc.taxjar_enabled = 1
+		if has_company_config:
+			row = MagicMock()
+			row.taxjar_calculate_tax = calculate_tax
+			row.taxjar_create_transactions = create_transactions
+			doc.company_config = [row]
+		else:
+			doc.company_config = []
 		return doc
 
 	def _call(self, doc):
@@ -1176,10 +1198,15 @@ class TestAutoNexusEnqueue(UnitTestCase):
 	def _settings(self, calculate_tax=1, create_transactions=0, has_company_config=True, has_nexus=False):
 		"""Return a live TaxJar Settings single doc wired up for the test scenario."""
 		doc = frappe.get_single("TaxJar Settings")
-		doc.taxjar_calculate_tax = calculate_tax
-		doc.taxjar_create_transactions = create_transactions
+		doc.taxjar_enabled = 1 if (calculate_tax or create_transactions) else 0
 		if has_company_config:
-			doc.set("company_config", [{"company": "_Test Company", "tax_account_head": "Tax - TC", "shipping_account_head": "Freight - TC"}])
+			doc.set("company_config", [{
+				"company": "_Test Company",
+				"tax_account_head": "Tax - TC",
+				"shipping_account_head": "Freight - TC",
+				"taxjar_calculate_tax": calculate_tax,
+				"taxjar_create_transactions": create_transactions,
+			}])
 		else:
 			doc.set("company_config", [])
 		if has_nexus:
@@ -2231,21 +2258,21 @@ class TestValidateReturnAgainst(UnitTestCase):
 		doc = _make_doc()
 		doc.is_return = True
 		doc.return_against = None
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False):
 			validate_return_against(doc, None)
 
 	def test_throws_when_return_without_return_against(self):
 		doc = _make_doc()
 		doc.is_return = True
 		doc.return_against = None
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True):
 			self.assertRaises(frappe.ValidationError, validate_return_against, doc, None)
 
 	def test_passes_when_return_with_return_against(self):
 		doc = _make_doc()
 		doc.is_return = True
 		doc.return_against = "SINV-ORIG-001"
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True):
 			validate_return_against(doc, None)
 
 
@@ -2256,14 +2283,14 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 
 	def test_skips_when_create_transactions_disabled(self):
 		doc = _make_doc()
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
 		mock_enqueue.assert_not_called()
 
 	def test_skips_when_no_client(self):
 		doc = _make_doc()
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
@@ -2274,7 +2301,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		doc.db_set = MagicMock()
 		mock_client = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
@@ -2290,7 +2317,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 
 	def test_skips_when_create_transactions_disabled(self):
 		doc = _make_doc()
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=0), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_delete(doc, None)
 		mock_enqueue.assert_not_called()
@@ -2300,7 +2327,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc.db_set = MagicMock()
 		mock_client = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_delete(doc, None)
@@ -2424,21 +2451,41 @@ class TestSalesInvoiceClientScript(UnitTestCase):
 
 class TestRetryFailedTaxjarSyncs(UnitTestCase):
 
-	def test_skips_when_create_transactions_disabled(self):
+	def test_skips_when_taxjar_disabled(self):
 		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_syncs
-		with patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=0), \
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=False), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_syncs()
 		mock_enqueue.assert_not_called()
 
-	def test_enqueues_failed_invoices(self):
+	def test_enqueues_only_failed_invoices_for_filing_companies(self):
 		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_syncs
-		with patch("taxjar_integration.taxjar_integration.tasks.cint", return_value=1), \
-		     patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=1), \
-		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=["SINV-001", "SINV-002"]), \
+		invoices = [
+			frappe._dict(name="SINV-001", company="Co A"),
+			frappe._dict(name="SINV-002", company="Co B"),
+		]
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=invoices), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_syncs()
 		self.assertEqual(mock_enqueue.call_count, 2)
+
+	def test_skips_invoices_for_companies_with_filing_off(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_syncs
+		invoices = [
+			frappe._dict(name="SINV-001", company="Co A"),
+			frappe._dict(name="SINV-002", company="Co B"),
+		]
+		# Only "Co A" still has transaction filing enabled.
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.company_creates_transactions",
+		           side_effect=lambda company: company == "Co A"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=invoices), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
+			retry_failed_taxjar_syncs()
+		self.assertEqual(mock_enqueue.call_count, 1)
+		self.assertEqual(mock_enqueue.call_args[1]["invoice_name"], "SINV-001")
 
 	def test_hooks_registers_cron(self):
 		from taxjar_integration import hooks
@@ -2775,8 +2822,7 @@ class TestRetryFailedCustomerSyncs(UnitTestCase):
 
 	def test_skips_when_features_disabled(self):
 		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
-		with patch("taxjar_integration.taxjar_integration.tasks.cint", return_value=0), \
-		     patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=0), \
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=False), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_customer_syncs()
 		mock_enqueue.assert_not_called()
@@ -2788,8 +2834,7 @@ class TestRetryFailedCustomerSyncs(UnitTestCase):
 		settings = MagicMock()
 		settings.company_config = [config]
 
-		with patch("taxjar_integration.taxjar_integration.tasks.cint", return_value=1), \
-		     patch("taxjar_integration.taxjar_integration.tasks.frappe.db.get_single_value", return_value=1), \
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=["CUST-001", "CUST-002"]), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_single", return_value=settings), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
@@ -3405,7 +3450,7 @@ class TestInstallSetup(UnitTestCase):
 		     patch("taxjar_integration.install.add_permissions") as mock_perms, \
 		     patch("taxjar_integration.install.toggle_tax_category_fields") as mock_toggle, \
 		     patch("taxjar_integration.install.frappe.db.exists", return_value=categories_exist), \
-		     patch("taxjar_integration.install.frappe.db.get_single_value", return_value=1 if features_enabled else 0):
+		     patch("taxjar_integration.install._is_taxjar_enabled", return_value=features_enabled):
 			install.setup_taxjar()
 		return mock_make, mock_cats, mock_perms, mock_toggle
 

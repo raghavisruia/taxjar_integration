@@ -19,6 +19,7 @@ import taxjar
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
+	_is_taxjar_enabled,
 	get_client,
 	log_taxjar_call,
 )
@@ -46,12 +47,11 @@ class TaxJarSettings(Document):
 		log_retention_days: DF.Int
 		nexus: DF.Table[TaxJarNexus]
 		table_hvjw: DF.Table[TaxJarAPICredential]
-		taxjar_calculate_tax: DF.Check
-		taxjar_create_transactions: DF.Check
+		taxjar_enabled: DF.Check
 	# end: auto-generated types
 
 	def on_update(self):
-		features_enabled = bool(self.taxjar_calculate_tax or self.taxjar_create_transactions)
+		features_enabled = _is_taxjar_enabled(self)
 
 		# Custom fields, the Product Tax Category master and permissions are all set up
 		# at install / migrate (see install.setup_taxjar), so on save we only flip field
@@ -76,7 +76,7 @@ class TaxJarSettings(Document):
 			)
 
 	def validate(self):
-		if not (self.taxjar_calculate_tax or self.taxjar_create_transactions):
+		if not _is_taxjar_enabled(self):
 			return
 
 		if not self.api_mode:

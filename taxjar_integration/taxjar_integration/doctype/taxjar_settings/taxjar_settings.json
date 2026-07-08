@@ -7,9 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "section_break_rixa",
-  "taxjar_calculate_tax",
-  "column_break_pctj",
-  "taxjar_create_transactions",
+  "taxjar_enabled",
   "configuration",
   "company_config",
   "section_general",
@@ -33,21 +31,10 @@
   },
   {
    "default": "0",
-   "description": "Computes sales tax based on nexus for sales invoices & adds product tax category fields on Items.",
-   "fieldname": "taxjar_calculate_tax",
+   "description": "Master switch for the TaxJar integration. Turn this on, then enable Calculate Sales Tax and/or File Transactions per company in the Company Configuration table below.",
+   "fieldname": "taxjar_enabled",
    "fieldtype": "Check",
-   "label": "Enable Tax Calculation"
-  },
-  {
-   "fieldname": "column_break_pctj",
-   "fieldtype": "Column Break"
-  },
-  {
-   "default": "0",
-   "description": "Push submitted Sales Invoices to TaxJar as transactions for sales tax reporting and AutoFile.",
-   "fieldname": "taxjar_create_transactions",
-   "fieldtype": "Check",
-   "label": "Create TaxJar Transaction"
+   "label": "Enable TaxJar"
   },
   {
    "fieldname": "section_general",

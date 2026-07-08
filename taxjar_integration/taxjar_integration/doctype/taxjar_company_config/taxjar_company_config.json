@@ -7,7 +7,9 @@
  "field_order": [
   "company",
   "tax_account_head",
-  "shipping_account_head"
+  "shipping_account_head",
+  "taxjar_calculate_tax",
+  "taxjar_create_transactions"
  ],
  "fields": [
   {
@@ -17,6 +19,22 @@
    "label": "Company",
    "options": "Company",
    "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "Compute sales tax on this company's Sales Invoices from its nexus, and add Product Tax Category fields to Items.",
+   "fieldname": "taxjar_calculate_tax",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Calculate Sales Tax"
+  },
+  {
+   "default": "0",
+   "description": "Push this company's submitted Sales Invoices to TaxJar for reporting and AutoFile.",
+   "fieldname": "taxjar_create_transactions",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "File Transactions"
   },
   {
    "description": "Sales Tax Ledger where the tax liability will accumulate",
