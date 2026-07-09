@@ -4832,3 +4832,74 @@ class TestGuidedSetupSchemaAndEntry(UnitTestCase):
 		self.assertIn("finish_setup", js)
 		for key in ("welcome", "connect", "accounts", "features", "nexus", "review"):
 			self.assertIn(key, js)
+
+
+# ── Phase 2: guided setup JS — native controls per step ─────────────────────
+
+
+class TestGuidedSetupPhase2JS(UnitTestCase):
+	"""String/structure assertions on the page JS — the same pattern used for
+	other pages in this app, since there's no JS runtime in the Python test
+	suite. Confirms the documented native-control plan (docs/guided-setup-
+	plan.md §3/§7) is actually wired, not just described."""
+
+	def _js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"))
+		return open(path).read()
+
+	def test_calls_all_five_phase2_apis(self):
+		js = self._js()
+		for method in ("test_connection", "save_connection", "save_company_accounts",
+		               "save_features", "fetch_nexus"):
+			self.assertIn(method, js)
+
+	def test_connect_step_uses_native_select_link_password_controls(self):
+		js = self._js()
+		self.assertIn('fieldtype: "Select", fieldname: "api_mode"', js)
+		self.assertIn('fieldtype: "Link", fieldname: "company"', js)
+		self.assertIn('fieldtype: "Password", fieldname: "token"', js)
+		# Continue is gated on at least one successful test, not just field presence.
+		self.assertIn("_sync_connect_gate", js)
+		self.assertIn("tested", js)
+
+	def test_connect_excludes_already_added_companies_via_get_query(self):
+		js = self._js()
+		self.assertIn("otherCompanies", js)
+		self.assertIn("not in", js)
+
+	def test_accounts_step_uses_company_scoped_account_links(self):
+		js = self._js()
+		self.assertIn('fieldtype: "Link", fieldname: "tax_account_head", options: "Account"', js)
+		self.assertIn('fieldtype: "Link", fieldname: "shipping_account_head", options: "Account"', js)
+		self.assertIn("company: cred.company", js)
+
+	def test_features_step_has_master_switch_and_lock_behaviour(self):
+		js = self._js()
+		self.assertIn('fieldtype: "Check", fieldname: "taxjar_enabled"', js)
+		self.assertIn('fieldtype: "Check", fieldname: "calculate"', js)
+		self.assertIn('fieldtype: "Check", fieldname: "file"', js)
+		self.assertIn("_sync_master_lock", js)
+		self.assertIn("read_only", js)
+
+	def test_nexus_step_has_fetch_action_and_grouped_render(self):
+		js = self._js()
+		self.assertIn("_fetch_nexus", js)
+		self.assertIn("_render_nexus_groups", js)
+
+	def test_save_methods_reload_state_before_advancing(self):
+		"""Every save-then-advance step re-fetches state so the wizard stays
+		resumable/consistent instead of trusting a locally-guessed delta —
+		once on initial load, once each from the three save steps."""
+		js = self._js()
+		self.assertIn("_save_connect", js)
+		self.assertIn("_save_accounts", js)
+		self.assertIn("_save_features", js)
+		self.assertEqual(js.count("this._reload_state()"), 4)
+
+	def test_review_summarises_connection_accounts_features_nexus(self):
+		js = self._js()
+		self.assertIn("_render_review", js)
+		for label in ('__("Connection")', '__("Accounts")', '__("Features")', '__("Nexus")'):
+			self.assertIn(label, js)
