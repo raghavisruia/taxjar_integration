@@ -1,27 +1,16 @@
 /* TaxJar guided setup — desk page shell.
-   Layout: a single navigation/progress rail across the top — frappe-ui's
+   Layout: a single-step panel whose entire content swaps on Save & continue,
+   rendered as plain page flow (no card/box) — it should read as a first-party
+   desk page, not a widget embedded in one. Each step's own header carries the
+   progress rail directly below its heading — frappe-ui's
    <Progress :intervals="true"> internals, one segment per step, each with a
-   clickable trailing caption standing in for that step — and a single-step
-   panel below whose entire content swaps on Save & continue. The panel is
-   plain page flow, not a card/box — it should read as a first-party desk page,
-   not a widget embedded in one. Uses Frappe desk CSS variables so it follows
-   the active (light/dark) theme; ink (--text-color) is the structural accent. */
+   clickable trailing caption that doubles as navigation. Uses Frappe desk CSS
+   variables so it follows the active (light/dark) theme; ink (--text-color)
+   is the structural accent. */
 
 .taxjar-setup {
 	max-width: 880px;
 	margin: 8px auto 40px;
-}
-
-/* ── rail: frappe-ui <Progress intervals> internals, sticky across the top ── */
-.taxjar-setup .ts-outline {
-	position: sticky;
-	top: 48px;
-	z-index: 3;
-	background: var(--card-bg);
-	padding: 22px 0 34px;
-	border-bottom: 1px solid var(--border-color);
-	margin-bottom: 28px;
-	overflow-x: auto;
 }
 
 /* frappe-ui's `flex space-x-1` row of equal segments, each `bg-surface-gray-7`
@@ -32,27 +21,26 @@
    already corresponds 1:1 with a named step — this rail is the only navigation
    element on the page. */
 .taxjar-setup .ts-progress {
-	list-style: none; margin: 0; padding: 0;
+	list-style: none; margin: 24px 0 0; padding: 0;
 	display: flex; gap: 4px;
-	min-width: 620px;
 }
 .taxjar-setup .ts-interval { flex: 1 1 0; min-width: 0; }
 .taxjar-setup .ts-interval-btn {
-	display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-	width: 100%; border: 0; background: none; padding: 0; cursor: pointer; text-align: left;
+	display: flex; flex-direction: column; align-items: center; gap: 8px;
+	width: 100%; border: 0; background: none; padding: 0; cursor: pointer; text-align: center;
 }
 .taxjar-setup .ts-interval-btn:disabled { cursor: default; }
 
 /* size="xl" per frappe-ui's Progress size map (sm=2px, md=4px, lg=8px, xl=12px). */
 .taxjar-setup .ts-interval-bar {
-	display: block; height: 12px; border-radius: 12px;
+	display: block; width: 100%; height: 12px; border-radius: 12px;
 	background: var(--control-bg);
 	transition: background 0.2s ease;
 }
 .taxjar-setup .ts-interval.filled .ts-interval-bar { background: var(--text-color); }
 
 .taxjar-setup .ts-interval-label {
-	display: block;
+	display: block; text-align: center;
 	font-size: 12.5px; color: var(--text-muted);
 	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -68,7 +56,7 @@
 	min-height: 420px;
 }
 
-.taxjar-setup .ts-head { padding: 0 0 20px; }
+.taxjar-setup .ts-head { padding: 24px 0 28px; border-bottom: 1px solid var(--border-color); }
 .taxjar-setup .ts-title { margin: 0; font-size: 24px; font-weight: 700; }
 .taxjar-setup .ts-sub { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
 

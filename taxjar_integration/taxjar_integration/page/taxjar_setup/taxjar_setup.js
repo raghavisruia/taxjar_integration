@@ -1,14 +1,14 @@
 // TaxJar guided setup — desk page shell (Phase 1).
 //
-// Layout: a single navigation/progress rail across the top — frappe-ui's
-// <Progress :intervals="true"> internals, one segment per step, each carrying a
-// clickable trailing caption — and a single-step panel below that swaps its
-// entire content on Save & continue — only one step is ever shown at a time,
-// rendered as plain page flow (no card/box around it) rather than a widget
-// embedded in the desk. Phase 1 wires the shell to real server state via
-// get_setup_state, plus the Review step's finish action. The per-step native
-// controls (Connect / Accounts / Features / Nexus) are wired in later phases —
-// see docs/guided-setup-plan.md.
+// Layout: a single-step panel that swaps its entire content on Save & continue —
+// only one step is ever shown at a time, rendered as plain page flow (no card/box
+// around it) rather than a widget embedded in the desk. Each step's own header
+// carries the progress rail directly below its heading — frappe-ui's
+// <Progress :intervals="true"> internals, one segment per step, each with a
+// clickable trailing caption that doubles as navigation. Phase 1 wires the shell
+// to real server state via get_setup_state, plus the Review step's finish
+// action. The per-step native controls (Connect / Accounts / Features / Nexus)
+// are wired in later phases — see docs/guided-setup-plan.md.
 
 frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
@@ -47,13 +47,11 @@ class TaxJarSetup {
 	_build_shell() {
 		this.$root = $(`
 			<div class="taxjar-setup">
-				<nav class="ts-outline">
-					<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
-				</nav>
 				<section class="ts-panel">
 					<header class="ts-head">
 						<h2 class="ts-title"></h2>
 						<p class="ts-sub"></p>
+						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 					</header>
 					<div class="ts-body"></div>
 					<footer class="ts-foot">
