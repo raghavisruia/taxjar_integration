@@ -50,10 +50,12 @@ class TaxJarSetup {
 				<section class="ts-panel">
 					<header class="ts-head">
 						<h2 class="ts-title"></h2>
-						<p class="ts-sub"></p>
 						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 					</header>
-					<div class="ts-body"></div>
+					<div class="ts-body">
+						<p class="ts-sub"></p>
+						<div class="ts-body-content"></div>
+					</div>
 					<footer class="ts-foot">
 						<button class="btn btn-default ts-back">${__("Back")}</button>
 						<span class="ts-grow"></span>
@@ -65,7 +67,8 @@ class TaxJarSetup {
 		`).appendTo(this.page.main);
 
 		this.$intervals = this.$root.find(".ts-intervals");
-		this.$body = this.$root.find(".ts-body");
+		// Only the content area swaps per step — .ts-sub is a stable element above it.
+		this.$body = this.$root.find(".ts-body-content");
 		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
 		this.$root.find(".ts-skip").on("click", () => this._advance());
 		this.$root.find(".ts-next").on("click", () => this._on_next());
@@ -152,7 +155,7 @@ class TaxJarSetup {
 		this[`_render_${step.key}`]();
 	}
 
-	// ── step bodies (single step rendered into ts-body at a time) ──
+	// ── step bodies (single step rendered into .ts-body-content at a time) ──
 	_render_welcome() {
 		this.$body.html(`
 			<p class="ts-lede">${__("This takes about 5 minutes. Have these ready:")}</p>

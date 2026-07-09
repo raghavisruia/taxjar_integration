@@ -58,9 +58,12 @@
 
 .taxjar-setup .ts-head { padding: 24px 0 28px; border-bottom: 1px solid var(--border-color); }
 .taxjar-setup .ts-title { margin: 0; font-size: 24px; font-weight: 700; }
-.taxjar-setup .ts-sub { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
 
-.taxjar-setup .ts-body { padding: 6px 0 28px; flex: 1; }
+/* Subtitle lives in the content block, below the progress bar — not in the
+   header, so it swaps into view with the rest of the step's own content area. */
+.taxjar-setup .ts-sub { margin: 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
+.taxjar-setup .ts-body { padding: 24px 0 28px; flex: 1; }
+.taxjar-setup .ts-body-content { margin-top: 20px; }
 .taxjar-setup .ts-foot {
 	display: flex; align-items: center; gap: 10px;
 	padding: 18px 0; border-top: 1px solid var(--border-color);
