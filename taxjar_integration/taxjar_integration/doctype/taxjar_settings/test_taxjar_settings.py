@@ -4751,6 +4751,43 @@ class TestGuidedSetupSaveFeatures(UnitTestCase):
 			self.assertRaises(frappe.PermissionError, save_features, taxjar_enabled=1, flags=[])
 
 
+# ── Phase 2: remove_company ─────────────────────────────────────────────────
+
+
+class TestGuidedSetupRemoveCompany(UnitTestCase):
+	def test_removes_credential_and_company_config_row(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import remove_company
+		s = MagicMock()
+		s.table_hvjw = [frappe._dict(company="Frappe Tech"), frappe._dict(company="Other Co")]
+		s.company_config = [frappe._dict(company="Frappe Tech"), frappe._dict(company="Other Co")]
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			res = remove_company(company="Frappe Tech")
+
+		self.assertTrue(res["ok"])
+		set_calls = {c.args[0]: c.args[1] for c in s.set.call_args_list}
+		self.assertEqual([r.company for r in set_calls["table_hvjw"]], ["Other Co"])
+		self.assertEqual([r.company for r in set_calls["company_config"]], ["Other Co"])
+		s.save.assert_called_once()
+
+	def test_leaves_other_companies_untouched_when_no_match(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import remove_company
+		s = MagicMock()
+		s.table_hvjw = [frappe._dict(company="Other Co")]
+		s.company_config = []
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			remove_company(company="Frappe Tech")
+
+		set_calls = {c.args[0]: c.args[1] for c in s.set.call_args_list}
+		self.assertEqual([r.company for r in set_calls["table_hvjw"]], ["Other Co"])
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import remove_company
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, remove_company, company="Frappe Tech")
+
+
 # ── Phase 2: fetch_nexus ─────────────────────────────────────────────────────
 
 
@@ -4890,16 +4927,52 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 
 	def test_save_methods_reload_state_before_advancing(self):
 		"""Every save-then-advance step re-fetches state so the wizard stays
-		resumable/consistent instead of trusting a locally-guessed delta —
-		once on initial load, once each from the three save steps."""
+		resumable/consistent instead of trusting a locally-guessed delta — once
+		on initial load, once each from the three save steps, and once after
+		removing an already-saved company."""
 		js = self._js()
 		self.assertIn("_save_connect", js)
 		self.assertIn("_save_accounts", js)
 		self.assertIn("_save_features", js)
-		self.assertEqual(js.count("this._reload_state()"), 4)
+		self.assertEqual(js.count("this._reload_state()"), 5)
 
 	def test_review_summarises_connection_accounts_features_nexus(self):
 		js = self._js()
 		self.assertIn("_render_review", js)
 		for label in ('__("Connection")', '__("Accounts")', '__("Features")', '__("Nexus")'):
 			self.assertIn(label, js)
+
+	def test_connect_card_has_remove_action_wired_to_server_api(self):
+		js = self._js()
+		self.assertIn("_remove_credential_card", js)
+		self.assertIn("remove_company", js)
+		self.assertIn("frappe.confirm", js)
+
+	def test_token_control_disables_password_strength_meter(self):
+		"""A TaxJar token isn't a password being created — the strength-meter
+		request it fires per keystroke doesn't apply and errored in practice."""
+		js = self._js()
+		self.assertIn("disable_password_checks", js)
+
+	def test_token_control_shows_masked_placeholder_when_stored(self):
+		js = self._js()
+		self.assertIn("placeholder: cred.token_last4", js)
+
+	def test_feature_lock_toggles_disabled_prop_not_read_only_refresh(self):
+		"""Regression guard: toggling df.read_only + refresh() on a Check control
+		can reset its value to the last set_value() call, silently discarding a
+		click the user just made — the lock must flip the native disabled
+		attribute directly instead."""
+		js = self._js()
+		self.assertIn('c.controls.calc.$input.prop("disabled", !on)', js)
+		self.assertIn('c.controls.file.$input.prop("disabled", !on)', js)
+
+	def test_css_does_not_clip_link_dropdowns_and_caps_card_width(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		# The only overflow:hidden left is the progress rail's label ellipsis —
+		# .ts-card must not have one, or it clips Link controls' search dropdown.
+		self.assertEqual(css.count("overflow: hidden"), 1)
+		self.assertIn("minmax(280px, 420px)", css)

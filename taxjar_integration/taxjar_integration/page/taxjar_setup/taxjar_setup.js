@@ -203,13 +203,20 @@ class TaxJarSetup {
 	}
 
 	_add_credential_card(cred) {
+		// Header is just the company name + status — the Company field itself lives
+		// in the card body, so a long status message never has to share a row with
+		// a full-width form control (that's what was overflowing before).
 		const $card = $(`
 			<div class="ts-card">
 				<div class="ts-card-h">
-					<div class="ts-field-company"></div>
-					<span class="ts-chip idle">${__("Not tested")}</span>
+					<b class="ts-cred-name">${cred.company ? frappe.utils.escape_html(cred.company) : __("New company")}</b>
+					<div class="ts-card-h-right">
+						<span class="ts-chip idle">${__("Not tested")}</span>
+						<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
+					</div>
 				</div>
 				<div class="ts-card-b">
+					<div class="ts-field-company"></div>
 					<div class="ts-field-token"></div>
 					<button class="btn btn-default btn-sm ts-test">${__("Test connection")}</button>
 				</div>
@@ -235,6 +242,7 @@ class TaxJarSetup {
 		companyControl.df.onchange = () => {
 			entry.company = companyControl.get_value();
 			entry.tested = false;
+			$card.find(".ts-cred-name").text(entry.company || __("New company"));
 			this._reset_cred_status(entry);
 			this._sync_connect_gate();
 		};
@@ -253,26 +261,56 @@ class TaxJarSetup {
 				fieldtype: "Password", fieldname: "token",
 				label: this.controls.mode.get_value() === "Live" ? __("Live token") : __("Sandbox token"),
 				reqd: !cred.token_last4,
-				description: cred.token_last4
-					? __("Stored — ending in {0}. Leave blank to keep it.", [cred.token_last4])
-					: "",
+				placeholder: cred.token_last4 ? __("•••••••••••• (ending in {0})", [cred.token_last4]) : "",
+				description: cred.token_last4 ? __("Leave blank to keep the saved token.") : "",
 			},
 			render_input: true,
 		});
+		// A TaxJar token isn't a password being created — the strength meter (and
+		// the request it fires on every keystroke) makes no sense here and was the
+		// source of a 500 in this environment; this control never needed it.
+		tokenControl.disable_password_checks();
 		entry.controls.token = tokenControl;
 
 		$card.find(".ts-test").on("click", () => this._test_connection(entry));
+		$card.find(".ts-card-remove").on("click", () => this._remove_credential_card(entry, cred));
+	}
+
+	_remove_credential_card(entry, cred) {
+		const drop = () => {
+			this._connectCards = this._connectCards.filter((c) => c !== entry);
+			entry.$card.remove();
+			this._sync_connect_gate();
+		};
+
+		if (!cred.company) {
+			// Never saved — nothing server-side to clean up.
+			drop();
+			return;
+		}
+
+		frappe.confirm(
+			__("Remove {0} and its saved token? This also clears any accounts or features already configured for it.", [cred.company]),
+			() => this._call("remove_company", { company: cred.company }).then(() => this._reload_state()).then(drop)
+		);
 	}
 
 	_reset_cred_status(entry) {
-		entry.$card.find(".ts-card-h > .ts-chip").attr("class", "ts-chip idle").text(__("Not tested"));
+		entry.$card.find(".ts-card-h .ts-chip").attr("class", "ts-chip idle").text(__("Not tested"));
 	}
 
 	_on_mode_change() {
 		const live = this.controls.mode.get_value() === "Live";
 		this._connectCards.forEach((entry) => {
-			entry.controls.token.df.label = live ? __("Live token") : __("Sandbox token");
-			entry.controls.token.refresh();
+			const tokenCtrl = entry.controls.token;
+			// The last-4 hint / placeholder was computed for the previous mode's
+			// token — sandbox and live tokens are different values, so we can't
+			// carry it over without another round trip. Re-entry is required.
+			tokenCtrl.df.label = live ? __("Live token") : __("Sandbox token");
+			tokenCtrl.df.placeholder = "";
+			tokenCtrl.df.description = "";
+			tokenCtrl.df.reqd = 1;
+			tokenCtrl.refresh();
 			entry.tested = false;
 			this._reset_cred_status(entry);
 		});
@@ -285,7 +323,7 @@ class TaxJarSetup {
 			frappe.show_alert({ message: __("Select a company first."), indicator: "orange" });
 			return;
 		}
-		const $status = entry.$card.find(".ts-card-h > .ts-chip");
+		const $status = entry.$card.find(".ts-card-h .ts-chip");
 		const $btn = entry.$card.find(".ts-test");
 		$status.attr("class", "ts-chip warn").html(`<span class="ts-spin"></span> ${__("Contacting TaxJar…")}`);
 		$btn.prop("disabled", true);
@@ -478,13 +516,17 @@ class TaxJarSetup {
 	}
 
 	_sync_master_lock() {
+		// Toggling df.read_only + refresh() here would be the natural approach, but
+		// Frappe's refresh_input() unconditionally re-applies the control's stored
+		// value on every refresh — for a Check control that means a checkbox the
+		// user just ticked can get silently reset back to its pre-click state the
+		// next time this runs. Flipping the native `disabled` attribute directly
+		// changes interactivity without ever touching the control's value/DOM sync.
 		const on = !!this.controls.master.get_value();
 		this.$body.find(".ts-featcards").toggleClass("locked", !on);
 		(this._featureCards || []).forEach((c) => {
-			c.controls.calc.df.read_only = !on;
-			c.controls.calc.refresh();
-			c.controls.file.df.read_only = !on;
-			c.controls.file.refresh();
+			c.controls.calc.$input.prop("disabled", !on);
+			c.controls.file.$input.prop("disabled", !on);
 		});
 	}
 

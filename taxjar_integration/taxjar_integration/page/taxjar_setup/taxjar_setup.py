@@ -227,6 +227,21 @@ def save_features(taxjar_enabled, flags=None):
 
 
 @frappe.whitelist()
+def remove_company(company):
+	"""Drop a company from the guided setup entirely — its credential and (if
+	any) its company_config row — so it disappears from every later step too
+	rather than leaving an orphaned config with no credential behind it."""
+	frappe.has_permission(SETTINGS, "write", throw=True)
+
+	settings = frappe.get_single(SETTINGS)
+	settings.set("table_hvjw", [c for c in (settings.table_hvjw or []) if c.company != company])
+	settings.set("company_config", [c for c in (settings.company_config or []) if c.company != company])
+	settings.save()
+
+	return {"ok": True}
+
+
+@frappe.whitelist()
 def fetch_nexus():
 	"""Pull nexus regions from TaxJar for every configured company (wraps the
 	doctype's own update_nexus_list, which also saves) and return them grouped
