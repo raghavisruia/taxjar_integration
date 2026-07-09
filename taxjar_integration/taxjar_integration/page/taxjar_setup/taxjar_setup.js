@@ -1,21 +1,14 @@
 // TaxJar guided setup — desk page shell (Phase 1).
 //
-// Layout: a horizontal milestone rail across the top (connected nodes, navigation
-// only) and a single-step panel below that swaps its entire content on Save &
-// continue — only one step is ever shown at a time, rendered as plain page flow
-// (no card/box around it) rather than a widget embedded in the desk. Phase 1 wires
-// the shell to real server state via get_setup_state, plus the Review step's
-// finish action. The per-step native controls (Connect / Accounts / Features /
-// Nexus) are wired in later phases — see docs/guided-setup-plan.md.
-
-// Milestone status icons — same Lucide set (circle-check / circle-dot-dashed /
-// circle-dashed) ERPNext's own Getting Started onboarding uses for step status,
-// inlined so the outline reads as first-party rather than a bespoke widget.
-const TS_ICONS = {
-	check: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg>`,
-	dot_dashed: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"></path><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"></path><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"></path><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"></path><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"></path><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"></path><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"></path><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"></path><circle cx="12" cy="12" r="1"></circle></svg>`,
-	dashed: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.182a10 10 0 0 1 3.8 0"></path><path d="M13.9 21.818a10 10 0 0 1-3.8 0"></path><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7"></path><path d="M2.182 13.9a10 10 0 0 1 0-3.8"></path><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69"></path><path d="M21.818 10.1a10 10 0 0 1 0 3.8"></path><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69"></path><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7"></path></svg>`,
-};
+// Layout: a single navigation/progress rail across the top — frappe-ui's
+// <Progress :intervals="true"> internals, one segment per step, each carrying a
+// clickable trailing caption — and a single-step panel below that swaps its
+// entire content on Save & continue — only one step is ever shown at a time,
+// rendered as plain page flow (no card/box around it) rather than a widget
+// embedded in the desk. Phase 1 wires the shell to real server state via
+// get_setup_state, plus the Review step's finish action. The per-step native
+// controls (Connect / Accounts / Features / Nexus) are wired in later phases —
+// see docs/guided-setup-plan.md.
 
 frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
@@ -55,14 +48,13 @@ class TaxJarSetup {
 		this.$root = $(`
 			<div class="taxjar-setup">
 				<nav class="ts-outline">
-					<ol class="ts-milestones"></ol>
+					<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 				</nav>
 				<section class="ts-panel">
 					<header class="ts-head">
 						<div class="ts-kick"></div>
 						<h2 class="ts-title"></h2>
 						<p class="ts-sub"></p>
-						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 					</header>
 					<div class="ts-body"></div>
 					<footer class="ts-foot">
@@ -75,33 +67,26 @@ class TaxJarSetup {
 			</div>
 		`).appendTo(this.page.main);
 
-		this.$milestones = this.$root.find(".ts-milestones");
 		this.$intervals = this.$root.find(".ts-intervals");
 		this.$body = this.$root.find(".ts-body");
 		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
 		this.$root.find(".ts-skip").on("click", () => this._advance());
 		this.$root.find(".ts-next").on("click", () => this._on_next());
 
-		this.$milestones.html(SETUP_STEPS.map((s, i) => `
-			<li class="ts-milestone" data-i="${i}">
-				<button class="ts-node-btn">
-					<span class="ts-node"></span>
-					<span class="ts-node-label">${frappe.utils.escape_html(s.label)}</span>
+		// The progress rail is the only navigation element — frappe-ui's <Progress
+		// intervals> segments (one per step), each with a clickable trailing caption
+		// standing in for the step it represents.
+		this.$intervals.html(SETUP_STEPS.map((s, i) => `
+			<li class="ts-interval" data-i="${i}">
+				<button class="ts-interval-btn">
+					<span class="ts-interval-bar"></span>
+					<span class="ts-interval-label">${frappe.utils.escape_html(s.label)}</span>
 				</button>
 			</li>
 		`).join(""));
-		this.$milestones.find(".ts-node-btn").on("click", (e) => {
-			this._go(+$(e.currentTarget).closest(".ts-milestone").data("i"));
+		this.$intervals.find(".ts-interval-btn").on("click", (e) => {
+			this._go(+$(e.currentTarget).closest(".ts-interval").data("i"));
 		});
-
-		// Progress bar — frappe-ui's <Progress intervals> segments (one per step), each
-		// carrying its own trailing caption instead of a single overall value/hint.
-		this.$intervals.html(SETUP_STEPS.map((s, i) => `
-			<li class="ts-interval" data-i="${i}">
-				<span class="ts-interval-bar"></span>
-				<span class="ts-interval-label">${frappe.utils.escape_html(s.label)}</span>
-			</li>
-		`).join(""));
 	}
 
 	_load_state() {
@@ -154,23 +139,17 @@ class TaxJarSetup {
 		this.$root.find(".ts-kick").text(__("Step {0} of {1}", [this.cur + 1, SETUP_STEPS.length]));
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-sub").text(step.sub);
-		this.$intervals.attr("aria-valuenow", this.cur + 1);
-		this.$intervals.find(".ts-interval").each((i, el) => {
-			const $el = $(el);
-			$el.toggleClass("filled", i <= this.cur).toggleClass("active", i === this.cur);
-		});
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		this.$root.find(".ts-next").text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"));
 
-		// Outline: pure navigation — done (check), active (dot-dashed, current), upcoming (dashed).
-		this.$milestones.find(".ts-milestone").each((i, el) => {
+		// Rail: pure navigation — filled up to and including the current step,
+		// each segment's caption clickable once reached.
+		this.$intervals.attr("aria-valuenow", this.cur + 1);
+		this.$intervals.find(".ts-interval").each((i, el) => {
 			const $el = $(el);
-			const done = i < this.cur;
-			const active = i === this.cur;
-			$el.toggleClass("done", done).toggleClass("active", active).toggleClass("upcoming", !done && !active);
-			$el.find(".ts-node-btn").prop("disabled", i > this.reached);
-			$el.find(".ts-node").html(done ? TS_ICONS.check : active ? TS_ICONS.dot_dashed : TS_ICONS.dashed);
+			$el.toggleClass("filled", i <= this.cur).toggleClass("active", i === this.cur);
+			$el.find(".ts-interval-btn").prop("disabled", i > this.reached);
 		});
 
 		this.$body.empty();

@@ -1,18 +1,18 @@
 /* TaxJar guided setup — desk page shell.
-   Layout: a horizontal milestone rail (pure navigation, connected nodes using the
-   same status icons as ERPNext's own Getting Started onboarding) across the top,
-   and a single-step panel below whose entire content swaps on Save & continue.
-   The panel is plain page flow, not a card/box — it should read as a first-party
-   desk page, not a widget embedded in one. Uses Frappe desk CSS variables so it
-   follows the active (light/dark) theme; ink (--text-color) is the structural
-   accent, with green reserved for the one semantic signal — a completed step. */
+   Layout: a single navigation/progress rail across the top — frappe-ui's
+   <Progress :intervals="true"> internals, one segment per step, each with a
+   clickable trailing caption standing in for that step — and a single-step
+   panel below whose entire content swaps on Save & continue. The panel is
+   plain page flow, not a card/box — it should read as a first-party desk page,
+   not a widget embedded in one. Uses Frappe desk CSS variables so it follows
+   the active (light/dark) theme; ink (--text-color) is the structural accent. */
 
 .taxjar-setup {
 	max-width: 880px;
 	margin: 8px auto 40px;
 }
 
-/* ── outline: connected milestone nodes across the top, navigation only ── */
+/* ── rail: frappe-ui <Progress intervals> internals, sticky across the top ── */
 .taxjar-setup .ts-outline {
 	position: sticky;
 	top: 48px;
@@ -24,59 +24,41 @@
 	overflow-x: auto;
 }
 
-.taxjar-setup .ts-milestones {
+/* frappe-ui's `flex space-x-1` row of equal segments, each `bg-surface-gray-7`
+   once filled or `bg-surface-gray-2` while unfilled — mapped here onto our own
+   desk theme tokens since this page has no Tailwind runtime. Extended past the
+   stock component with a clickable trailing caption under each segment (that
+   step's name) instead of a single overall value/hint, since every segment
+   already corresponds 1:1 with a named step — this rail is the only navigation
+   element on the page. */
+.taxjar-setup .ts-progress {
 	list-style: none; margin: 0; padding: 0;
-	display: flex; align-items: flex-start;
+	display: flex; gap: 4px;
 	min-width: 620px;
 }
-.taxjar-setup .ts-milestone {
-	position: relative;
-	flex: 1 1 0;
-	display: flex; flex-direction: column; align-items: center;
-	text-align: center;
-	padding: 0 4px;
+.taxjar-setup .ts-interval { flex: 1 1 0; min-width: 0; }
+.taxjar-setup .ts-interval-btn {
+	display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+	width: 100%; border: 0; background: none; padding: 0; cursor: pointer; text-align: left;
 }
-/* connecting line threading every node, left to right — drawn by the node it
-   leaves from, reaching exactly to the centre of the next node. */
-.taxjar-setup .ts-milestone:not(:last-child)::before {
-	content: "";
-	position: absolute;
-	top: 13px; left: 50%; width: 100%;
-	height: 2px;
-	background: var(--border-color);
-	z-index: 0;
+.taxjar-setup .ts-interval-btn:disabled { cursor: default; }
+
+.taxjar-setup .ts-interval-bar {
+	display: block; height: 2px; border-radius: 12px;
+	background: var(--control-bg);
+	transition: background 0.2s ease;
 }
-.taxjar-setup .ts-milestone.done:not(:last-child)::before { background: var(--text-color); }
+.taxjar-setup .ts-interval.filled .ts-interval-bar { background: var(--text-color); }
 
-.taxjar-setup .ts-node-btn {
-	display: flex; flex-direction: column; align-items: center; gap: 8px;
-	border: 0; background: none; padding: 0; cursor: pointer;
+.taxjar-setup .ts-interval-label {
+	display: block;
+	font-size: 12.5px; color: var(--text-muted);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.taxjar-setup .ts-node-btn:disabled { cursor: default; }
-
-/* The status icon itself is the node — no extra circle chrome drawn around it,
-   matching how ERPNext's onboarding renders circle-check / circle-dot-dashed /
-   circle-dashed directly as the row marker. */
-.taxjar-setup .ts-node {
-	position: relative; z-index: 1; flex: none;
-	width: 26px; height: 26px;
-	display: grid; place-items: center;
-	background: var(--card-bg);
-	color: var(--text-muted);
-}
-.taxjar-setup .ts-node svg { width: 24px; height: 24px; }
-
-.taxjar-setup .ts-node-label { font-size: 13.5px; line-height: 1.3; color: var(--text-muted); max-width: 120px; }
-
-/* Done is the one place colour carries meaning — everything else stays ink/grey. */
-.taxjar-setup .ts-milestone.done .ts-node { color: var(--green-600, #30a66d); }
-.taxjar-setup .ts-milestone.done .ts-node-label { color: var(--text-color); }
-
-.taxjar-setup .ts-milestone.active .ts-node { color: var(--text-color); }
-.taxjar-setup .ts-milestone.active .ts-node-label { color: var(--text-color); font-weight: 700; }
-
-.taxjar-setup .ts-milestone.upcoming .ts-node-label { color: var(--text-muted); }
-.taxjar-setup .ts-node-btn:disabled .ts-node-label { opacity: 0.6; }
+.taxjar-setup .ts-interval.filled .ts-interval-label { color: var(--text-color); }
+.taxjar-setup .ts-interval.active .ts-interval-label { font-weight: 700; }
+.taxjar-setup .ts-interval-btn:disabled .ts-interval-label { opacity: 0.6; }
+.taxjar-setup .ts-interval-btn:not(:disabled):hover .ts-interval-label { color: var(--text-color); }
 
 /* ── panel: single step at a time, rendered as plain page flow (no card) ── */
 .taxjar-setup .ts-panel {
@@ -92,32 +74,6 @@
 }
 .taxjar-setup .ts-title { margin: 8px 0 0; font-size: 24px; font-weight: 700; }
 .taxjar-setup .ts-sub { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
-/* Progress bar — frappe-ui <Progress :intervals="true"> internals
-   (ui.frappe.io/docs/components/progress): a `flex space-x-1` row of equal
-   segments, each `bg-surface-gray-7` once filled or `bg-surface-gray-2` while
-   unfilled — mapped here onto our own desk theme tokens since this page has
-   no Tailwind runtime. Extended past the stock component with a trailing
-   caption under each segment (that step's name) instead of a single overall
-   value/hint, since each segment already corresponds 1:1 with a named step. */
-.taxjar-setup .ts-progress {
-	list-style: none; margin: 20px 0 0; padding: 0;
-	display: flex; gap: 4px;
-}
-.taxjar-setup .ts-interval { flex: 1 1 0; min-width: 0; }
-.taxjar-setup .ts-interval-bar {
-	display: block; height: 2px; border-radius: 12px;
-	background: var(--control-bg);
-	transition: background 0.2s ease;
-}
-.taxjar-setup .ts-interval.filled .ts-interval-bar { background: var(--text-color); }
-
-.taxjar-setup .ts-interval-label {
-	display: block; margin-top: 8px;
-	font-size: 11.5px; color: var(--text-muted);
-	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.taxjar-setup .ts-interval.filled .ts-interval-label { color: var(--text-color); }
-.taxjar-setup .ts-interval.active .ts-interval-label { font-weight: 700; }
 
 .taxjar-setup .ts-body { padding: 6px 0 28px; flex: 1; }
 .taxjar-setup .ts-foot {
