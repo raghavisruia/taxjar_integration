@@ -1,9 +1,11 @@
 // TaxJar guided setup — desk page shell (Phase 1).
 //
-// Phase 1 delivers the wizard shell (left stepper, progress, step navigation) wired
-// to real server state via get_setup_state, plus the Review step's finish action.
-// The per-step native controls (Connect / Accounts / Features / Nexus) are wired in
-// later phases — see docs/guided-setup-plan.md.
+// Layout: a milestone outline on the left (connected nodes, navigation only) and a
+// single-step panel on the right that swaps its entire content on Save & continue —
+// only one step is ever shown at a time. Phase 1 wires the shell to real server
+// state via get_setup_state, plus the Review step's finish action. The per-step
+// native controls (Connect / Accounts / Features / Nexus) are wired in later
+// phases — see docs/guided-setup-plan.md.
 
 frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
@@ -42,8 +44,8 @@ class TaxJarSetup {
 	_build_shell() {
 		this.$root = $(`
 			<div class="taxjar-setup">
-				<nav class="ts-rail">
-					<div class="ts-steps"></div>
+				<nav class="ts-outline">
+					<ol class="ts-milestones"></ol>
 				</nav>
 				<section class="ts-panel">
 					<header class="ts-head">
@@ -57,22 +59,29 @@ class TaxJarSetup {
 						<button class="btn btn-default ts-back">${__("Back")}</button>
 						<span class="ts-grow"></span>
 						<button class="btn btn-default ts-skip hide">${__("Skip for now")}</button>
-						<button class="btn btn-primary ts-next"></button>
+						<button class="btn btn-dark ts-next"></button>
 					</footer>
 				</section>
 			</div>
 		`).appendTo(this.page.main);
 
-		this.$steps = this.$root.find(".ts-steps");
+		this.$milestones = this.$root.find(".ts-milestones");
 		this.$body = this.$root.find(".ts-body");
 		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
 		this.$root.find(".ts-skip").on("click", () => this._advance());
 		this.$root.find(".ts-next").on("click", () => this._on_next());
 
-		this.$steps.html(SETUP_STEPS.map((s, i) =>
-			`<button class="ts-step" data-i="${i}"><span class="ts-dot">${i + 1}</span> ${frappe.utils.escape_html(s.label)}</button>`
-		).join(""));
-		this.$steps.find(".ts-step").on("click", (e) => this._go(+e.currentTarget.dataset.i));
+		this.$milestones.html(SETUP_STEPS.map((s, i) => `
+			<li class="ts-milestone" data-i="${i}">
+				<button class="ts-node-btn">
+					<span class="ts-node"><span class="ts-node-mark">${i + 1}</span></span>
+					<span class="ts-node-label">${frappe.utils.escape_html(s.label)}</span>
+				</button>
+			</li>
+		`).join(""));
+		this.$milestones.find(".ts-node-btn").on("click", (e) => {
+			this._go(+$(e.currentTarget).closest(".ts-milestone").data("i"));
+		});
 	}
 
 	_load_state() {
@@ -120,6 +129,8 @@ class TaxJarSetup {
 
 	_render() {
 		const step = SETUP_STEPS[this.cur];
+
+		// Panel shows exactly one step's content, swapped in full on navigate.
 		this.$root.find(".ts-kick").text(__("Step {0} of {1}", [this.cur + 1, SETUP_STEPS.length]));
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-sub").text(step.sub);
@@ -129,16 +140,21 @@ class TaxJarSetup {
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		this.$root.find(".ts-next").text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"));
 
-		this.$steps.find(".ts-step").each((i, el) => {
+		// Outline: pure navigation — done (filled ✓), active (ringed, current), upcoming (outline).
+		this.$milestones.find(".ts-milestone").each((i, el) => {
 			const $el = $(el);
-			$el.toggleClass("active", i === this.cur).toggleClass("done", i < this.cur).prop("disabled", i > this.reached);
-			$el.find(".ts-dot").html(i < this.cur ? "✓" : i + 1);
+			const done = i < this.cur;
+			const active = i === this.cur;
+			$el.toggleClass("done", done).toggleClass("active", active).toggleClass("upcoming", !done && !active);
+			$el.find(".ts-node-btn").prop("disabled", i > this.reached);
+			$el.find(".ts-node-mark").html(done ? "✓" : String(i + 1));
 		});
 
+		this.$body.empty();
 		this[`_render_${step.key}`]();
 	}
 
-	// ── step bodies ──────────────────────────────────────────────
+	// ── step bodies (single step rendered into ts-body at a time) ──
 	_render_welcome() {
 		this.$body.html(`
 			<p class="ts-lede">${__("This takes about 5 minutes. Have these ready:")}</p>
