@@ -335,7 +335,7 @@ class TaxJarSetup {
 		}).then((res) => {
 			entry.tested = !!res.ok;
 			if (res.ok) {
-				$status.attr("class", "ts-chip ok").text(__("Connected — {0} ({1})", [company, res.mode]));
+				$status.attr("class", "ts-chip ok").html(`<span class="ts-chip-dot"></span> ${__("Success")}`);
 			} else {
 				$status.attr("class", "ts-chip err").text(res.message || __("Could not connect."));
 			}
@@ -599,7 +599,7 @@ class TaxJarSetup {
 			const companiesN = Object.keys(res.nexus_by_company).length;
 			const total = Object.values(res.nexus_by_company).reduce((n, arr) => n + arr.length, 0);
 			$status.attr("class", "ts-chip ok ts-fetchstatus")
-				.text(__("Fetched {0} regions across {1} companies", [total, companiesN]));
+				.html(`<span class="ts-chip-dot"></span> ${__("Fetched {0} regions across {1} companies", [total, companiesN])}`);
 			this._render_nexus_groups(res.nexus_by_company);
 		}).catch(() => {
 			$status.attr("class", "ts-chip err ts-fetchstatus").text(__("Could not fetch nexus."));

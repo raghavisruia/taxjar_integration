@@ -145,8 +145,14 @@
 }
 .taxjar-setup .ts-chip.idle { background: var(--control-bg); color: var(--text-muted); }
 .taxjar-setup .ts-chip.warn { border-color: var(--border-color); color: var(--text-muted); }
-.taxjar-setup .ts-chip.ok { background: var(--text-color); color: var(--card-bg); }
 .taxjar-setup .ts-chip.err { border-color: var(--text-color); color: var(--text-color); }
+/* Success is the one chip that gets a colour cue — a small green dot rather
+   than a solid fill, so it still reads as calm/inline rather than a loud badge. */
+.taxjar-setup .ts-chip.ok { background: var(--control-bg); color: var(--text-color); }
+.taxjar-setup .ts-chip-dot {
+	width: 7px; height: 7px; border-radius: 50%; flex: none;
+	background: var(--green-600, #30a66d);
+}
 .taxjar-setup .ts-spin {
 	display: inline-block; width: 10px; height: 10px; border-radius: 50%;
 	border: 1.5px solid currentColor; border-right-color: transparent;
