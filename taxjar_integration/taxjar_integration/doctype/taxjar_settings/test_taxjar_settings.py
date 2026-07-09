@@ -5006,6 +5006,25 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("ts-acc-company", js)
 		self.assertIn("ts-acc-detail", js)
 
+	def test_welcome_step_button_says_continue_not_save(self):
+		"""Nothing is saved on the Welcome step (no form fields) — its button
+		must not claim to "Save"."""
+		js = self._js()
+		welcome_step = js.split('key: "welcome"')[1].split("},")[0]
+		self.assertIn('nextLabel: __("Continue")', welcome_step)
+
+	def test_check_sub_items_are_not_card_scoped_to_top_level_li(self):
+		"""Regression guard: .ts-check li (no `>`) is a descendant selector, so
+		it would also match .ts-check-sub's own <li>s two levels down and wrongly
+		card-ify "Sales Tax Ledger" / "Shipping Charges Ledger" as bordered boxes
+		instead of plain indented bullets."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertIn(".ts-check > li {", css)
+		self.assertNotIn(".ts-check li {", css)
+
 	def test_css_does_not_clip_link_dropdowns_and_caps_card_width(self):
 		import os
 		path = os.path.normpath(os.path.join(

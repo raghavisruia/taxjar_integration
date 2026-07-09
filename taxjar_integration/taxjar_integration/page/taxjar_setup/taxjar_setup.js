@@ -26,7 +26,9 @@ frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 };
 
 const SETUP_STEPS = [
-	{ key: "welcome", label: __("Pre-requisites"), title: __("Let’s connect TaxJar"), skip: false },
+	// Nothing is actually saved on this step (no form fields), so its button
+	// just says "Continue" rather than the misleading "Save & continue".
+	{ key: "welcome", label: __("Pre-requisites"), title: __("Let’s connect TaxJar"), skip: false, nextLabel: __("Continue") },
 	{ key: "connect", label: __("Connect API"), title: __("Connect your TaxJar account"), skip: false },
 	{ key: "accounts", label: __("Company accounts"), title: __("Where should tax be posted?"), skip: false },
 	{ key: "features", label: __("Features"), title: __("What should TaxJar do?"), skip: true },
@@ -161,9 +163,10 @@ class TaxJarSetup {
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
-		this.$root.find(".ts-next")
-			.text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"))
-			.prop("disabled", false);
+		const nextLabel = this.cur === SETUP_STEPS.length - 1
+			? __("Finish & activate")
+			: (step.nextLabel || __("Save & continue"));
+		this.$root.find(".ts-next").text(nextLabel).prop("disabled", false);
 		this._set_next_gated(false);
 
 		// Rail: pure navigation — filled up to and including the current step,
