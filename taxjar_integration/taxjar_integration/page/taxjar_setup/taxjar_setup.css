@@ -67,16 +67,47 @@
 .taxjar-setup .ts-grow { flex: 1; }
 .taxjar-setup .ts-next.btn-dark { background: var(--text-color); border-color: var(--text-color); color: var(--card-bg); }
 .taxjar-setup .ts-next.btn-dark:hover { opacity: 0.9; }
+/* Looks disabled but stays a real button — clicking it while gated still
+   fires, so _on_next() can explain what's missing instead of the click
+   silently doing nothing (which is what a native `disabled` button does). */
+.taxjar-setup .ts-next.ts-next-gated { opacity: 0.45; }
+.taxjar-setup .ts-next.ts-next-gated:hover { opacity: 0.45; }
 .taxjar-setup .hide { display: none !important; }
 
 /* step bodies */
 .taxjar-setup .ts-lede { margin: 0 0 16px; color: var(--text-color); }
 .taxjar-setup .ts-check { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+/* The card's border/radius stays on the <li>; the <a> owns the padding so the
+   whole card is the click target, not just the heading text or the icon. */
 .taxjar-setup .ts-check li {
 	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
-	padding: 14px 16px; font-size: var(--text-sm); color: var(--text-muted);
+	font-size: var(--text-sm); color: var(--text-muted);
+	overflow: hidden;
 }
-.taxjar-setup .ts-check li b { color: var(--text-color); }
+.taxjar-setup .ts-check-link {
+	display: flex; align-items: flex-start; gap: 10px;
+	padding: 14px 16px; color: inherit; text-decoration: none;
+}
+.taxjar-setup .ts-check-link:hover { background: var(--control-bg); }
+.taxjar-setup .ts-check-link b { color: var(--text-color); }
+.taxjar-setup .ts-check-num {
+	flex: none; width: 20px; height: 20px; border-radius: 50%;
+	background: var(--control-bg); color: var(--text-color);
+	display: grid; place-items: center;
+	font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.taxjar-setup .ts-check-text { flex: 1; min-width: 0; }
+/* Icon sits right after the heading text, not pushed to the far edge. */
+.taxjar-setup .ts-check-text .icon {
+	margin-left: 6px; color: var(--text-muted); vertical-align: -2px;
+}
+.taxjar-setup .ts-check-sub {
+	list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
+}
+.taxjar-setup .ts-check-sub li {
+	font-size: 12.5px; color: var(--text-muted); padding-left: 14px; position: relative;
+}
+.taxjar-setup .ts-check-sub li::before { content: "–"; position: absolute; left: 0; }
 
 .taxjar-setup .ts-card {
 	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
@@ -99,6 +130,17 @@
 }
 .taxjar-setup .ts-card-remove:hover { color: var(--text-color); border-color: var(--text-color); }
 .taxjar-setup .ts-card-b { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+
+/* Test connection is the one action per credential card that actually matters
+   before Continue unlocks — a plain .btn-default blended into the card, so it
+   gets its own bolder, ink-bordered treatment (still monochrome, secondary to
+   the solid "Save & continue" CTA). */
+.taxjar-setup .ts-test {
+	border: 1.5px solid var(--text-color); color: var(--text-color); font-weight: 600;
+	background: var(--card-bg);
+}
+.taxjar-setup .ts-test:hover { background: var(--control-bg); }
+.taxjar-setup .ts-test:disabled { opacity: 0.6; cursor: default; }
 /* Cards with no header (Welcome-style flat use) fall back to plain padding. */
 .taxjar-setup .ts-card:not(:has(.ts-card-h)) { padding: 4px 16px; }
 

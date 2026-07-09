@@ -26,7 +26,7 @@ frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 };
 
 const SETUP_STEPS = [
-	{ key: "welcome", label: __("Welcome"), title: __("Let’s connect TaxJar"), skip: false },
+	{ key: "welcome", label: __("Pre-requisites"), title: __("Let’s connect TaxJar"), skip: false },
 	{ key: "connect", label: __("Connect API"), title: __("Connect your TaxJar account"), skip: false },
 	{ key: "accounts", label: __("Company accounts"), title: __("Where should tax be posted?"), skip: false },
 	{ key: "features", label: __("Features"), title: __("What should TaxJar do?"), skip: true },
@@ -116,6 +116,14 @@ class TaxJarSetup {
 	}
 
 	_on_next() {
+		// Gated (e.g. Connect before anything's tested) stays a real, clickable
+		// button rather than a native disabled one — a disabled button eats the
+		// click silently, which just looks broken. Explain what's missing instead.
+		if (this._nextGated) {
+			frappe.show_alert({ message: this._nextGateMessage || __("Please complete this step first."), indicator: "orange" });
+			return;
+		}
+
 		const step = SETUP_STEPS[this.cur];
 		if (step.key === "review") return this._finish();
 
@@ -125,6 +133,14 @@ class TaxJarSetup {
 		const saver = this[`_save_${step.key}`];
 		if (!saver) return this._advance();
 		Promise.resolve(saver.call(this)).then((ok) => { if (ok) this._advance(); });
+	}
+
+	// Visually disabled but still clickable, so a click can explain why instead
+	// of a native `disabled` button silently eating it.
+	_set_next_gated(blocked, message) {
+		this._nextGated = blocked;
+		this._nextGateMessage = message;
+		this.$root.find(".ts-next").toggleClass("ts-next-gated", blocked);
 	}
 
 	_finish() {
@@ -148,6 +164,7 @@ class TaxJarSetup {
 		this.$root.find(".ts-next")
 			.text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"))
 			.prop("disabled", false);
+		this._set_next_gated(false);
 
 		// Rail: pure navigation — filled up to and including the current step,
 		// each segment's caption clickable once reached.
@@ -164,12 +181,36 @@ class TaxJarSetup {
 
 	// ── Step 1: Welcome ──────────────────────────────────────────────
 	_render_welcome() {
+		const icon = frappe.utils.icon("external-link", "xs");
+		const chartOfAccountsUrl = `${frappe.urllib.get_base_url()}/app/account/view/tree`;
+
 		this.$body.html(`
-			<p class="ts-lede">${__("This takes about 5 minutes. Have these ready:")}</p>
+			<p class="ts-lede">${__("Before proceeding,")}</p>
 			<ul class="ts-check">
-				<li><b>${__("A TaxJar API token")}</b> — ${__("from TaxJar → Account → API access.")}</li>
-				<li><b>${__("Which companies collect sales tax")}</b> — ${__("one token & account mapping per company.")}</li>
-				<li><b>${__("Your tax & shipping GL accounts")}</b> — ${__("where calculated tax and freight are posted.")}</li>
+				<li>
+					<a class="ts-check-link" href="https://app.taxjar.com/account#api-access" target="_blank" rel="noopener noreferrer">
+						<span class="ts-check-num">1</span>
+						<span class="ts-check-text"><b>${__("Get TaxJar API Token")}</b>${icon}</span>
+					</a>
+				</li>
+				<li>
+					<a class="ts-check-link" href="https://app.taxjar.com/account#states" target="_blank" rel="noopener noreferrer">
+						<span class="ts-check-num">2</span>
+						<span class="ts-check-text"><b>${__("Configure Nexus in TaxJar")}</b>${icon}</span>
+					</a>
+				</li>
+				<li>
+					<a class="ts-check-link" href="${chartOfAccountsUrl}" target="_blank" rel="noopener noreferrer">
+						<span class="ts-check-num">3</span>
+						<span class="ts-check-text">
+							<b>${__("Create Ledger Accounts")}</b>${icon}
+							<ul class="ts-check-sub">
+								<li>${__("Sales Tax Ledger")}</li>
+								<li>${__("Shipping Charges Ledger")}</li>
+							</ul>
+						</span>
+					</a>
+				</li>
 			</ul>
 		`);
 	}
@@ -179,8 +220,8 @@ class TaxJarSetup {
 		const s = this.state || {};
 		this.$body.html(`
 			<div class="ts-field ts-field-mode" style="max-width:280px"></div>
-			<p class="ts-fieldnote">${__("Sandbox uses TaxJar’s test environment — safe for setup. Switch to Live when you’re ready to bill.")}</p>
-			<p class="ts-sectionlabel">${__("API credentials — one token per company")}</p>
+			<p class="ts-fieldnote">${__(" ")}</p>
+			<p class="ts-sectionlabel">${__("API Token")}</p>
 			<div class="ts-cardgrid ts-cred-cards"></div>
 			<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
 		`);
@@ -348,7 +389,7 @@ class TaxJarSetup {
 
 	_sync_connect_gate() {
 		const anyTested = this._connectCards.some((c) => c.tested && c.controls.company.get_value());
-		this.$root.find(".ts-next").prop("disabled", !anyTested);
+		this._set_next_gated(!anyTested, __("Test the connection for at least one company before continuing."));
 	}
 
 	_save_connect() {

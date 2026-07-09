@@ -4901,6 +4901,31 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("_sync_connect_gate", js)
 		self.assertIn("tested", js)
 
+	def test_gated_continue_stays_clickable_and_explains_itself(self):
+		"""A native `disabled` button eats clicks silently — Connect's gate must
+		use a CSS-only look-disabled state so a click can still explain what's
+		missing, instead of appearing to do nothing."""
+		js = self._js()
+		self.assertIn("_set_next_gated", js)
+		self.assertIn("this._nextGated", js)
+		self.assertIn(
+			'__("Test the connection for at least one company before continuing.")', js
+		)
+		# _on_next() must check the gate before anything else, so a click while
+		# gated always shows the message rather than silently trying to save.
+		on_next = js.split("_on_next() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this._nextGated", on_next)
+		self.assertIn("frappe.show_alert", on_next)
+
+	def test_test_connection_button_is_not_plain_default(self):
+		"""Visually elevated above a plain .btn-default so it reads as the
+		action that actually matters before Continue unlocks."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertIn(".ts-test {", css)
+
 	def test_connect_excludes_already_added_companies_via_get_query(self):
 		js = self._js()
 		self.assertIn("otherCompanies", js)
@@ -4986,7 +5011,9 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		path = os.path.normpath(os.path.join(
 			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
 		css = open(path).read()
-		# The only overflow:hidden left is the progress rail's label ellipsis —
-		# .ts-card must not have one, or it clips Link controls' search dropdown.
-		self.assertEqual(css.count("overflow: hidden"), 1)
+		# .ts-card holds Link controls (Company/Account) whose search dropdown can
+		# extend past the card's own box — it must not clip them. (.ts-check li,
+		# which has no dropdown content, is free to clip its own hover background.)
+		card_rule = css.split(".taxjar-setup .ts-card {")[1].split("}")[0]
+		self.assertNotIn("overflow: hidden", card_rule)
 		self.assertIn("minmax(280px, 420px)", css)
