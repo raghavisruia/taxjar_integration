@@ -52,7 +52,6 @@ class TaxJarSetup {
 				</nav>
 				<section class="ts-panel">
 					<header class="ts-head">
-						<div class="ts-kick"></div>
 						<h2 class="ts-title"></h2>
 						<p class="ts-sub"></p>
 					</header>
@@ -136,7 +135,6 @@ class TaxJarSetup {
 		const step = SETUP_STEPS[this.cur];
 
 		// Panel shows exactly one step's content, swapped in full on navigate.
-		this.$root.find(".ts-kick").text(__("Step {0} of {1}", [this.cur + 1, SETUP_STEPS.length]));
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-sub").text(step.sub);
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);

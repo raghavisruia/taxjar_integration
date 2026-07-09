@@ -18,7 +18,7 @@
 	top: 48px;
 	z-index: 3;
 	background: var(--card-bg);
-	padding: 22px 0 18px;
+	padding: 22px 0 34px;
 	border-bottom: 1px solid var(--border-color);
 	margin-bottom: 28px;
 	overflow-x: auto;
@@ -68,11 +68,7 @@
 }
 
 .taxjar-setup .ts-head { padding: 0 0 20px; }
-.taxjar-setup .ts-kick {
-	font-size: 11px; font-weight: 700; letter-spacing: 0.09em;
-	text-transform: uppercase; color: var(--text-muted);
-}
-.taxjar-setup .ts-title { margin: 8px 0 0; font-size: 24px; font-weight: 700; }
+.taxjar-setup .ts-title { margin: 0; font-size: 24px; font-weight: 700; }
 .taxjar-setup .ts-sub { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
 
 .taxjar-setup .ts-body { padding: 6px 0 28px; flex: 1; }
