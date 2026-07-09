@@ -92,23 +92,32 @@
 }
 .taxjar-setup .ts-title { margin: 8px 0 0; font-size: 24px; font-weight: 700; }
 .taxjar-setup .ts-sub { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
-/* Progress bar — internals mirrored from frappe-ui's <Progress> component
-   (ui.frappe.io/docs/components/progress): a `space-y-[10px]` stack of a
-   label/hint row then the bar; size="sm" (h-[2px]) track with `rounded-xl`,
-   `bg-surface-gray-2` track / `bg-surface-gray-7` fill — mapped here onto our
-   own desk theme tokens since this page has no Tailwind runtime. */
-.taxjar-setup .ts-progress { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
-.taxjar-setup .ts-progress-row { display: flex; align-items: baseline; justify-content: space-between; }
-.taxjar-setup .ts-progress-hint {
-	align-self: flex-end;
-	font-size: 13px; font-weight: 500;
-	color: var(--text-muted); font-variant-numeric: tabular-nums;
+/* Progress bar — frappe-ui <Progress :intervals="true"> internals
+   (ui.frappe.io/docs/components/progress): a `flex space-x-1` row of equal
+   segments, each `bg-surface-gray-7` once filled or `bg-surface-gray-2` while
+   unfilled — mapped here onto our own desk theme tokens since this page has
+   no Tailwind runtime. Extended past the stock component with a trailing
+   caption under each segment (that step's name) instead of a single overall
+   value/hint, since each segment already corresponds 1:1 with a named step. */
+.taxjar-setup .ts-progress {
+	list-style: none; margin: 20px 0 0; padding: 0;
+	display: flex; gap: 4px;
 }
-.taxjar-setup .ts-progress-track {
-	position: relative; overflow: hidden; border-radius: 12px;
-	height: 2px; background: var(--control-bg);
+.taxjar-setup .ts-interval { flex: 1 1 0; min-width: 0; }
+.taxjar-setup .ts-interval-bar {
+	display: block; height: 2px; border-radius: 12px;
+	background: var(--control-bg);
+	transition: background 0.2s ease;
 }
-.taxjar-setup .ts-progress-fill { height: 100%; background: var(--text-color); transition: width 0.3s ease; }
+.taxjar-setup .ts-interval.filled .ts-interval-bar { background: var(--text-color); }
+
+.taxjar-setup .ts-interval-label {
+	display: block; margin-top: 8px;
+	font-size: 11.5px; color: var(--text-muted);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.taxjar-setup .ts-interval.filled .ts-interval-label { color: var(--text-color); }
+.taxjar-setup .ts-interval.active .ts-interval-label { font-weight: 700; }
 
 .taxjar-setup .ts-body { padding: 6px 0 28px; flex: 1; }
 .taxjar-setup .ts-foot {

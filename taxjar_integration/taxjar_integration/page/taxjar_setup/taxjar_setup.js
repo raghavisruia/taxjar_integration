@@ -28,17 +28,17 @@ frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 
 const SETUP_STEPS = [
 	{ key: "welcome", label: __("Welcome"), title: __("Let’s connect TaxJar"),
-	  sub: __("A quick, guided setup — about 5 minutes. You can leave and resume any time."), pct: 8, skip: false },
+	  sub: __("A quick, guided setup — about 5 minutes. You can leave and resume any time."), skip: false },
 	{ key: "connect", label: __("Connect API"), title: __("Connect your TaxJar account"),
-	  sub: __("Choose a mode, enter each company’s token, and verify the connection."), pct: 33, skip: false },
+	  sub: __("Choose a mode, enter each company’s token, and verify the connection."), skip: false },
 	{ key: "accounts", label: __("Company accounts"), title: __("Where should tax be posted?"),
-	  sub: __("Map the tax and shipping accounts TaxJar writes to on each Sales Invoice."), pct: 50, skip: false },
+	  sub: __("Map the tax and shipping accounts TaxJar writes to on each Sales Invoice."), skip: false },
 	{ key: "features", label: __("Features"), title: __("What should TaxJar do?"),
-	  sub: __("A master switch, then Calculate Sales Tax and File Transactions per company."), pct: 66, skip: true },
+	  sub: __("A master switch, then Calculate Sales Tax and File Transactions per company."), skip: true },
 	{ key: "nexus", label: __("Nexus"), title: __("Where do you collect tax?"),
-	  sub: __("Nexus comes from TaxJar. Fetch it once — it stays current on its own."), pct: 83, skip: false },
+	  sub: __("Nexus comes from TaxJar. Fetch it once — it stays current on its own."), skip: false },
 	{ key: "review", label: __("Review"), title: __("Review & activate"),
-	  sub: __("Everything you chose, grouped. Activating writes it to TaxJar Settings."), pct: 100, skip: false },
+	  sub: __("Everything you chose, grouped. Activating writes it to TaxJar Settings."), skip: false },
 ];
 
 class TaxJarSetup {
@@ -62,15 +62,7 @@ class TaxJarSetup {
 						<div class="ts-kick"></div>
 						<h2 class="ts-title"></h2>
 						<p class="ts-sub"></p>
-						<div class="ts-progress">
-							<div class="ts-progress-row">
-								<span></span>
-								<span class="ts-progress-hint"></span>
-							</div>
-							<div class="ts-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
-								<div class="ts-progress-fill"></div>
-							</div>
-						</div>
+						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 					</header>
 					<div class="ts-body"></div>
 					<footer class="ts-foot">
@@ -84,6 +76,7 @@ class TaxJarSetup {
 		`).appendTo(this.page.main);
 
 		this.$milestones = this.$root.find(".ts-milestones");
+		this.$intervals = this.$root.find(".ts-intervals");
 		this.$body = this.$root.find(".ts-body");
 		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
 		this.$root.find(".ts-skip").on("click", () => this._advance());
@@ -100,6 +93,15 @@ class TaxJarSetup {
 		this.$milestones.find(".ts-node-btn").on("click", (e) => {
 			this._go(+$(e.currentTarget).closest(".ts-milestone").data("i"));
 		});
+
+		// Progress bar — frappe-ui's <Progress intervals> segments (one per step), each
+		// carrying its own trailing caption instead of a single overall value/hint.
+		this.$intervals.html(SETUP_STEPS.map((s, i) => `
+			<li class="ts-interval" data-i="${i}">
+				<span class="ts-interval-bar"></span>
+				<span class="ts-interval-label">${frappe.utils.escape_html(s.label)}</span>
+			</li>
+		`).join(""));
 	}
 
 	_load_state() {
@@ -152,9 +154,11 @@ class TaxJarSetup {
 		this.$root.find(".ts-kick").text(__("Step {0} of {1}", [this.cur + 1, SETUP_STEPS.length]));
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-sub").text(step.sub);
-		this.$root.find(".ts-progress-fill").css("width", step.pct + "%");
-		this.$root.find(".ts-progress-track").attr("aria-valuenow", step.pct);
-		this.$root.find(".ts-progress-hint").text(step.pct + "%");
+		this.$intervals.attr("aria-valuenow", this.cur + 1);
+		this.$intervals.find(".ts-interval").each((i, el) => {
+			const $el = $(el);
+			$el.toggleClass("filled", i <= this.cur).toggleClass("active", i === this.cur);
+		});
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		this.$root.find(".ts-next").text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"));
