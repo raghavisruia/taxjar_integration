@@ -20,18 +20,12 @@ frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 };
 
 const SETUP_STEPS = [
-	{ key: "welcome", label: __("Welcome"), title: __("Let’s connect TaxJar"),
-	  sub: __("A quick, guided setup — about 5 minutes. You can leave and resume any time."), skip: false },
-	{ key: "connect", label: __("Connect API"), title: __("Connect your TaxJar account"),
-	  sub: __("Choose a mode, enter each company’s token, and verify the connection."), skip: false },
-	{ key: "accounts", label: __("Company accounts"), title: __("Where should tax be posted?"),
-	  sub: __("Map the tax and shipping accounts TaxJar writes to on each Sales Invoice."), skip: false },
-	{ key: "features", label: __("Features"), title: __("What should TaxJar do?"),
-	  sub: __("A master switch, then Calculate Sales Tax and File Transactions per company."), skip: true },
-	{ key: "nexus", label: __("Nexus"), title: __("Where do you collect tax?"),
-	  sub: __("Nexus comes from TaxJar. Fetch it once — it stays current on its own."), skip: false },
-	{ key: "review", label: __("Review"), title: __("Review & activate"),
-	  sub: __("Everything you chose, grouped. Activating writes it to TaxJar Settings."), skip: false },
+	{ key: "welcome", label: __("Welcome"), title: __("Let’s connect TaxJar"), skip: false },
+	{ key: "connect", label: __("Connect API"), title: __("Connect your TaxJar account"), skip: false },
+	{ key: "accounts", label: __("Company accounts"), title: __("Where should tax be posted?"), skip: false },
+	{ key: "features", label: __("Features"), title: __("What should TaxJar do?"), skip: true },
+	{ key: "nexus", label: __("Nexus"), title: __("Where do you collect tax?"), skip: false },
+	{ key: "review", label: __("Review"), title: __("Review & activate"), skip: false },
 ];
 
 class TaxJarSetup {
@@ -52,10 +46,7 @@ class TaxJarSetup {
 						<h2 class="ts-title"></h2>
 						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 					</header>
-					<div class="ts-body">
-						<p class="ts-sub"></p>
-						<div class="ts-body-content"></div>
-					</div>
+					<div class="ts-body"></div>
 					<footer class="ts-foot">
 						<button class="btn btn-default ts-back">${__("Back")}</button>
 						<span class="ts-grow"></span>
@@ -67,8 +58,7 @@ class TaxJarSetup {
 		`).appendTo(this.page.main);
 
 		this.$intervals = this.$root.find(".ts-intervals");
-		// Only the content area swaps per step — .ts-sub is a stable element above it.
-		this.$body = this.$root.find(".ts-body-content");
+		this.$body = this.$root.find(".ts-body");
 		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
 		this.$root.find(".ts-skip").on("click", () => this._advance());
 		this.$root.find(".ts-next").on("click", () => this._on_next());
@@ -137,7 +127,6 @@ class TaxJarSetup {
 
 		// Panel shows exactly one step's content, swapped in full on navigate.
 		this.$root.find(".ts-title").text(step.title);
-		this.$root.find(".ts-sub").text(step.sub);
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		this.$root.find(".ts-next").text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"));
@@ -155,7 +144,7 @@ class TaxJarSetup {
 		this[`_render_${step.key}`]();
 	}
 
-	// ── step bodies (single step rendered into .ts-body-content at a time) ──
+	// ── step bodies (single step rendered into ts-body at a time) ──
 	_render_welcome() {
 		this.$body.html(`
 			<p class="ts-lede">${__("This takes about 5 minutes. Have these ready:")}</p>
