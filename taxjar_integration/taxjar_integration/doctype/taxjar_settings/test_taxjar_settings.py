@@ -4459,6 +4459,9 @@ class TestGuidedSetupState(UnitTestCase):
 		return s
 
 	def test_state_shape_and_token_masking(self):
+		"""companies (company_config) carries accounts + flags; credentials
+		(table_hvjw) carries the masked token — two separate lists, since only
+		the latter can exist before a company's accounts are known."""
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
 		s = self._settings()
 		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
@@ -4469,12 +4472,17 @@ class TestGuidedSetupState(UnitTestCase):
 		self.assertEqual(state["api_mode"], "Sandbox")
 		self.assertTrue(state["taxjar_enabled"])
 		self.assertFalse(state["setup_complete"])
+
 		co = state["companies"][0]
 		self.assertEqual(co["company"], "Frappe Tech")
 		self.assertTrue(co["calculate"])
 		self.assertFalse(co["file"])
+		self.assertNotIn("token_last4", co)
+
+		cred = state["credentials"][0]
+		self.assertEqual(cred["company"], "Frappe Tech")
 		# Only the last 4 chars are ever exposed — never the full token.
-		self.assertEqual(co["token_last4"], "1234")
+		self.assertEqual(cred["token_last4"], "1234")
 		self.assertEqual(len(state["nexus_by_company"]["Frappe Tech"]), 1)
 
 	def test_reads_sandbox_token_in_sandbox_mode(self):
@@ -4493,21 +4501,287 @@ class TestGuidedSetupState(UnitTestCase):
 		     patch(_SETUP_MODULE + ".get_decrypted_password", side_effect=fake_decrypt):
 			state = get_setup_state()
 		self.assertEqual(captured["field"], "live_token")
-		self.assertEqual(state["companies"][0]["token_last4"], "5678")
+		self.assertEqual(state["credentials"][0]["token_last4"], "5678")
 
-	def test_token_last4_none_when_no_credential(self):
+	def test_token_last4_none_when_no_token(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
 		s = self._settings()
-		s.table_hvjw = []
+		s.table_hvjw = [frappe._dict(company="Frappe Tech", name="cred-1", sandbox_token="", live_token="")]
 		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
 		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
 			state = get_setup_state()
-		self.assertIsNone(state["companies"][0]["token_last4"])
+		self.assertIsNone(state["credentials"][0]["token_last4"])
+
+	def test_credentials_list_independent_of_company_config(self):
+		"""A company can appear in credentials before it has a company_config row."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		s.company_config = []
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".get_decrypted_password", return_value="tok-abcd1234"):
+			state = get_setup_state()
+		self.assertEqual(state["companies"], [])
+		self.assertEqual(state["credentials"][0]["company"], "Frappe Tech")
 
 	def test_requires_read_permission(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
 		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
 			self.assertRaises(frappe.PermissionError, get_setup_state)
+
+
+# ── Phase 2: test_connection ───────────────────────────────────────────────
+
+
+class TestGuidedSetupTestConnection(UnitTestCase):
+	def _settings(self, mode="Sandbox", creds=None):
+		s = MagicMock()
+		s.api_mode = mode
+		s.table_hvjw = creds or []
+		return s
+
+	def test_ok_with_explicit_token_does_not_persist(self):
+		"""An explicit token is validated live, transiently — never written to
+		table_hvjw or saved, so a bad token typed while testing never lands in
+		the database."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		s = self._settings()
+		mock_client = MagicMock()
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".taxjar.Client", return_value=mock_client):
+			res = test_connection(company="Frappe Tech", token="tok-123", mode="Sandbox")
+
+		self.assertTrue(res["ok"])
+		mock_client.categories.assert_called_once()
+		s.save.assert_not_called()
+		self.assertEqual(len(s.table_hvjw), 0)
+
+	def test_falls_back_to_saved_token_when_none_given(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		cred = frappe._dict(company="Frappe Tech", name="cred-1", sandbox_token="enc", live_token="")
+		s = self._settings(creds=[cred])
+		mock_client = MagicMock()
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".get_decrypted_password", return_value="saved-token"), \
+		     patch(_SETUP_MODULE + ".taxjar.Client", return_value=mock_client):
+			res = test_connection(company="Frappe Tech")
+
+		self.assertTrue(res["ok"])
+
+	def test_no_token_available_returns_not_ok_without_calling_taxjar(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		s = self._settings()
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".taxjar.Client") as mock_client_cls:
+			res = test_connection(company="Frappe Tech")
+
+		self.assertFalse(res["ok"])
+		mock_client_cls.assert_not_called()
+
+	def test_401_returns_invalid_token_message(self):
+		import taxjar.exceptions
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		s = self._settings()
+		mock_client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 401}
+		mock_client.categories.side_effect = err
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".taxjar.Client", return_value=mock_client):
+			res = test_connection(company="Frappe Tech", token="bad-token")
+
+		self.assertFalse(res["ok"])
+		self.assertIn("Invalid token", res["message"])
+
+	def test_connection_error_returns_not_ok(self):
+		import taxjar.exceptions
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		s = self._settings()
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".taxjar.Client", return_value=mock_client):
+			res = test_connection(company="Frappe Tech", token="tok-123")
+
+		self.assertFalse(res["ok"])
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, test_connection, company="Frappe Tech", token="x")
+
+
+# ── Phase 2: save_connection ────────────────────────────────────────────────
+
+
+class TestGuidedSetupSaveConnection(UnitTestCase):
+	def test_sets_mode_and_creates_new_credential(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_connection
+		s = MagicMock()
+		s.table_hvjw = []
+		appended = MagicMock(company=None)
+		s.append.return_value = appended
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			res = save_connection(mode="Sandbox", credentials=[{"company": "Frappe Tech", "token": "tok-1"}])
+
+		self.assertTrue(res["ok"])
+		self.assertEqual(s.api_mode, "Sandbox")
+		s.append.assert_called_once_with("table_hvjw", {"company": "Frappe Tech"})
+		appended.set.assert_called_once_with("sandbox_token", "tok-1")
+		s.save.assert_called_once()
+
+	def test_updates_existing_credential_without_duplicating_row(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_connection
+		cred = MagicMock(company="Frappe Tech")
+		s = MagicMock()
+		s.table_hvjw = [cred]
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_connection(mode="Live", credentials=[{"company": "Frappe Tech", "token": "new-tok"}])
+
+		s.append.assert_not_called()
+		cred.set.assert_called_once_with("live_token", "new-tok")
+
+	def test_blank_token_keeps_existing_not_cleared(self):
+		"""A blank token in the payload means the masked field wasn't retyped —
+		it must not overwrite the stored token."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_connection
+		cred = MagicMock(company="Frappe Tech")
+		s = MagicMock()
+		s.table_hvjw = [cred]
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_connection(mode="Sandbox", credentials=[{"company": "Frappe Tech", "token": ""}])
+
+		cred.set.assert_not_called()
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_connection
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, save_connection, mode="Sandbox", credentials=[])
+
+
+# ── Phase 2: save_company_accounts ──────────────────────────────────────────
+
+
+class TestGuidedSetupSaveCompanyAccounts(UnitTestCase):
+	def test_creates_new_company_config_row(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_accounts
+		s = MagicMock()
+		s.company_config = []
+		appended = frappe._dict(company=None, tax_account_head=None, shipping_account_head=None)
+		s.append.return_value = appended
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			res = save_company_accounts(rows=[{
+				"company": "Frappe Tech",
+				"tax_account_head": "Sales Tax - FT",
+				"shipping_account_head": "Freight - FT",
+			}])
+
+		self.assertTrue(res["ok"])
+		s.append.assert_called_once_with("company_config", {"company": "Frappe Tech"})
+		self.assertEqual(appended.tax_account_head, "Sales Tax - FT")
+		self.assertEqual(appended.shipping_account_head, "Freight - FT")
+		s.save.assert_called_once()
+
+	def test_updates_existing_row_without_duplicating(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_accounts
+		cfg = frappe._dict(company="Frappe Tech", tax_account_head="Old", shipping_account_head="Old")
+		s = MagicMock()
+		s.company_config = [cfg]
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_company_accounts(rows=[{
+				"company": "Frappe Tech",
+				"tax_account_head": "New Tax",
+				"shipping_account_head": "New Freight",
+			}])
+
+		s.append.assert_not_called()
+		self.assertEqual(cfg.tax_account_head, "New Tax")
+		self.assertEqual(cfg.shipping_account_head, "New Freight")
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_accounts
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, save_company_accounts, rows=[])
+
+
+# ── Phase 2: save_features ──────────────────────────────────────────────────
+
+
+class TestGuidedSetupSaveFeatures(UnitTestCase):
+	def test_sets_master_switch_and_per_company_flags(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		cfg = frappe._dict(company="Frappe Tech", taxjar_calculate_tax=0, taxjar_create_transactions=0)
+		s = MagicMock()
+		s.company_config = [cfg]
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			res = save_features(taxjar_enabled=1, flags=[{"company": "Frappe Tech", "calculate": 1, "file": 0}])
+
+		self.assertTrue(res["ok"])
+		self.assertEqual(s.taxjar_enabled, 1)
+		self.assertEqual(cfg.taxjar_calculate_tax, 1)
+		self.assertEqual(cfg.taxjar_create_transactions, 0)
+		s.save.assert_called_once()
+
+	def test_skips_flags_for_company_without_existing_config_row(self):
+		"""A company with credentials but no accounts yet (Accounts step not run)
+		has no company_config row to flip flags on — must not throw or fabricate one."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		s = MagicMock()
+		s.company_config = []
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_features(taxjar_enabled=1, flags=[{"company": "No Config Co", "calculate": 1, "file": 0}])
+
+		s.append.assert_not_called()
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, save_features, taxjar_enabled=1, flags=[])
+
+
+# ── Phase 2: fetch_nexus ─────────────────────────────────────────────────────
+
+
+class TestGuidedSetupFetchNexus(UnitTestCase):
+	def test_calls_update_nexus_list_and_returns_grouped_nexus(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import fetch_nexus
+		s = MagicMock()
+		s.company_config = [frappe._dict(company="Frappe Tech")]
+		s.nexus = [frappe._dict(company="Frappe Tech", region="California", region_code="CA",
+			country="United States", country_code="US")]
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			res = fetch_nexus()
+
+		self.assertTrue(res["ok"])
+		s.update_nexus_list.assert_called_once()
+		self.assertEqual(len(res["nexus_by_company"]["Frappe Tech"]), 1)
+
+	def test_throws_when_no_company_config(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import fetch_nexus
+		s = MagicMock()
+		s.company_config = []
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			self.assertRaises(frappe.ValidationError, fetch_nexus)
+		s.update_nexus_list.assert_not_called()
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import fetch_nexus
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, fetch_nexus)
 
 
 class TestGuidedSetupFinish(UnitTestCase):
