@@ -2,10 +2,20 @@
 //
 // Layout: a milestone outline on the left (connected nodes, navigation only) and a
 // single-step panel on the right that swaps its entire content on Save & continue —
-// only one step is ever shown at a time. Phase 1 wires the shell to real server
-// state via get_setup_state, plus the Review step's finish action. The per-step
-// native controls (Connect / Accounts / Features / Nexus) are wired in later
-// phases — see docs/guided-setup-plan.md.
+// only one step is ever shown at a time, rendered as plain page flow (no card/box
+// around it) rather than a widget embedded in the desk. Phase 1 wires the shell to
+// real server state via get_setup_state, plus the Review step's finish action. The
+// per-step native controls (Connect / Accounts / Features / Nexus) are wired in
+// later phases — see docs/guided-setup-plan.md.
+
+// Milestone status icons — same Lucide set (circle-check / circle-dot-dashed /
+// circle-dashed) ERPNext's own Getting Started onboarding uses for step status,
+// inlined so the outline reads as first-party rather than a bespoke widget.
+const TS_ICONS = {
+	check: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg>`,
+	dot_dashed: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"></path><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"></path><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"></path><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"></path><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"></path><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"></path><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"></path><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"></path><circle cx="12" cy="12" r="1"></circle></svg>`,
+	dashed: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.182a10 10 0 0 1 3.8 0"></path><path d="M13.9 21.818a10 10 0 0 1-3.8 0"></path><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7"></path><path d="M2.182 13.9a10 10 0 0 1 0-3.8"></path><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69"></path><path d="M21.818 10.1a10 10 0 0 1 0 3.8"></path><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69"></path><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7"></path></svg>`,
+};
 
 frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
@@ -74,7 +84,7 @@ class TaxJarSetup {
 		this.$milestones.html(SETUP_STEPS.map((s, i) => `
 			<li class="ts-milestone" data-i="${i}">
 				<button class="ts-node-btn">
-					<span class="ts-node"><span class="ts-node-mark">${i + 1}</span></span>
+					<span class="ts-node"></span>
 					<span class="ts-node-label">${frappe.utils.escape_html(s.label)}</span>
 				</button>
 			</li>
@@ -140,14 +150,14 @@ class TaxJarSetup {
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		this.$root.find(".ts-next").text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"));
 
-		// Outline: pure navigation — done (filled ✓), active (ringed, current), upcoming (outline).
+		// Outline: pure navigation — done (check), active (dot-dashed, current), upcoming (dashed).
 		this.$milestones.find(".ts-milestone").each((i, el) => {
 			const $el = $(el);
 			const done = i < this.cur;
 			const active = i === this.cur;
 			$el.toggleClass("done", done).toggleClass("active", active).toggleClass("upcoming", !done && !active);
 			$el.find(".ts-node-btn").prop("disabled", i > this.reached);
-			$el.find(".ts-node-mark").html(done ? "✓" : String(i + 1));
+			$el.find(".ts-node").html(done ? TS_ICONS.check : active ? TS_ICONS.dot_dashed : TS_ICONS.dashed);
 		});
 
 		this.$body.empty();
