@@ -92,10 +92,23 @@
 }
 .taxjar-setup .ts-title { margin: 8px 0 0; font-size: 24px; font-weight: 700; }
 .taxjar-setup .ts-sub { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
-.taxjar-setup .ts-progress { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
-.taxjar-setup .ts-track { flex: 1; height: 5px; border-radius: 100px; background: var(--control-bg); overflow: hidden; }
-.taxjar-setup .ts-track i { display: block; height: 100%; background: var(--text-color); border-radius: 100px; transition: width 0.3s ease; }
-.taxjar-setup .ts-pct { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+/* Progress bar — internals mirrored from frappe-ui's <Progress> component
+   (ui.frappe.io/docs/components/progress): a `space-y-[10px]` stack of a
+   label/hint row then the bar; size="sm" (h-[2px]) track with `rounded-xl`,
+   `bg-surface-gray-2` track / `bg-surface-gray-7` fill — mapped here onto our
+   own desk theme tokens since this page has no Tailwind runtime. */
+.taxjar-setup .ts-progress { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+.taxjar-setup .ts-progress-row { display: flex; align-items: baseline; justify-content: space-between; }
+.taxjar-setup .ts-progress-hint {
+	align-self: flex-end;
+	font-size: 13px; font-weight: 500;
+	color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.taxjar-setup .ts-progress-track {
+	position: relative; overflow: hidden; border-radius: 12px;
+	height: 2px; background: var(--control-bg);
+}
+.taxjar-setup .ts-progress-fill { height: 100%; background: var(--text-color); transition: width 0.3s ease; }
 
 .taxjar-setup .ts-body { padding: 6px 0 28px; flex: 1; }
 .taxjar-setup .ts-foot {

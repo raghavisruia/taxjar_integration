@@ -62,7 +62,15 @@ class TaxJarSetup {
 						<div class="ts-kick"></div>
 						<h2 class="ts-title"></h2>
 						<p class="ts-sub"></p>
-						<div class="ts-progress"><div class="ts-track"><i></i></div><span class="ts-pct"></span></div>
+						<div class="ts-progress">
+							<div class="ts-progress-row">
+								<span></span>
+								<span class="ts-progress-hint"></span>
+							</div>
+							<div class="ts-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+								<div class="ts-progress-fill"></div>
+							</div>
+						</div>
 					</header>
 					<div class="ts-body"></div>
 					<footer class="ts-foot">
@@ -144,8 +152,9 @@ class TaxJarSetup {
 		this.$root.find(".ts-kick").text(__("Step {0} of {1}", [this.cur + 1, SETUP_STEPS.length]));
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-sub").text(step.sub);
-		this.$root.find(".ts-track i").css("width", step.pct + "%");
-		this.$root.find(".ts-pct").text(step.pct + "%");
+		this.$root.find(".ts-progress-fill").css("width", step.pct + "%");
+		this.$root.find(".ts-progress-track").attr("aria-valuenow", step.pct);
+		this.$root.find(".ts-progress-hint").text(step.pct + "%");
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		this.$root.find(".ts-next").text(this.cur === SETUP_STEPS.length - 1 ? __("Finish & activate") : __("Save & continue"));
