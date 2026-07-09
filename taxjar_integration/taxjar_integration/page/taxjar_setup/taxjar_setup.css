@@ -1,47 +1,56 @@
 /* TaxJar guided setup — desk page shell.
-   Layout: a milestone outline (pure navigation, connected nodes using the same
-   status icons as ERPNext's own Getting Started onboarding) on the left, and a
-   single-step panel on the right whose entire content swaps on Save & continue.
+   Layout: a horizontal milestone rail (pure navigation, connected nodes using the
+   same status icons as ERPNext's own Getting Started onboarding) across the top,
+   and a single-step panel below whose entire content swaps on Save & continue.
    The panel is plain page flow, not a card/box — it should read as a first-party
    desk page, not a widget embedded in one. Uses Frappe desk CSS variables so it
-   follows the active (light/dark) theme; the accent is the theme's ink
-   (--text-color), not a colour. */
+   follows the active (light/dark) theme; ink (--text-color) is the structural
+   accent, with green reserved for the one semantic signal — a completed step. */
 
 .taxjar-setup {
-	display: grid;
-	grid-template-columns: 240px 1fr;
-	column-gap: 36px;
-	max-width: 1040px;
+	max-width: 880px;
 	margin: 8px auto 40px;
-	align-items: start;
 }
-@media (max-width: 760px) { .taxjar-setup { grid-template-columns: 1fr; } }
 
-/* ── outline: connected milestone nodes, navigation only ── */
+/* ── outline: connected milestone nodes across the top, navigation only ── */
 .taxjar-setup .ts-outline {
 	position: sticky;
-	top: 68px;
-	padding: 30px 0 20px;
+	top: 48px;
+	z-index: 3;
+	background: var(--card-bg);
+	padding: 22px 0 18px;
+	border-bottom: 1px solid var(--border-color);
+	margin-bottom: 28px;
+	overflow-x: auto;
 }
-@media (max-width: 760px) { .taxjar-setup .ts-outline { position: static; padding: 16px 0; } }
 
-.taxjar-setup .ts-milestones { list-style: none; margin: 0; padding: 0; }
-.taxjar-setup .ts-milestone { position: relative; padding-bottom: 30px; }
-.taxjar-setup .ts-milestone:last-child { padding-bottom: 0; }
-/* connecting line threading every node, top to bottom */
-.taxjar-setup .ts-milestone::before {
+.taxjar-setup .ts-milestones {
+	list-style: none; margin: 0; padding: 0;
+	display: flex; align-items: flex-start;
+	min-width: 620px;
+}
+.taxjar-setup .ts-milestone {
+	position: relative;
+	flex: 1 1 0;
+	display: flex; flex-direction: column; align-items: center;
+	text-align: center;
+	padding: 0 4px;
+}
+/* connecting line threading every node, left to right — drawn by the node it
+   leaves from, reaching exactly to the centre of the next node. */
+.taxjar-setup .ts-milestone:not(:last-child)::before {
 	content: "";
 	position: absolute;
-	left: 13px; top: 30px; bottom: -4px;
-	width: 2px;
+	top: 13px; left: 50%; width: 100%;
+	height: 2px;
 	background: var(--border-color);
+	z-index: 0;
 }
-.taxjar-setup .ts-milestone:last-child::before { display: none; }
-.taxjar-setup .ts-milestone.done::before { background: var(--text-color); }
+.taxjar-setup .ts-milestone.done:not(:last-child)::before { background: var(--text-color); }
 
 .taxjar-setup .ts-node-btn {
-	display: flex; align-items: center; gap: 14px;
-	width: 100%; border: 0; background: none; padding: 0; cursor: pointer; text-align: left;
+	display: flex; flex-direction: column; align-items: center; gap: 8px;
+	border: 0; background: none; padding: 0; cursor: pointer;
 }
 .taxjar-setup .ts-node-btn:disabled { cursor: default; }
 
@@ -57,9 +66,10 @@
 }
 .taxjar-setup .ts-node svg { width: 24px; height: 24px; }
 
-.taxjar-setup .ts-node-label { font-size: 15.5px; line-height: 1.3; color: var(--text-muted); }
+.taxjar-setup .ts-node-label { font-size: 13.5px; line-height: 1.3; color: var(--text-muted); max-width: 120px; }
 
-.taxjar-setup .ts-milestone.done .ts-node { color: var(--text-color); }
+/* Done is the one place colour carries meaning — everything else stays ink/grey. */
+.taxjar-setup .ts-milestone.done .ts-node { color: var(--green-600, #30a66d); }
 .taxjar-setup .ts-milestone.done .ts-node-label { color: var(--text-color); }
 
 .taxjar-setup .ts-milestone.active .ts-node { color: var(--text-color); }
@@ -72,10 +82,10 @@
 .taxjar-setup .ts-panel {
 	display: flex;
 	flex-direction: column;
-	min-height: 480px;
+	min-height: 420px;
 }
 
-.taxjar-setup .ts-head { padding: 30px 0 20px; }
+.taxjar-setup .ts-head { padding: 0 0 20px; }
 .taxjar-setup .ts-kick {
 	font-size: 11px; font-weight: 700; letter-spacing: 0.09em;
 	text-transform: uppercase; color: var(--text-muted);

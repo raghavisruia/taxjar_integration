@@ -1,12 +1,12 @@
 // TaxJar guided setup — desk page shell (Phase 1).
 //
-// Layout: a milestone outline on the left (connected nodes, navigation only) and a
-// single-step panel on the right that swaps its entire content on Save & continue —
-// only one step is ever shown at a time, rendered as plain page flow (no card/box
-// around it) rather than a widget embedded in the desk. Phase 1 wires the shell to
-// real server state via get_setup_state, plus the Review step's finish action. The
-// per-step native controls (Connect / Accounts / Features / Nexus) are wired in
-// later phases — see docs/guided-setup-plan.md.
+// Layout: a horizontal milestone rail across the top (connected nodes, navigation
+// only) and a single-step panel below that swaps its entire content on Save &
+// continue — only one step is ever shown at a time, rendered as plain page flow
+// (no card/box around it) rather than a widget embedded in the desk. Phase 1 wires
+// the shell to real server state via get_setup_state, plus the Review step's
+// finish action. The per-step native controls (Connect / Accounts / Features /
+// Nexus) are wired in later phases — see docs/guided-setup-plan.md.
 
 // Milestone status icons — same Lucide set (circle-check / circle-dot-dashed /
 // circle-dashed) ERPNext's own Getting Started onboarding uses for step status,
