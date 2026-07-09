@@ -8,6 +8,7 @@
  "field_order": [
   "section_break_rixa",
   "taxjar_enabled",
+  "setup_complete",
   "configuration",
   "company_config",
   "section_general",
@@ -35,6 +36,15 @@
    "fieldname": "taxjar_enabled",
    "fieldtype": "Check",
    "label": "Enable TaxJar"
+  },
+  {
+   "default": "0",
+   "description": "Set when the guided setup flow is completed. Hides the setup banner on the form.",
+   "fieldname": "setup_complete",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Setup Complete",
+   "read_only": 1
   },
   {
    "fieldname": "section_general",

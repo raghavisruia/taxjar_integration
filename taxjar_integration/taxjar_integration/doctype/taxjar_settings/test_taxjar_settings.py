@@ -4429,3 +4429,132 @@ class TestExemptionReasonInTuple(UnitTestCase):
 		is_exempt, reason = check_sales_tax_exemption(doc, config)
 		self.assertTrue(is_exempt)
 		self.assertIn("Document", reason)
+
+
+# ── Phase 1: Guided Setup page (get_setup_state / finish_setup) ───────────────
+
+_SETUP_MODULE = "taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup"
+
+
+class TestGuidedSetupState(UnitTestCase):
+	def _settings(self):
+		s = MagicMock()
+		s.api_mode = "Sandbox"
+		s.taxjar_enabled = 1
+		s.enable_taxjar_logging = 0
+		s.log_retention_days = 90
+		s.setup_complete = 0
+		s.company_config = [frappe._dict(
+			company="Frappe Tech", tax_account_head="Sales Tax - FT",
+			shipping_account_head="Freight - FT",
+			taxjar_calculate_tax=1, taxjar_create_transactions=0,
+		)]
+		s.table_hvjw = [frappe._dict(
+			company="Frappe Tech", name="cred-1", sandbox_token="enc", live_token="",
+		)]
+		s.nexus = [frappe._dict(
+			company="Frappe Tech", region="California", region_code="CA",
+			country="United States", country_code="US",
+		)]
+		return s
+
+	def test_state_shape_and_token_masking(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".get_decrypted_password", return_value="tok-abcd1234"):
+			state = get_setup_state()
+
+		self.assertEqual(state["api_mode"], "Sandbox")
+		self.assertTrue(state["taxjar_enabled"])
+		self.assertFalse(state["setup_complete"])
+		co = state["companies"][0]
+		self.assertEqual(co["company"], "Frappe Tech")
+		self.assertTrue(co["calculate"])
+		self.assertFalse(co["file"])
+		# Only the last 4 chars are ever exposed — never the full token.
+		self.assertEqual(co["token_last4"], "1234")
+		self.assertEqual(len(state["nexus_by_company"]["Frappe Tech"]), 1)
+
+	def test_reads_sandbox_token_in_sandbox_mode(self):
+		"""In Live mode the live_token is read; sandbox mode reads sandbox_token."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		s.api_mode = "Live"
+		s.table_hvjw = [frappe._dict(company="Frappe Tech", name="cred-1",
+			sandbox_token="", live_token="enc")]
+		captured = {}
+		def fake_decrypt(dt, name, field, raise_exception=False):
+			captured["field"] = field
+			return "live-wxyz5678"
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".get_decrypted_password", side_effect=fake_decrypt):
+			state = get_setup_state()
+		self.assertEqual(captured["field"], "live_token")
+		self.assertEqual(state["companies"][0]["token_last4"], "5678")
+
+	def test_token_last4_none_when_no_credential(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		s.table_hvjw = []
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			state = get_setup_state()
+		self.assertIsNone(state["companies"][0]["token_last4"])
+
+	def test_requires_read_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, get_setup_state)
+
+
+class TestGuidedSetupFinish(UnitTestCase):
+	def test_finish_sets_complete_and_saves(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import finish_setup
+		doc = MagicMock()
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=doc):
+			res = finish_setup()
+		self.assertEqual(doc.setup_complete, 1)
+		doc.save.assert_called_once()
+		self.assertTrue(res["ok"])
+
+	def test_finish_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import finish_setup
+		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, finish_setup)
+
+
+class TestGuidedSetupSchemaAndEntry(UnitTestCase):
+	def test_setup_complete_field_exists(self):
+		field = frappe.get_meta("TaxJar Settings").get_field("setup_complete")
+		self.assertIsNotNone(field)
+		self.assertEqual(field.fieldtype, "Check")
+
+	def test_page_json_declares_roles(self):
+		import json, os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.json"))
+		data = json.load(open(path))
+		self.assertEqual(data.get("standard"), "Yes")
+		roles = {r["role"] for r in data.get("roles", [])}
+		self.assertIn("System Manager", roles)
+		self.assertIn("Accounts Manager", roles)
+
+	def test_settings_js_has_setup_intro(self):
+		import os
+		js = open(os.path.join(os.path.dirname(__file__), "taxjar_settings.js")).read()
+		self.assertIn("set_intro", js)
+		self.assertIn("/app/taxjar-setup", js)
+
+	def test_setup_page_js_wires_steps_and_apis(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"))
+		js = open(path).read()
+		self.assertIn("get_setup_state", js)
+		self.assertIn("finish_setup", js)
+		for key in ("welcome", "connect", "accounts", "features", "nexus", "review"):
+			self.assertIn(key, js)

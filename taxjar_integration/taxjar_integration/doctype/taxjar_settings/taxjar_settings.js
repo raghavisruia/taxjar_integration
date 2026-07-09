@@ -115,6 +115,24 @@ function _render_nexus_html(frm) {
 	wrapper.html(html);
 }
 
+function _set_setup_intro(frm) {
+	// Guided-setup banner: shown until setup is completed, linking into the wizard.
+	// Manual editing of the form below stays fully available either way.
+	if (frm.doc.setup_complete) {
+		frm.set_intro(
+			__("TaxJar is set up.") +
+			` <a href="/app/taxjar-setup">${__("Re-run guided setup")}</a>`,
+			"green"
+		);
+		return;
+	}
+	frm.set_intro(
+		__("Finish setting up TaxJar — connect, map accounts and choose where you collect tax.") +
+		` <a href="/app/taxjar-setup">${__("Open guided setup")} →</a>`,
+		"blue"
+	);
+}
+
 const API_MODE_DESCRIPTIONS = {
 	Sandbox: 'Requests & response payloads are validated. Tax rates might be stale and no transactions are recorded. API calls does not consume plan quota.',
 	Live: 'Sales tax calculations based on nexus, transactions are recorded for reporting and auto-filing. API calls consume plan quota.',
@@ -128,6 +146,7 @@ function _set_api_mode_description(frm) {
 
 frappe.ui.form.on('TaxJar Settings', {
 	refresh(frm) {
+		_set_setup_intro(frm);
 		_render_nexus_html(frm);
 		_set_api_mode_description(frm);
 

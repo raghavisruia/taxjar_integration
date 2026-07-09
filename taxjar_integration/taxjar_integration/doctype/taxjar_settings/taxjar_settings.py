@@ -46,6 +46,7 @@ class TaxJarSettings(Document):
 		enable_taxjar_logging: DF.Check
 		log_retention_days: DF.Int
 		nexus: DF.Table[TaxJarNexus]
+		setup_complete: DF.Check
 		table_hvjw: DF.Table[TaxJarAPICredential]
 		taxjar_enabled: DF.Check
 	# end: auto-generated types

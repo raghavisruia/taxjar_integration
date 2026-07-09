@@ -1,0 +1,95 @@
+/* TaxJar guided setup — monochrome shell.
+   Uses Frappe desk CSS variables so it follows the active (light/dark) theme.
+   The accent is the theme's ink (--text-color), not a colour. */
+
+.taxjar-setup {
+	display: grid;
+	grid-template-columns: 240px 1fr;
+	max-width: 980px;
+	margin: 8px auto 40px;
+	background: var(--card-bg);
+	border: 1px solid var(--border-color);
+	border-radius: var(--border-radius-lg);
+	overflow: hidden;
+	min-height: 560px;
+}
+@media (max-width: 720px) { .taxjar-setup { grid-template-columns: 1fr; } }
+
+/* rail */
+.taxjar-setup .ts-rail {
+	border-right: 1px solid var(--border-color);
+	background: var(--subtle-fg, var(--fg-color));
+	padding: 16px 12px;
+}
+@media (max-width: 720px) {
+	.taxjar-setup .ts-rail { border-right: 0; border-bottom: 1px solid var(--border-color); }
+}
+.taxjar-setup .ts-steps { display: flex; flex-direction: column; gap: 2px; }
+.taxjar-setup .ts-step {
+	display: flex; align-items: center; gap: 10px;
+	width: 100%; text-align: left; border: 0; background: none; cursor: pointer;
+	padding: 9px 10px; border-radius: var(--border-radius-md);
+	color: var(--text-muted); font-size: var(--text-sm);
+}
+.taxjar-setup .ts-step:hover:not(:disabled) { background: var(--fg-hover-color, var(--control-bg)); }
+.taxjar-setup .ts-step:disabled { opacity: 0.5; cursor: default; }
+.taxjar-setup .ts-step.active { color: var(--text-color); font-weight: 600; background: var(--control-bg); }
+.taxjar-setup .ts-step.done { color: var(--text-color); }
+.taxjar-setup .ts-dot {
+	width: 22px; height: 22px; flex: none; border-radius: 50%;
+	display: grid; place-items: center; font-size: 11px; font-weight: 700;
+	border: 1.5px solid var(--border-color); background: var(--card-bg);
+	color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.taxjar-setup .ts-step.done .ts-dot,
+.taxjar-setup .ts-step.active .ts-dot {
+	background: var(--text-color); border-color: var(--text-color); color: var(--card-bg);
+}
+.taxjar-setup .ts-step.active .ts-dot { background: var(--card-bg); color: var(--text-color); }
+
+/* panel */
+.taxjar-setup .ts-panel { display: flex; flex-direction: column; min-width: 0; }
+.taxjar-setup .ts-head { padding: 22px 26px 16px; border-bottom: 1px solid var(--border-color); }
+.taxjar-setup .ts-kick {
+	font-size: 11px; font-weight: 700; letter-spacing: 0.09em;
+	text-transform: uppercase; color: var(--text-muted);
+}
+.taxjar-setup .ts-title { margin: 6px 0 0; font-size: 20px; font-weight: 700; }
+.taxjar-setup .ts-sub { margin: 6px 0 0; color: var(--text-muted); font-size: var(--text-md); max-width: 56ch; }
+.taxjar-setup .ts-progress { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.taxjar-setup .ts-track { flex: 1; height: 6px; border-radius: 100px; background: var(--control-bg); overflow: hidden; }
+.taxjar-setup .ts-track i { display: block; height: 100%; background: var(--text-color); border-radius: 100px; transition: width 0.3s ease; }
+.taxjar-setup .ts-pct { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.taxjar-setup .ts-body { padding: 24px 26px; flex: 1; }
+.taxjar-setup .ts-foot {
+	display: flex; align-items: center; gap: 10px;
+	padding: 14px 26px; border-top: 1px solid var(--border-color); background: var(--subtle-fg, var(--fg-color));
+}
+.taxjar-setup .ts-grow { flex: 1; }
+.taxjar-setup .ts-next.btn-primary { background: var(--text-color); border-color: var(--text-color); color: var(--card-bg); }
+
+/* step bodies */
+.taxjar-setup .ts-lede { margin: 0 0 14px; color: var(--text-color); }
+.taxjar-setup .ts-check { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.taxjar-setup .ts-check li {
+	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
+	padding: 12px 14px; font-size: var(--text-sm); color: var(--text-muted);
+}
+.taxjar-setup .ts-check li b { color: var(--text-color); }
+.taxjar-setup .ts-card {
+	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
+	padding: 6px 14px; margin-bottom: 14px;
+}
+.taxjar-setup .ts-kv {
+	display: flex; justify-content: space-between; gap: 12px;
+	padding: 9px 0; font-size: var(--text-sm); border-bottom: 1px solid var(--border-color);
+}
+.taxjar-setup .ts-kv:last-child { border-bottom: 0; }
+.taxjar-setup .ts-kv span:first-child { color: var(--text-muted); }
+.taxjar-setup .ts-kv span:last-child { font-weight: 600; }
+.taxjar-setup .ts-placeholder,
+.taxjar-setup .ts-loading {
+	border: 1px dashed var(--border-color); border-radius: var(--border-radius-md);
+	padding: 40px; text-align: center; font-size: var(--text-sm);
+}
