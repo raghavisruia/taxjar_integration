@@ -153,7 +153,6 @@ class TaxJarSetup {
 				<li><b>${__("Which companies collect sales tax")}</b> — ${__("one token & account mapping per company.")}</li>
 				<li><b>${__("Your tax & shipping GL accounts")}</b> — ${__("where calculated tax and freight are posted.")}</li>
 			</ul>
-			<p class="text-muted small">${__("Nothing is saved to your live settings until you finish.")}</p>
 		`);
 	}
 
@@ -176,7 +175,6 @@ class TaxJarSetup {
 				<div class="ts-kv"><span>${__("API mode")}</span><span>${frappe.utils.escape_html(s.api_mode || "—")}</span></div>
 			</div>
 			<div class="ts-card">${rows}</div>
-			<p class="text-muted small">${__("Activating writes this configuration to TaxJar Settings.")}</p>
 		`);
 	}
 
