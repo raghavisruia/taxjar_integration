@@ -118,6 +118,14 @@
 .taxjar-setup .ts-kv:last-child { border-bottom: 0; }
 .taxjar-setup .ts-kv span:first-child { color: var(--text-muted); }
 .taxjar-setup .ts-kv span:last-child { font-weight: 600; }
+
+/* Review's Accounts card — company name and its account heads stack instead
+   of sitting side by side, so long values never fight the row's alignment. */
+.taxjar-setup .ts-accrow { padding: 10px 0; font-size: var(--text-sm); border-bottom: 1px solid var(--border-color); }
+.taxjar-setup .ts-accrow:last-child { border-bottom: 0; }
+.taxjar-setup .ts-acc-company { font-weight: 600; color: var(--text-color); }
+.taxjar-setup .ts-acc-detail { margin-top: 2px; color: var(--text-muted); }
+
 .taxjar-setup .ts-placeholder,
 .taxjar-setup .ts-loading {
 	border: 1px dashed var(--border-color); border-radius: var(--border-radius-md);
@@ -167,11 +175,9 @@
 	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
 	padding: 12px 14px;
 }
-.taxjar-setup .ts-togrow-master { margin-bottom: 20px; }
 .taxjar-setup .ts-togtext b { font-size: var(--text-md); }
 .taxjar-setup .ts-togtext p { margin: 2px 0 0; font-size: var(--text-sm); color: var(--text-muted); }
 .taxjar-setup .ts-cotog { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-.taxjar-setup .ts-featcards.locked { opacity: 0.55; pointer-events: none; }
 
 /* nexus */
 .taxjar-setup .ts-nexusaction { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }

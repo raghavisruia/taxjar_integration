@@ -449,29 +449,17 @@ class TaxJarSetup {
 	}
 
 	// ── Step 4: Features ────────────────────────────────────────────
+	// No master switch here — taxjar_enabled is managed on the TaxJar Settings
+	// doctype directly, not by this wizard. This step only ever touches the
+	// per-company Calculate/File flags.
 	_render_features() {
 		const s = this.state || {};
 		const companies = s.companies || [];
 
 		this.$body.html(`
-			<div class="ts-togrow ts-togrow-master">
-				<div class="ts-field-master"></div>
-				<div class="ts-togtext"><b>${__("Enable TaxJar")}</b>
-					<p>${__("Master switch. Off means TaxJar does nothing for any company — the toggles below are disabled.")}</p></div>
-			</div>
-			<div class="ts-featcards">
-				<p class="ts-sectionlabel">${__("Per company")}</p>
-				<div class="ts-cardgrid ts-feature-cards"></div>
-			</div>
+			<p class="ts-sectionlabel">${__("Per company")}</p>
+			<div class="ts-cardgrid ts-feature-cards"></div>
 		`);
-
-		this.controls.master = frappe.ui.form.make_control({
-			parent: this.$body.find(".ts-field-master"),
-			df: { fieldtype: "Check", fieldname: "taxjar_enabled" },
-			render_input: true,
-		});
-		this.controls.master.set_value(s.taxjar_enabled ? 1 : 0);
-		this.controls.master.$input.on("change", () => this._sync_master_lock());
 
 		this._featureCards = [];
 		if (!companies.length) {
@@ -481,8 +469,6 @@ class TaxJarSetup {
 		} else {
 			companies.forEach((c) => this._add_feature_card(c));
 		}
-
-		this._sync_master_lock();
 	}
 
 	_add_feature_card(c) {
@@ -515,23 +501,7 @@ class TaxJarSetup {
 		this._featureCards.push({ company: c.company, controls: { calc, file } });
 	}
 
-	_sync_master_lock() {
-		// Toggling df.read_only + refresh() here would be the natural approach, but
-		// Frappe's refresh_input() unconditionally re-applies the control's stored
-		// value on every refresh — for a Check control that means a checkbox the
-		// user just ticked can get silently reset back to its pre-click state the
-		// next time this runs. Flipping the native `disabled` attribute directly
-		// changes interactivity without ever touching the control's value/DOM sync.
-		const on = !!this.controls.master.get_value();
-		this.$body.find(".ts-featcards").toggleClass("locked", !on);
-		(this._featureCards || []).forEach((c) => {
-			c.controls.calc.$input.prop("disabled", !on);
-			c.controls.file.$input.prop("disabled", !on);
-		});
-	}
-
 	_save_features() {
-		const taxjar_enabled = this.controls.master.get_value() ? 1 : 0;
 		const flags = (this._featureCards || []).map((c) => ({
 			company: c.company,
 			calculate: c.controls.calc.get_value() ? 1 : 0,
@@ -539,7 +509,7 @@ class TaxJarSetup {
 		}));
 
 		const $next = this.$root.find(".ts-next").prop("disabled", true);
-		return this._call("save_features", { taxjar_enabled, flags })
+		return this._call("save_features", { flags })
 			.then(() => this._reload_state())
 			.then(() => true)
 			.catch(() => false)
@@ -550,22 +520,25 @@ class TaxJarSetup {
 	_render_nexus() {
 		const s = this.state || {};
 		const nexusByCompany = s.nexus_by_company || {};
-		const hasNexus = Object.keys(nexusByCompany).length > 0;
 
 		this.$body.html(`
 			<div class="ts-nexusaction">
 				<button class="btn btn-default ts-fetch">${__("Fetch from TaxJar")}</button>
-				<span class="ts-chip idle ts-fetchstatus">${hasNexus ? __("Fetched previously") : __("Not fetched yet")}</span>
+				<span class="ts-chip idle ts-fetchstatus">${__("Not fetched yet")}</span>
 			</div>
 			<div class="ts-nexusresult"></div>
 			<div class="ts-banner">
-				<b>${__("Read from TaxJar — never written back")}</b>
-				<p>${__("Nexus is fetched per company from its TaxJar account; this list only mirrors it. It refreshes automatically every night at midnight, and you can pull the latest any time with Update Nexus List on TaxJar Settings.")}</p>
+				<p>${__("Manage nexus in TaxJar — fetch on demand here for changes made there, or let it update automatically every night at midnight.")}</p>
 			</div>
 		`);
 
 		this._render_nexus_groups(nexusByCompany);
 		this.$body.find(".ts-fetch").on("click", () => this._fetch_nexus());
+
+		// Opening this step always pulls the latest — no need to remember to
+		// click Fetch just to see current nexus. The status chip above is
+		// overwritten immediately by _fetch_nexus()'s own in-progress state.
+		this._fetch_nexus();
 	}
 
 	_render_nexus_groups(nexusByCompany) {
@@ -613,9 +586,14 @@ class TaxJarSetup {
 		const nexusByCompany = s.nexus_by_company || {};
 		const totalNexus = Object.values(nexusByCompany).reduce((n, arr) => n + arr.length, 0);
 
+		// Company name and its accounts stack on their own lines — a company
+		// name and "Tax head · Shipping head" side by side wraps unevenly and
+		// never lines up cleanly in a two-column row.
 		const accountRows = companies.map((c) => `
-			<div class="ts-kv"><span>${frappe.utils.escape_html(c.company)}</span>
-				<span>${frappe.utils.escape_html(c.tax_account_head || "—")} · ${frappe.utils.escape_html(c.shipping_account_head || "—")}</span></div>
+			<div class="ts-accrow">
+				<div class="ts-acc-company">${frappe.utils.escape_html(c.company)}</div>
+				<div class="ts-acc-detail">${frappe.utils.escape_html(c.tax_account_head || "—")} · ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
+			</div>
 		`).join("") || `<div class="text-muted small">${__("No accounts configured yet.")}</div>`;
 
 		const featureRows = companies.map((c) => `
@@ -623,17 +601,21 @@ class TaxJarSetup {
 				<span>${c.calculate && c.file ? __("Calculate tax · File") : c.calculate ? __("Calculate tax") : c.file ? __("File") : __("Off")}</span></div>
 		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;
 
+		const mode = s.api_mode || "—";
+		const modeDisplay = mode === "Live"
+			? `<span class="indicator-pill green no-indicator-dot">${__("Live")}</span>`
+			: frappe.utils.escape_html(mode);
+
 		this.$body.html(`
 			<div class="ts-cardgrid">
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Connection")}</b></div>
 					<div class="ts-card-b" style="gap:0">
-						<div class="ts-kv"><span>${__("Mode")}</span><span>${frappe.utils.escape_html(s.api_mode || "—")}</span></div>
-						<div class="ts-kv"><span>${__("TaxJar")}</span><span>${s.taxjar_enabled ? __("Enabled") : __("Disabled")}</span></div>
+						<div class="ts-kv"><span>${__("Mode")}</span><span>${modeDisplay}</span></div>
 					</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Nexus")}</b></div>
 					<div class="ts-card-b" style="gap:0">
 						<div class="ts-kv"><span>${__("Regions")}</span><span>${__("{0} across {1} companies", [totalNexus, Object.keys(nexusByCompany).length])}</span></div>
-						<div class="ts-kv"><span>${__("Refresh")}</span><span>${__("Nightly")}</span></div>
+						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="indicator-pill green no-indicator-dot">${__("Daily at midnight")}</span></div>
 					</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Accounts")}</b></div>
 					<div class="ts-card-b" style="gap:0">${accountRows}</div></div>

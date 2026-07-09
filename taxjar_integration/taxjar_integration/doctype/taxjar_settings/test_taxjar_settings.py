@@ -4440,7 +4440,6 @@ class TestGuidedSetupState(UnitTestCase):
 	def _settings(self):
 		s = MagicMock()
 		s.api_mode = "Sandbox"
-		s.taxjar_enabled = 1
 		s.enable_taxjar_logging = 0
 		s.log_retention_days = 90
 		s.setup_complete = 0
@@ -4470,7 +4469,7 @@ class TestGuidedSetupState(UnitTestCase):
 			state = get_setup_state()
 
 		self.assertEqual(state["api_mode"], "Sandbox")
-		self.assertTrue(state["taxjar_enabled"])
+		self.assertNotIn("taxjar_enabled", state)  # managed on the doctype, not by this wizard
 		self.assertFalse(state["setup_complete"])
 
 		co = state["companies"][0]
@@ -4718,17 +4717,18 @@ class TestGuidedSetupSaveCompanyAccounts(UnitTestCase):
 
 
 class TestGuidedSetupSaveFeatures(UnitTestCase):
-	def test_sets_master_switch_and_per_company_flags(self):
+	def test_sets_per_company_flags(self):
+		"""The master switch (taxjar_enabled) is intentionally untouched here —
+		it's a TaxJar Settings form field, not managed by this wizard."""
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
 		cfg = frappe._dict(company="Frappe Tech", taxjar_calculate_tax=0, taxjar_create_transactions=0)
 		s = MagicMock()
 		s.company_config = [cfg]
 		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
 		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
-			res = save_features(taxjar_enabled=1, flags=[{"company": "Frappe Tech", "calculate": 1, "file": 0}])
+			res = save_features(flags=[{"company": "Frappe Tech", "calculate": 1, "file": 0}])
 
 		self.assertTrue(res["ok"])
-		self.assertEqual(s.taxjar_enabled, 1)
 		self.assertEqual(cfg.taxjar_calculate_tax, 1)
 		self.assertEqual(cfg.taxjar_create_transactions, 0)
 		s.save.assert_called_once()
@@ -4741,14 +4741,14 @@ class TestGuidedSetupSaveFeatures(UnitTestCase):
 		s.company_config = []
 		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
 		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
-			save_features(taxjar_enabled=1, flags=[{"company": "No Config Co", "calculate": 1, "file": 0}])
+			save_features(flags=[{"company": "No Config Co", "calculate": 1, "file": 0}])
 
 		s.append.assert_not_called()
 
 	def test_requires_write_permission(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
 		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
-			self.assertRaises(frappe.PermissionError, save_features, taxjar_enabled=1, flags=[])
+			self.assertRaises(frappe.PermissionError, save_features, flags=[])
 
 
 # ── Phase 2: remove_company ─────────────────────────────────────────────────
@@ -4912,13 +4912,14 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn('fieldtype: "Link", fieldname: "shipping_account_head", options: "Account"', js)
 		self.assertIn("company: cred.company", js)
 
-	def test_features_step_has_master_switch_and_lock_behaviour(self):
+	def test_features_step_has_no_master_switch(self):
+		"""taxjar_enabled is a TaxJar Settings form field, deliberately left alone
+		by this wizard — no control for it, no lock/grey behaviour tied to it."""
 		js = self._js()
-		self.assertIn('fieldtype: "Check", fieldname: "taxjar_enabled"', js)
+		self.assertNotIn('fieldname: "taxjar_enabled"', js)
+		self.assertNotIn("_sync_master_lock", js)
 		self.assertIn('fieldtype: "Check", fieldname: "calculate"', js)
 		self.assertIn('fieldtype: "Check", fieldname: "file"', js)
-		self.assertIn("_sync_master_lock", js)
-		self.assertIn("read_only", js)
 
 	def test_nexus_step_has_fetch_action_and_grouped_render(self):
 		js = self._js()
@@ -4958,14 +4959,27 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		js = self._js()
 		self.assertIn("placeholder: cred.token_last4", js)
 
-	def test_feature_lock_toggles_disabled_prop_not_read_only_refresh(self):
-		"""Regression guard: toggling df.read_only + refresh() on a Check control
-		can reset its value to the last set_value() call, silently discarding a
-		click the user just made — the lock must flip the native disabled
-		attribute directly instead."""
+	def test_nexus_step_auto_fetches_on_open(self):
+		"""Opening the Nexus step pulls fresh data immediately — no need to
+		remember to click Fetch just to see current nexus."""
 		js = self._js()
-		self.assertIn('c.controls.calc.$input.prop("disabled", !on)', js)
-		self.assertIn('c.controls.file.$input.prop("disabled", !on)', js)
+		render_nexus = js.split("_render_nexus(")[1].split("\n\t_render_nexus_groups(")[0]
+		self.assertIn("this._fetch_nexus()", render_nexus)
+
+	def test_review_has_no_taxjar_enabled_row_and_uses_green_badges(self):
+		"""The master switch isn't managed by this wizard, so Review must not
+		claim to report its state; Live mode and the nightly refresh cadence
+		get Frappe's native green indicator-pill instead of plain text."""
+		js = self._js()
+		self.assertNotIn('__("TaxJar")', js)
+		self.assertIn("indicator-pill green", js)
+		self.assertIn('__("Auto-Refresh")', js)
+		self.assertIn('__("Daily at midnight")', js)
+
+	def test_review_accounts_stack_company_and_detail_on_separate_lines(self):
+		js = self._js()
+		self.assertIn("ts-acc-company", js)
+		self.assertIn("ts-acc-detail", js)
 
 	def test_css_does_not_clip_link_dropdowns_and_caps_card_width(self):
 		import os

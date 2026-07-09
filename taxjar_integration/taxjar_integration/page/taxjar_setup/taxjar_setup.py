@@ -85,7 +85,6 @@ def get_setup_state():
 
 	return {
 		"api_mode": mode,
-		"taxjar_enabled": bool(settings.taxjar_enabled),
 		"enable_taxjar_logging": bool(settings.enable_taxjar_logging),
 		"log_retention_days": settings.log_retention_days,
 		"setup_complete": bool(settings.setup_complete),
@@ -203,17 +202,18 @@ def save_company_accounts(rows):
 
 
 @frappe.whitelist()
-def save_features(taxjar_enabled, flags=None):
-	"""Set the master switch and each company's Calculate/File flags. Flags for
-	a company without an existing company_config row are silently skipped —
-	the Accounts step must run first to create that row."""
+def save_features(flags=None):
+	"""Set each company's Calculate/File flags. Flags for a company without an
+	existing company_config row are silently skipped — the Accounts step must
+	run first to create that row.
+
+	The master switch (taxjar_enabled) is deliberately not handled here — it
+	stays a TaxJar Settings form field, managed outside the guided setup."""
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
 	flags = frappe.parse_json(flags) if isinstance(flags, str) else (flags or [])
 
 	settings = frappe.get_single(SETTINGS)
-	settings.taxjar_enabled = cint(taxjar_enabled)
-
 	existing = {cfg.company: cfg for cfg in (settings.company_config or [])}
 	for row in flags:
 		cfg = existing.get(row.get("company"))
