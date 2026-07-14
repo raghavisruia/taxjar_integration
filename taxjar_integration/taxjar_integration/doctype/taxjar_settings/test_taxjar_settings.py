@@ -3445,11 +3445,26 @@ class TestInstallSetup(UnitTestCase):
 
 	def _run_setup(self, *, categories_exist, features_enabled):
 		from taxjar_integration import install
+
+		# frappe.db.exists is patched on the real frappe.db object (not a local
+		# copy), so a blanket return_value would also answer every other
+		# frappe.db.exists() call sync_taxjar_workspace_sidebar() makes further
+		# down setup_taxjar() (e.g. checking the Workspace Sidebar leftover) -
+		# defeating delete_doc's ignore_missing safety net with a lie and turning
+		# it into a real DoesNotExistError. Only fake the one check this is
+		# actually testing; let everything else hit the real frappe.db.exists.
+		real_exists = frappe.db.exists
+
+		def fake_exists(dt, *args, **kwargs):
+			if dt == "Product Tax Category" and not args and not kwargs:
+				return categories_exist
+			return real_exists(dt, *args, **kwargs)
+
 		with patch("taxjar_integration.install.make_custom_fields") as mock_make, \
 		     patch("taxjar_integration.install.add_product_tax_categories") as mock_cats, \
 		     patch("taxjar_integration.install.add_permissions") as mock_perms, \
 		     patch("taxjar_integration.install.toggle_tax_category_fields") as mock_toggle, \
-		     patch("taxjar_integration.install.frappe.db.exists", return_value=categories_exist), \
+		     patch("taxjar_integration.install.frappe.db.exists", side_effect=fake_exists), \
 		     patch("taxjar_integration.install._is_taxjar_enabled", return_value=features_enabled):
 			install.setup_taxjar()
 		return mock_make, mock_cats, mock_perms, mock_toggle
@@ -3500,14 +3515,14 @@ class TestWorkspaceBranding(UnitTestCase):
 
 	def test_branded_title_and_label(self):
 		ws = self._workspace()
-		self.assertEqual(ws["title"], "Taxjar Integration")
-		self.assertEqual(ws["label"], "Taxjar Integration")
+		self.assertEqual(ws["title"], "TaxJar Integration")
+		self.assertEqual(ws["label"], "TaxJar Integration")
 
 	def test_name_drives_branded_route(self):
 		"""The desk sidebar shows the workspace name and the route is its slug, so the
 		name is branded and app_home points at the matching /app/taxjar-integration."""
 		ws = self._workspace()
-		self.assertEqual(ws["name"], "Taxjar Integration")
+		self.assertEqual(ws["name"], "TaxJar Integration")
 		self.assertEqual(frappe.get_hooks("app_home", app_name="taxjar_integration"), ["/app/taxjar-integration"])
 
 	def test_old_workspace_removed_by_patch(self):
@@ -3518,22 +3533,42 @@ class TestWorkspaceBranding(UnitTestCase):
 		with open(patches) as f:
 			self.assertIn("remove_old_taxjar_workspace", f.read())
 
+	def test_taxjar_integration_casing_fix_patches_registered(self):
+		"""The "Taxjar Integration" -> "TaxJar Integration" casing fix needs
+		post_model_sync cleanup of the old-named Workspace/Workspace Sidebar/Module
+		Def left behind once sync_all() creates the new-named records (Module Def
+		can't be renamed in place - ModuleDef.before_rename blocks non-custom
+		modules)."""
+		import os
+		patches = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
+		))
+		with open(patches) as f:
+			content = f.read()
+		self.assertIn("remove_old_taxjar_integration_workspace", content)
+		self.assertIn("remove_old_taxjar_integration_module", content)
+
 	def test_icon_is_valid_not_dollar_sign(self):
 		ws = self._workspace()
 		self.assertEqual(ws["icon"], "money-coins-1")
 
 	def test_sidebar_mirrors_card_groups(self):
-		"""The generated Workspace Sidebar mirrors the workspace card groups: each
-		card becomes a Section Break with its links as nested children, in the card
-		display (content) order."""
+		"""The generated sidebar mirrors the workspace card groups: each card
+		becomes a Section Break with its links as nested children, in the card
+		display (content) order.
+
+		The sidebar lives on ``Workspace.sidebar_items`` - a child table on the
+		workspace itself - not the standalone ``Workspace Sidebar`` doctype, which
+		was merged into ``Workspace`` earlier in v16 and is no longer read by
+		frappe.boot.get_sidebar_items."""
 		from taxjar_integration.install import sync_taxjar_workspace_sidebar
 
 		sync_taxjar_workspace_sidebar()
-		doc = frappe.get_doc("Workspace Sidebar", "Taxjar Integration")
+		doc = frappe.get_doc("Workspace", "TaxJar Integration")
 
 		structure = []
 		current = None
-		for item in doc.items:
+		for item in doc.sidebar_items:
 			if item.type == "Section Break":
 				current = {"group": item.label, "children": []}
 				structure.append(current)
@@ -3543,7 +3578,7 @@ class TestWorkspaceBranding(UnitTestCase):
 
 		self.assertEqual([g["group"] for g in structure], ["Setup", "Manage", "Sync"])
 		groups = {g["group"]: g["children"] for g in structure}
-		self.assertEqual(groups["Setup"], ["TaxJar Settings", "TaxJar API Log"])
+		self.assertEqual(groups["Setup"], ["taxjar-setup", "TaxJar Settings", "TaxJar API Log"])
 		self.assertEqual(groups["Manage"], ["taxjar-customers", "Product Tax Category"])
 		self.assertEqual(groups["Sync"], ["taxjar-transactions"])
 
@@ -3558,12 +3593,12 @@ class TestWorkspaceBranding(UnitTestCase):
 		self.assertEqual(
 			targets,
 			{"TaxJar Settings", "Product Tax Category", "taxjar-customers",
-			 "taxjar-transactions", "TaxJar API Log"},
+			 "taxjar-transactions", "TaxJar API Log", "taxjar-setup"},
 		)
 
 	def test_apps_screen_title_branded(self):
 		from taxjar_integration import hooks
-		self.assertEqual(hooks.add_to_apps_screen[0]["title"], "Taxjar Integration")
+		self.assertEqual(hooks.add_to_apps_screen[0]["title"], "TaxJar Integration")
 
 
 # ── Tax Breakdown: helpers ──────────────────────────────────────────────────
@@ -4717,21 +4752,77 @@ class TestGuidedSetupSaveCompanyAccounts(UnitTestCase):
 
 
 class TestGuidedSetupSaveFeatures(UnitTestCase):
+	def test_parameter_is_not_named_flags_or_ignore_permissions(self):
+		"""Regression guard: frappe.call() - used by every real /api/method/...
+		request, unlike bench execute or calling the function directly in
+		Python - unconditionally strips any kwarg literally named "flags" or
+		"ignore_permissions" via frappe.get_newargs() before dispatch, as a
+		security measure, regardless of whether the target function declares
+		that parameter. A whitelisted method using either name as its own
+		parameter silently receives None over real HTTP/JS calls while
+		appearing to work when tested via bench execute or direct calls in a
+		unit test - exactly the trap this function fell into."""
+		import inspect
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		params = set(inspect.signature(save_features).parameters)
+		self.assertNotIn("flags", params)
+		self.assertNotIn("ignore_permissions", params)
+
 	def test_sets_per_company_flags(self):
-		"""The master switch (taxjar_enabled) is intentionally untouched here —
-		it's a TaxJar Settings form field, not managed by this wizard."""
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
 		cfg = frappe._dict(company="Frappe Tech", taxjar_calculate_tax=0, taxjar_create_transactions=0)
 		s = MagicMock()
 		s.company_config = [cfg]
 		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
 		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
-			res = save_features(flags=[{"company": "Frappe Tech", "calculate": 1, "file": 0}])
+			res = save_features(company_flags=[{"company": "Frappe Tech", "calculate": 1, "file": 0}])
 
 		self.assertTrue(res["ok"])
 		self.assertEqual(cfg.taxjar_calculate_tax, 1)
 		self.assertEqual(cfg.taxjar_create_transactions, 0)
 		s.save.assert_called_once()
+
+	def test_enabling_calculate_auto_enables_master_switch(self):
+		"""Per-company flags do nothing while taxjar_enabled is off (see
+		_is_taxjar_enabled), which reads as "the toggle didn't save" even though the
+		child row was written correctly — flip the master switch the moment any
+		company ends up with a feature on."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		cfg = frappe._dict(company="Frappe Tech", taxjar_calculate_tax=0, taxjar_create_transactions=0)
+		s = MagicMock()
+		s.company_config = [cfg]
+		s.taxjar_enabled = 0
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_features(company_flags=[{"company": "Frappe Tech", "calculate": 1, "file": 0}])
+
+		self.assertEqual(s.taxjar_enabled, 1)
+
+	def test_enabling_file_alone_also_auto_enables_master_switch(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		cfg = frappe._dict(company="Frappe Tech", taxjar_calculate_tax=0, taxjar_create_transactions=0)
+		s = MagicMock()
+		s.company_config = [cfg]
+		s.taxjar_enabled = 0
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_features(company_flags=[{"company": "Frappe Tech", "calculate": 0, "file": 1}])
+
+		self.assertEqual(s.taxjar_enabled, 1)
+
+	def test_disabling_all_flags_does_not_disable_master_switch(self):
+		"""Turning individual company flags off does not imply the user wants
+		TaxJar off everywhere - that stays a deliberate action on the form."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
+		cfg = frappe._dict(company="Frappe Tech", taxjar_calculate_tax=1, taxjar_create_transactions=1)
+		s = MagicMock()
+		s.company_config = [cfg]
+		s.taxjar_enabled = 1
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			save_features(company_flags=[{"company": "Frappe Tech", "calculate": 0, "file": 0}])
+
+		self.assertEqual(s.taxjar_enabled, 1)
 
 	def test_skips_flags_for_company_without_existing_config_row(self):
 		"""A company with credentials but no accounts yet (Accounts step not run)
@@ -4741,14 +4832,14 @@ class TestGuidedSetupSaveFeatures(UnitTestCase):
 		s.company_config = []
 		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
 		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
-			save_features(flags=[{"company": "No Config Co", "calculate": 1, "file": 0}])
+			save_features(company_flags=[{"company": "No Config Co", "calculate": 1, "file": 0}])
 
 		s.append.assert_not_called()
 
 	def test_requires_write_permission(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_features
 		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
-			self.assertRaises(frappe.PermissionError, save_features, flags=[])
+			self.assertRaises(frappe.PermissionError, save_features, company_flags=[])
 
 
 # ── Phase 2: remove_company ─────────────────────────────────────────────────
@@ -4892,6 +4983,17 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		               "save_features", "fetch_nexus"):
 			self.assertIn(method, js)
 
+	def test_save_features_payload_key_is_not_flags(self):
+		"""Regression guard for the save_features(flags=...) trap (see
+		test_parameter_is_not_named_flags_or_ignore_permissions): the payload
+		key sent to the server must match the server's actual parameter name,
+		company_flags - "flags" is silently stripped by frappe.call() on every
+		real request, so this has to stay in lockstep on both ends."""
+		js = self._js()
+		save_features_call = js.split('_save_features()')[1].split("\n\t}")[0]
+		self.assertIn("company_flags", save_features_call)
+		self.assertIn('this._call("save_features", { company_flags })', save_features_call)
+
 	def test_connect_step_uses_native_select_link_password_controls(self):
 		js = self._js()
 		self.assertIn('fieldtype: "Select", fieldname: "api_mode"', js)
@@ -4900,6 +5002,56 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		# Continue is gated on at least one successful test, not just field presence.
 		self.assertIn("_sync_connect_gate", js)
 		self.assertIn("tested", js)
+
+	def test_connect_step_has_no_vestigial_empty_fieldnote(self):
+		"""A leftover <p class="ts-fieldnote">{{ " " }}</p> (a translated single
+		space, no real content) between API Mode and the API Token label added
+		its own margin on top of the field's and the label's, compounding into
+		an oversized, unintentional-looking gap."""
+		js = self._js()
+		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
+		self.assertNotIn("ts-fieldnote", render_connect)
+
+	def test_connect_step_has_api_log_toggle_and_retention(self):
+		"""The Connect step previously had no way to enable/disable API Logs,
+		even though save_connection/get_setup_state already supported
+		enable_taxjar_logging and log_retention_days end to end."""
+		js = self._js()
+		self.assertIn('fieldtype: "Check", fieldname: "enable_taxjar_logging"', js)
+		self.assertIn('fieldtype: "Int", fieldname: "log_retention_days"', js)
+		# Retention only means anything once logging is on.
+		self.assertIn("syncRetentionVisibility", js)
+
+	def test_retention_field_visible_on_initial_load_when_logging_already_on(self):
+		"""enableLogging.set_value() resolves asynchronously (frappe.run_serially),
+		so calling syncRetentionVisibility() (which reads get_value()) right after
+		it could still see the pre-set value - the retention field only ever
+		appeared on a real toggle (a genuine click, synchronous), never on initial
+		load with logging already enabled from a previous session. The initial
+		visibility must be driven by the already-known state value instead."""
+		js = self._js()
+		render_connect = js.split("_render_connect() {")[1].split("\n\t_add_credential_card")[0]
+		self.assertIn("$retentionField.toggle(!!s.enable_taxjar_logging);", render_connect)
+		# The initial toggle must not be the same call used for later, real
+		# toggle events - that call is fine to read get_value() from since it's
+		# driven by a synchronous DOM change event.
+		self.assertNotIn("syncRetentionVisibility();\n", render_connect)
+
+	def test_save_connect_sends_logging_fields(self):
+		js = self._js()
+		save_connect = js.split("_save_connect() {")[1].split("\n\t}")[0]
+		self.assertIn("enable_taxjar_logging", save_connect)
+		self.assertIn("log_retention_days", save_connect)
+
+	def test_review_shows_api_log_status(self):
+		"""Two separate pills - "Enabled" and "N day(s) retention" - not one
+		combined "On · retain Nd" string."""
+		js = self._js()
+		self.assertIn('__("API Logs")', js)
+		self.assertIn('__("Enabled")', js)
+		self.assertIn(
+			'__("{0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])', js
+		)
 
 	def test_gated_continue_stays_clickable_and_explains_itself(self):
 		"""A native `disabled` button eats clicks silently — Connect's gate must
@@ -4916,6 +5068,20 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		on_next = js.split("_on_next() {")[1].split("\n\t}\n")[0]
 		self.assertIn("this._nextGated", on_next)
 		self.assertIn("frappe.show_alert", on_next)
+
+	def test_connect_gate_reads_tracked_company_not_control_mid_flight(self):
+		"""Regression guard: _sync_connect_gate() runs synchronously right after
+		every card is added, including a restored card's companyControl.set_value()
+		- which, like the mode label and retention-visibility bugs, resolves
+		asynchronously. Reading company.get_value() (a read-only control at that
+		point) right here could still see the pre-set value and wrongly gate
+		Continue on an already-saved, already-tested credential. c.company (kept
+		in sync directly on the entry, not re-derived from the control) must be
+		used instead."""
+		js = self._js()
+		gate = js.split("_sync_connect_gate() {")[1].split("\n\t}\n")[0]
+		self.assertIn("c.tested && c.company", gate)
+		self.assertNotIn("c.controls.company.get_value()", gate)
 
 	def test_test_connection_button_is_not_plain_default(self):
 		"""Visually elevated above a plain .btn-default so it reads as the
@@ -4950,6 +5116,68 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		js = self._js()
 		self.assertIn("_fetch_nexus", js)
 		self.assertIn("_render_nexus_groups", js)
+
+	def test_nexus_note_uses_framework_alert_warning_not_bespoke_banner(self):
+		"""A locally-invented .ts-banner box (custom border/background) reused
+		the framework's own .alert.alert-warning instead - the same themed,
+		light/dark-aware component used elsewhere in the desk (e.g. the
+		doctype permissions "customized" banner), rather than reinventing a
+		yellow box with hand-picked colors."""
+		js = self._js()
+		self.assertIn('class="alert alert-warning ts-nexusnote" role="alert"', js)
+		self.assertNotIn("ts-banner", js)
+
+	def test_token_label_reads_tracked_mode_not_control_mid_flight(self):
+		"""this.controls.mode.set_value() resolves asynchronously (frappe.run_serially),
+		so reading get_value() on it synchronously right after - as the token label
+		used to - could still see the pre-set value and show "Sandbox token" even in
+		Live mode. The label must read a plain instance flag set directly from state
+		instead."""
+		js = self._js()
+		self.assertIn("this._modeIsLive = (s.api_mode || \"Sandbox\") === \"Live\";", js)
+		self.assertIn('label: this._modeIsLive ? __("Live token") : __("Sandbox token")', js)
+		self.assertNotIn('label: this.controls.mode.get_value() === "Live"', js)
+		# _on_mode_change is a real change event, so it's safe to read the control
+		# there - but it must also keep _modeIsLive in sync for any card added later.
+		on_mode_change = js.split("_on_mode_change() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this._modeIsLive = live;", on_mode_change)
+
+	def test_credential_card_starts_saved_not_not_tested_when_already_connected(self):
+		"""Re-running the guided setup for a company with a stored token must not
+		visually demand a re-test of a connection nothing has changed about - and
+		reads that state with the exact same "Success" chip a fresh test
+		produces, not a separate "Saved" wording that reads as less certain and
+		invites re-testing anyway."""
+		js = self._js()
+		self.assertIn("const alreadySaved = !!cred.token_last4;", js)
+		self.assertIn('tested: alreadySaved', js)
+		self.assertIn('alreadySaved ? `<span class="ts-chip-dot"></span> ${__("Success")}` : __("Not tested")', js)
+
+	def test_restoring_existing_company_does_not_fire_onchange_reset(self):
+		"""Regression guard: frappe's set_value() invokes df.onchange itself as
+		part of setting the value, not only on real user input. Populating an
+		already-saved card's Company field with its existing value (so the
+		field isn't blank) therefore fired the "company changed" reset and
+		immediately wiped the "Success" chip _add_credential_card had just set,
+		straight back to "Not tested" - the exact bug reported. A guard must
+		skip that reset exactly once, for the initial programmatic restore."""
+		js = self._js()
+		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t}\n\n\t_remove_credential_card")[0]
+		self.assertIn("let restoringInitialCompany = !!cred.company;", add_card)
+		onchange = add_card.split("companyControl.df.onchange = () => {")[1].split("};")[0]
+		self.assertIn("if (restoringInitialCompany)", onchange)
+		self.assertIn("restoringInitialCompany = false;", onchange)
+		self.assertIn("return;", onchange)
+
+	def test_editing_token_forces_a_fresh_test(self):
+		"""The converse of the above: once the user actually types into the token
+		field, the previously-saved-and-trusted state no longer applies."""
+		js = self._js()
+		self.assertIn('tokenControl.$input.on("input"', js)
+		on_input = js.split('tokenControl.$input.on("input", () => {')[1].split("});")[0]
+		self.assertIn("entry.tested = false;", on_input)
+		self.assertIn("this._reset_cred_status(entry);", on_input)
+		self.assertIn("this._sync_connect_gate();", on_input)
 
 	def test_save_methods_reload_state_before_advancing(self):
 		"""Every save-then-advance step re-fetches state so the wizard stays
@@ -4991,6 +5219,22 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		render_nexus = js.split("_render_nexus(")[1].split("\n\t_render_nexus_groups(")[0]
 		self.assertIn("this._fetch_nexus()", render_nexus)
 
+	def test_fetch_nexus_status_pluralises_region_and_company(self):
+		"""1 region/1 company must not read "1 regions across 1 companies"."""
+		js = self._js()
+		self.assertIn('const regionWord = total === 1 ? __("region") : __("regions");', js)
+		self.assertIn('const companyWord = companiesN === 1 ? __("company") : __("companies");', js)
+		self.assertIn(
+			'__("Fetched {0} {1} across {2} {3}", [total, regionWord, companiesN, companyWord])', js
+		)
+
+	def test_review_nexus_row_pluralises_company(self):
+		js = self._js()
+		self.assertIn(
+			'__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])',
+			js,
+		)
+
 	def test_review_has_no_taxjar_enabled_row_and_uses_green_badges(self):
 		"""The master switch isn't managed by this wizard, so Review must not
 		claim to report its state; Live mode and the nightly refresh cadence
@@ -5001,10 +5245,34 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn('__("Auto-Refresh")', js)
 		self.assertIn('__("Daily at midnight")', js)
 
+	def test_daily_at_midnight_pill_matches_other_pills_styling(self):
+		"""Regression guard: every other Review pill (Live, Enabled, N days
+		retention) sits nested one level inside the row's value span, so
+		.ts-kv > span:last-child's bold override lands on that wrapper, not the
+		pill - .indicator-pill's own "regular" weight wins. "Daily at midnight"
+		was the one pill placed as a *direct* child of .ts-kv, so it alone took
+		the bold override directly and rendered inconsistently bolder than
+		every other pill on the same screen."""
+		js = self._js()
+		self.assertIn(
+			'<span>${__("Auto-Refresh")}</span><span><span class="indicator-pill green no-indicator-dot">${__("Daily at midnight")}</span></span>',
+			js,
+		)
+
 	def test_review_accounts_stack_company_and_detail_on_separate_lines(self):
 		js = self._js()
 		self.assertIn("ts-acc-company", js)
 		self.assertIn("ts-acc-detail", js)
+
+	def test_review_accounts_label_tax_and_shipping_ledgers_on_separate_lines(self):
+		"""Two bare account names side by side ("X · Y") gave no indication of
+		which was the tax ledger and which was the shipping ledger; each now
+		gets its own labelled line rather than sharing one."""
+		js = self._js()
+		account_rows = js.split("const accountRows = companies.map((c) => `")[1].split("`).join")[0]
+		self.assertEqual(account_rows.count('<div class="ts-acc-detail">'), 2)
+		self.assertIn('__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head', account_rows)
+		self.assertIn('__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head', account_rows)
 
 	def test_welcome_step_button_says_continue_not_save(self):
 		"""Nothing is saved on the Welcome step (no form fields) — its button
@@ -5016,14 +5284,39 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 	def test_check_sub_items_are_not_card_scoped_to_top_level_li(self):
 		"""Regression guard: .ts-check li (no `>`) is a descendant selector, so
 		it would also match .ts-check-sub's own <li>s two levels down and wrongly
-		card-ify "Sales Tax Ledger" / "Shipping Charges Ledger" as bordered boxes
-		instead of plain indented bullets."""
+		card-ify "Sales Tax Ledger" / "Shipping Charges Ledger" as bordered boxes instead of
+		plain indented bullets."""
 		import os
 		path = os.path.normpath(os.path.join(
 			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
 		css = open(path).read()
 		self.assertIn(".ts-check > li {", css)
 		self.assertNotIn(".ts-check li {", css)
+
+	def test_kv_bold_rule_is_child_scoped_not_descendant(self):
+		"""Same class of bug as .ts-check li above: .ts-kv span:last-child (no
+		`>`) is a descendant selector, so for a row whose value holds two
+		stacked indicator-pills (API Logs: "Enabled" + "N days retention") it
+		would also match the second pill (itself a last-child of its own
+		wrapper) and bold only that one, inconsistent with the first."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertIn(".ts-kv > span:first-child {", css)
+		self.assertIn(".ts-kv > span:last-child {", css)
+		self.assertNotIn(".ts-kv span:first-child {", css)
+		self.assertNotIn(".ts-kv span:last-child {", css)
+
+	def test_card_body_zeroes_form_group_margin_to_avoid_double_gap(self):
+		"""Bootstrap's default .form-group margin-bottom (15px) stacks on top of
+		.ts-card-b's own flex gap (12px), doubling the visual gap between
+		stacked fields (e.g. Company -> Live token) to ~27px for no reason."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertIn(".ts-card-b .form-group { margin-bottom: 0; }", css)
 
 	def test_css_does_not_clip_link_dropdowns_and_caps_card_width(self):
 		import os

@@ -202,25 +202,49 @@ def save_company_accounts(rows):
 
 
 @frappe.whitelist()
-def save_features(flags=None):
+def save_features(company_flags=None):
 	"""Set each company's Calculate/File flags. Flags for a company without an
 	existing company_config row are silently skipped — the Accounts step must
 	run first to create that row.
 
-	The master switch (taxjar_enabled) is deliberately not handled here — it
-	stays a TaxJar Settings form field, managed outside the guided setup."""
+	The parameter must NOT be named ``flags`` - frappe.call()'s get_newargs()
+	unconditionally pops a kwarg literally named "flags" (and
+	"ignore_permissions") from every whitelisted API call before dispatch, as a
+	security measure, regardless of whether the target function declares that
+	parameter. A whitelisted method named ``flags`` therefore always received
+	None over real HTTP calls (frappe.xcall from the browser, or any other API
+	client) while still "succeeding" from bench execute, which calls the Python
+	function directly and bypasses frappe.call() entirely - the discrepancy
+	that made this look like it worked in every direct test.
+
+	The master switch (taxjar_enabled) is auto-enabled the moment any company
+	ends up with Calculate Sales Tax or File Transactions on - the per-company
+	flags this sets are otherwise inert while the switch is off (see
+	_is_taxjar_enabled), which read as "the toggle didn't save" even though the
+	child row itself was written correctly. It is never auto-disabled here:
+	turning individual company flags off does not imply the user wants TaxJar
+	off everywhere, so that stays a deliberate action on the TaxJar Settings
+	form."""
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
-	flags = frappe.parse_json(flags) if isinstance(flags, str) else (flags or [])
+	company_flags = (
+		frappe.parse_json(company_flags) if isinstance(company_flags, str) else (company_flags or [])
+	)
 
 	settings = frappe.get_single(SETTINGS)
 	existing = {cfg.company: cfg for cfg in (settings.company_config or [])}
-	for row in flags:
+	for row in company_flags:
 		cfg = existing.get(row.get("company"))
 		if not cfg:
 			continue
 		cfg.taxjar_calculate_tax = cint(row.get("calculate"))
 		cfg.taxjar_create_transactions = cint(row.get("file"))
+
+	if any(
+		cfg.taxjar_calculate_tax or cfg.taxjar_create_transactions
+		for cfg in (settings.company_config or [])
+	):
+		settings.taxjar_enabled = 1
 
 	settings.save()
 	return {"ok": True}

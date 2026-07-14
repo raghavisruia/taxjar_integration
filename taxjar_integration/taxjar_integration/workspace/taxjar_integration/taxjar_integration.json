@@ -11,7 +11,7 @@
  "icon": "money-coins-1",
  "idx": 0,
  "is_hidden": 0,
- "label": "Taxjar Integration",
+ "label": "TaxJar Integration",
  "links": [
   {
    "hidden": 0,
@@ -67,10 +67,21 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Setup",
-   "link_count": 2,
+   "link_count": 3,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Guided Setup",
+   "link_count": 0,
+   "link_to": "taxjar-setup",
+   "link_type": "Page",
+   "onboard": 0,
+   "type": "Link"
   },
   {
    "dependencies": "",
@@ -95,10 +106,10 @@
    "type": "Link"
   }
  ],
- "modified": "2026-06-29 12:46:29.226643",
+ "modified": "2026-07-14 10:30:00.000000",
  "modified_by": "Administrator",
- "module": "Taxjar Integration",
- "name": "Taxjar Integration",
+ "module": "TaxJar Integration",
+ "name": "TaxJar Integration",
  "number_cards": [],
  "owner": "Administrator",
  "parent_page": "",
@@ -108,6 +119,6 @@
  "roles": [],
  "sequence_id": 18.0,
  "shortcuts": [],
- "title": "Taxjar Integration",
+ "title": "TaxJar Integration",
  "type": "Workspace"
 }

@@ -8,7 +8,7 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import _is_taxjar_enabled
 
-WORKSPACE = "Taxjar Integration"
+WORKSPACE = "TaxJar Integration"
 
 # Lucide icon names shown next to each sidebar card group. Cards without an entry
 # fall back to no icon.
@@ -57,15 +57,16 @@ def setup_taxjar():
 def sync_taxjar_workspace_sidebar():
 	"""(Re)build the desk left sidebar so it mirrors the workspace's card groups.
 
-	In v16 the in-app sidebar is a ``Workspace Sidebar`` record. Frappe only
-	auto-generates a flat "Home + shortcuts" sidebar, so to get the same grouped
-	layout as the workspace body we generate it ourselves: each card (Card Break)
-	becomes a collapsible Section Break and its links become nested child items.
-	The workspace is the single source of truth, so this runs on every install /
-	migrate and stays in lockstep with the card layout.
+	The grouped sidebar lives on ``Workspace.sidebar_items`` (a child table on the
+	workspace itself): each card (Card Break) becomes a collapsible Section Break
+	and its links become nested child items. This is NOT the standalone
+	``Workspace Sidebar`` doctype - that was merged into ``Workspace`` earlier in
+	v16 (see ``frappe.patches.v16_0.migrate_workspace_sidebar_to_workspace`` and
+	``frappe.boot.get_sidebar_items``, which explicitly says "the legacy Workspace
+	Sidebar doctype is no longer read here"). The workspace is the single source
+	of truth, so this runs on every install/migrate and stays in lockstep with
+	the card layout.
 	"""
-	if not frappe.db.exists("DocType", "Workspace Sidebar"):
-		return
 	if not frappe.db.exists("Workspace", WORKSPACE):
 		return
 
@@ -121,12 +122,12 @@ def sync_taxjar_workspace_sidebar():
 				"collapsible": 1,
 			})
 
-	frappe.delete_doc("Workspace Sidebar", WORKSPACE, ignore_missing=True, force=True)
-	sidebar = frappe.new_doc("Workspace Sidebar")
-	sidebar.title = WORKSPACE
-	sidebar.module = "Taxjar Integration"
-	sidebar.app = "taxjar_integration"
-	sidebar.header_icon = ws.icon or "money-coins-1"
+	ws.set("sidebar_items", [])
 	for item in items:
-		sidebar.append("items", item)
-	sidebar.insert(ignore_permissions=True)
+		ws.append("sidebar_items", item)
+	ws.save(ignore_permissions=True)
+
+	# Drop the pre-merge standalone record left over from older v16 builds; it's
+	# no longer read by frappe.boot.get_sidebar_items.
+	if frappe.db.exists("DocType", "Workspace Sidebar"):
+		frappe.delete_doc("Workspace Sidebar", WORKSPACE, ignore_missing=True, force=True)

@@ -133,6 +133,11 @@
 }
 .taxjar-setup .ts-card-remove:hover { color: var(--text-color); border-color: var(--text-color); }
 .taxjar-setup .ts-card-b { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+/* Bootstrap's default .form-group margin-bottom (15px) would otherwise stack
+   on top of the flex gap above, doubling the visual gap between stacked
+   fields (e.g. Company -> Live token) to ~27px for no reason - the gap alone
+   should be the only source of spacing here. */
+.taxjar-setup .ts-card-b .form-group { margin-bottom: 0; }
 
 /* Test connection is the one action per credential card that actually matters
    before Continue unlocks — a plain .btn-default blended into the card, so it
@@ -161,8 +166,13 @@
 	padding: 10px 0; font-size: var(--text-sm); border-bottom: 1px solid var(--border-color);
 }
 .taxjar-setup .ts-kv:last-child { border-bottom: 0; }
-.taxjar-setup .ts-kv span:first-child { color: var(--text-muted); }
-.taxjar-setup .ts-kv span:last-child { font-weight: 600; }
+/* `>` matters: a plain descendant selector would also match nested content
+   inside the value span (e.g. the second of two stacked indicator-pills,
+   which is a "last-child" of its own wrapper) and bold only that one
+   inconsistently - these two rules must stay scoped to the row's own direct
+   label/value spans. */
+.taxjar-setup .ts-kv > span:first-child { color: var(--text-muted); }
+.taxjar-setup .ts-kv > span:last-child { font-weight: 600; }
 
 /* Review's Accounts card — company name and its account heads stack instead
    of sitting side by side, so long values never fight the row's alignment. */
@@ -184,10 +194,10 @@
 .taxjar-setup .ts-fieldnote {
 	margin: -6px 0 18px; font-size: var(--text-sm); color: var(--text-muted); max-width: 60ch;
 }
-.taxjar-setup .ts-sectionlabel {
-	font-size: 12px; font-weight: 600; color: var(--text-muted);
-	text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 10px;
-}
+/* Section headings reuse Frappe's own .control-label so they read exactly like
+   a field label (e.g. "API Mode") instead of a differently-styled heading. */
+.taxjar-setup label.control-label { display: block; margin: 18px 0 10px; }
+.taxjar-setup label.control-label:first-child { margin-top: 0; }
 
 /* status chips — wraps rather than overflows, since error/status text (e.g.
    "Invalid token (401). Check you copied…") can run much longer than "OK". */
@@ -232,9 +242,9 @@
 	padding: 4px 11px; display: inline-flex; gap: 7px;
 }
 .taxjar-setup .ts-pillcode { font-family: var(--font-family-monospace, monospace); color: var(--text-muted); }
-.taxjar-setup .ts-banner {
-	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
-	padding: 13px 15px; margin-top: 18px; background: var(--subtle-fg, var(--fg-color));
-}
-.taxjar-setup .ts-banner b { font-size: var(--text-md); }
-.taxjar-setup .ts-banner p { margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-muted); }
+/* Color/background/border come from the framework's .alert.alert-warning
+   (see frappe/public/scss/common/alert.scss) - same component used for e.g.
+   the doctype permissions "customized" banner - so this only lays out the
+   icon + text row and matches every other themed alert in the desk instead
+   of a bespoke, locally-invented banner style. */
+.taxjar-setup .ts-nexusnote { display: flex; align-items: center; gap: 8px; margin-top: 18px; }

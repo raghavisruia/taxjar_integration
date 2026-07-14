@@ -1,11 +1,11 @@
 from . import __version__ as app_version
 
 app_name = "taxjar_integration"
-app_title = "Taxjar Integration"
+app_title = "TaxJar Integration"
 app_icon = "octicon octicon-globe"
 app_color = "#0b6e99"
 app_publisher = " Frappe Technologies Pvt. Ltd."
-app_description = "Taxjar Integration with ERPNext"
+app_description = "TaxJar Integration with ERPNext"
 app_email = "hello@frappe.io"
 app_license = "MIT"
 app_logo_url = "/assets/taxjar_integration/images/taxjar-integration.svg"
@@ -15,7 +15,7 @@ add_to_apps_screen = [
 	{
 		"name": app_name,
 		"logo": app_logo_url,
-		"title": "Taxjar Integration",
+		"title": "TaxJar Integration",
 		"route": app_home,
 	}
 ]

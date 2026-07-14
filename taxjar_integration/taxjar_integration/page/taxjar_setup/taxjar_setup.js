@@ -223,10 +223,18 @@ class TaxJarSetup {
 		const s = this.state || {};
 		this.$body.html(`
 			<div class="ts-field ts-field-mode" style="max-width:280px"></div>
-			<p class="ts-fieldnote">${__(" ")}</p>
-			<p class="ts-sectionlabel">${__("API Token")}</p>
+			<label class="control-label">${__("API Token")}</label>
 			<div class="ts-cardgrid ts-cred-cards"></div>
 			<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
+			<label class="control-label" style="margin-top:24px">${__("API Logs")}</label>
+			<div class="ts-togrow ts-logtoggle">
+				<div class="ts-field-logging"></div>
+				<div class="ts-togtext">
+					<b>${__("Enable API Logs")}</b>
+					<p>${__("Records API requests, responses, and errors in TaxJar API Log.")}</p>
+				</div>
+			</div>
+			<div class="ts-field ts-field-retention" style="max-width:200px;margin-top:14px"></div>
 		`);
 
 		this.controls.mode = frappe.ui.form.make_control({
@@ -237,11 +245,54 @@ class TaxJarSetup {
 		this.controls.mode.set_value(s.api_mode || "Sandbox");
 		this.controls.mode.$input.on("change", () => this._on_mode_change());
 
+		// set_value() above resolves asynchronously (it runs through
+		// frappe.run_serially), so this.controls.mode.get_value() read synchronously
+		// right after it can still return the pre-set value — that's what made the
+		// token label below flip to "Sandbox token" even when the saved mode was
+		// Live. Track the intended mode from state directly instead of trusting the
+		// control mid-flight; _on_mode_change() (a real user-driven change event)
+		// keeps it in sync from here on.
+		this._modeIsLive = (s.api_mode || "Sandbox") === "Live";
+
 		this._connectCards = [];
 		const creds = (s.credentials && s.credentials.length) ? s.credentials : [{ company: null, token_last4: null }];
 		creds.forEach((cred) => this._add_credential_card(cred));
 
 		this.$body.find(".ts-add-cred").on("click", () => this._add_credential_card({ company: null, token_last4: null }));
+
+		this.controls.enableLogging = frappe.ui.form.make_control({
+			parent: this.$body.find(".ts-field-logging"),
+			df: { fieldtype: "Check", fieldname: "enable_taxjar_logging" },
+			render_input: true,
+		});
+		this.controls.enableLogging.set_value(s.enable_taxjar_logging ? 1 : 0);
+
+		this.controls.logRetention = frappe.ui.form.make_control({
+			parent: this.$body.find(".ts-field-retention"),
+			df: {
+				fieldtype: "Int", fieldname: "log_retention_days", label: __("Log Retention (Days)"),
+				description: __("Automatically delete API Logs older than this many days. Set 0 to retain logs."),
+			},
+			render_input: true,
+		});
+		this.controls.logRetention.set_value(s.log_retention_days != null ? s.log_retention_days : 90);
+
+		// Log Retention only means anything once logging is on — mirrors the
+		// doctype field's own depends_on: eval: doc.enable_taxjar_logging.
+		const $retentionField = this.$body.find(".ts-field-retention");
+		const syncRetentionVisibility = () => {
+			$retentionField.toggle(!!this.controls.enableLogging.get_value());
+		};
+		// set_value() above resolves asynchronously (frappe.run_serially), so
+		// get_value() read synchronously right here can still see the pre-set
+		// value - same class of bug as _modeIsLive/token label. That's exactly
+		// why this only ever appeared to work after a real toggle (a genuine
+		// click is a synchronous DOM event) and never on initial load with
+		// logging already enabled. Use the already-known state value directly
+		// for the initial visibility check instead of trusting the control
+		// mid-flight; the change handler (a real user-driven event) is safe.
+		$retentionField.toggle(!!s.enable_taxjar_logging);
+		this.controls.enableLogging.$input.on("change", syncRetentionVisibility);
 
 		this._sync_connect_gate();
 	}
@@ -250,12 +301,19 @@ class TaxJarSetup {
 		// Header is just the company name + status — the Company field itself lives
 		// in the card body, so a long status message never has to share a row with
 		// a full-width form control (that's what was overflowing before).
+		// A company that already has a saved token starts already "tested" -
+		// re-running the guided setup shouldn't visually demand a re-test of a
+		// connection that was already verified and hasn't changed - and reads
+		// that state with the exact same "Success" chip a fresh test produces,
+		// not a separate "Saved" wording that reads as somehow less certain
+		// and invites re-testing anyway.
+		const alreadySaved = !!cred.token_last4;
 		const $card = $(`
 			<div class="ts-card">
 				<div class="ts-card-h">
 					<b class="ts-cred-name">${cred.company ? frappe.utils.escape_html(cred.company) : __("New company")}</b>
 					<div class="ts-card-h-right">
-						<span class="ts-chip idle">${__("Not tested")}</span>
+						<span class="ts-chip ${alreadySaved ? "ok" : "idle"}">${alreadySaved ? `<span class="ts-chip-dot"></span> ${__("Success")}` : __("Not tested")}</span>
 						<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
 					</div>
 				</div>
@@ -267,7 +325,7 @@ class TaxJarSetup {
 			</div>
 		`).appendTo(this.$body.find(".ts-cred-cards"));
 
-		const entry = { company: cred.company, tested: !!cred.token_last4, $card, controls: {} };
+		const entry = { company: cred.company, tested: alreadySaved, $card, controls: {} };
 		this._connectCards.push(entry);
 
 		const otherCompanies = () => this._connectCards
@@ -283,7 +341,18 @@ class TaxJarSetup {
 			},
 			render_input: true,
 		});
+		// set_value() below (restoring an existing credential's company) fires
+		// df.onchange itself as part of setting the value - not just real user
+		// input - so without this guard, populating an already-saved card
+		// immediately re-fired onchange and reset entry.tested straight back to
+		// false right after alreadySaved had just set it true, wiping the
+		// "Success" chip the moment the card rendered.
+		let restoringInitialCompany = !!cred.company;
 		companyControl.df.onchange = () => {
+			if (restoringInitialCompany) {
+				restoringInitialCompany = false;
+				return;
+			}
 			entry.company = companyControl.get_value();
 			entry.tested = false;
 			$card.find(".ts-cred-name").text(entry.company || __("New company"));
@@ -303,7 +372,7 @@ class TaxJarSetup {
 			parent: $card.find(".ts-field-token"),
 			df: {
 				fieldtype: "Password", fieldname: "token",
-				label: this.controls.mode.get_value() === "Live" ? __("Live token") : __("Sandbox token"),
+				label: this._modeIsLive ? __("Live token") : __("Sandbox token"),
 				reqd: !cred.token_last4,
 				placeholder: cred.token_last4 ? __("•••••••••••• (ending in {0})", [cred.token_last4]) : "",
 				description: cred.token_last4 ? __("Leave blank to keep the saved token.") : "",
@@ -315,6 +384,18 @@ class TaxJarSetup {
 		// source of a 500 in this environment; this control never needed it.
 		tokenControl.disable_password_checks();
 		entry.controls.token = tokenControl;
+
+		// A saved connection starts "tested" (see alreadySaved above), but that only
+		// holds while the stored token is still what's in effect. The moment the
+		// user actually types into this field, the value in play changes and the
+		// previous verification no longer applies — require a fresh Test connection
+		// before Continue is ungated again.
+		tokenControl.$input.on("input", () => {
+			if (!entry.tested) return;
+			entry.tested = false;
+			this._reset_cred_status(entry);
+			this._sync_connect_gate();
+		});
 
 		$card.find(".ts-test").on("click", () => this._test_connection(entry));
 		$card.find(".ts-card-remove").on("click", () => this._remove_credential_card(entry, cred));
@@ -344,7 +425,10 @@ class TaxJarSetup {
 	}
 
 	_on_mode_change() {
+		// Real user-driven change event — the control's value is accurate to read
+		// synchronously here, unlike the set_value() call in _render_connect().
 		const live = this.controls.mode.get_value() === "Live";
+		this._modeIsLive = live;
 		this._connectCards.forEach((entry) => {
 			const tokenCtrl = entry.controls.token;
 			// The last-4 hint / placeholder was computed for the previous mode's
@@ -391,7 +475,15 @@ class TaxJarSetup {
 	}
 
 	_sync_connect_gate() {
-		const anyTested = this._connectCards.some((c) => c.tested && c.controls.company.get_value());
+		// Reads c.company (kept in sync directly on the entry), deliberately
+		// not the Company control's own get_value(). For a restored card, that
+		// control is read-only and its value was just populated via
+		// set_value(), which - like the mode label and retention-visibility
+		// bugs - resolves asynchronously; reading it back from the control
+		// synchronously right here (this runs immediately after every card is
+		// added, on every render) could still see the pre-set value and
+		// wrongly gate Continue on an already-saved, already-tested credential.
+		const anyTested = this._connectCards.some((c) => c.tested && c.company);
 		this._set_next_gated(!anyTested, __("Test the connection for at least one company before continuing."));
 	}
 
@@ -407,7 +499,12 @@ class TaxJarSetup {
 		}
 
 		const $next = this.$root.find(".ts-next").prop("disabled", true);
-		return this._call("save_connection", { mode, credentials: rows })
+		return this._call("save_connection", {
+			mode,
+			credentials: rows,
+			enable_taxjar_logging: this.controls.enableLogging.get_value() ? 1 : 0,
+			log_retention_days: this.controls.logRetention.get_value(),
+		})
 			.then(() => this._reload_state())
 			.then(() => true)
 			.catch(() => false)
@@ -501,7 +598,7 @@ class TaxJarSetup {
 		const companies = s.companies || [];
 
 		this.$body.html(`
-			<p class="ts-sectionlabel">${__("Per company")}</p>
+			<label class="control-label">${__("Per company")}</label>
 			<div class="ts-cardgrid ts-feature-cards"></div>
 		`);
 
@@ -546,14 +643,18 @@ class TaxJarSetup {
 	}
 
 	_save_features() {
-		const flags = (this._featureCards || []).map((c) => ({
+		// NOT sent as "flags" - frappe.call()'s get_newargs() unconditionally
+		// strips any kwarg literally named "flags" from every whitelisted API
+		// call (a security measure, unrelated to this doctype), so the server
+		// param is company_flags instead. See save_features()'s docstring.
+		const company_flags = (this._featureCards || []).map((c) => ({
 			company: c.company,
 			calculate: c.controls.calc.get_value() ? 1 : 0,
 			file: c.controls.file.get_value() ? 1 : 0,
 		}));
 
 		const $next = this.$root.find(".ts-next").prop("disabled", true);
-		return this._call("save_features", { flags })
+		return this._call("save_features", { company_flags })
 			.then(() => this._reload_state())
 			.then(() => true)
 			.catch(() => false)
@@ -571,8 +672,9 @@ class TaxJarSetup {
 				<span class="ts-chip idle ts-fetchstatus">${__("Not fetched yet")}</span>
 			</div>
 			<div class="ts-nexusresult"></div>
-			<div class="ts-banner">
-				<p>${__("Manage nexus in TaxJar — fetch on demand here for changes made there, or let it update automatically every night at midnight.")}</p>
+			<div class="alert alert-warning ts-nexusnote" role="alert">
+				${frappe.utils.icon("info", "sm")}
+				<span>${__("Manage nexus in TaxJar — fetch on demand here for changes made there, or let it update automatically every night at midnight.")}</span>
 			</div>
 		`);
 
@@ -615,8 +717,10 @@ class TaxJarSetup {
 			this.state.nexus_by_company = res.nexus_by_company;
 			const companiesN = Object.keys(res.nexus_by_company).length;
 			const total = Object.values(res.nexus_by_company).reduce((n, arr) => n + arr.length, 0);
+			const regionWord = total === 1 ? __("region") : __("regions");
+			const companyWord = companiesN === 1 ? __("company") : __("companies");
 			$status.attr("class", "ts-chip ok ts-fetchstatus")
-				.html(`<span class="ts-chip-dot"></span> ${__("Fetched {0} regions across {1} companies", [total, companiesN])}`);
+				.html(`<span class="ts-chip-dot"></span> ${__("Fetched {0} {1} across {2} {3}", [total, regionWord, companiesN, companyWord])}`);
 			this._render_nexus_groups(res.nexus_by_company);
 		}).catch(() => {
 			$status.attr("class", "ts-chip err ts-fetchstatus").text(__("Could not fetch nexus."));
@@ -629,14 +733,18 @@ class TaxJarSetup {
 		const companies = s.companies || [];
 		const nexusByCompany = s.nexus_by_company || {};
 		const totalNexus = Object.values(nexusByCompany).reduce((n, arr) => n + arr.length, 0);
+		const nexusCompaniesN = Object.keys(nexusByCompany).length;
 
 		// Company name and its accounts stack on their own lines — a company
 		// name and "Tax head · Shipping head" side by side wraps unevenly and
-		// never lines up cleanly in a two-column row.
+		// never lines up cleanly in a two-column row. Tax Ledger / Shipping
+		// Ledger get their own line each too, rather than being crammed
+		// together on one line with no indication of which was which.
 		const accountRows = companies.map((c) => `
 			<div class="ts-accrow">
 				<div class="ts-acc-company">${frappe.utils.escape_html(c.company)}</div>
-				<div class="ts-acc-detail">${frappe.utils.escape_html(c.tax_account_head || "—")} · ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
+				<div class="ts-acc-detail">${__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head || "—")}</div>
+				<div class="ts-acc-detail">${__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
 			</div>
 		`).join("") || `<div class="text-muted small">${__("No accounts configured yet.")}</div>`;
 
@@ -650,16 +758,25 @@ class TaxJarSetup {
 			? `<span class="indicator-pill green no-indicator-dot">${__("Live")}</span>`
 			: frappe.utils.escape_html(mode);
 
+		const retentionDays = s.log_retention_days;
+		const logsDisplay = s.enable_taxjar_logging
+			? `<span style="display:inline-flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+					<span class="indicator-pill green no-indicator-dot">${__("Enabled")}</span>
+					<span class="indicator-pill green no-indicator-dot">${__("{0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])}</span>
+				</span>`
+			: __("Off");
+
 		this.$body.html(`
 			<div class="ts-cardgrid">
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Connection")}</b></div>
 					<div class="ts-card-b" style="gap:0">
 						<div class="ts-kv"><span>${__("Mode")}</span><span>${modeDisplay}</span></div>
+						<div class="ts-kv"><span>${__("API Logs")}</span><span>${logsDisplay}</span></div>
 					</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Nexus")}</b></div>
 					<div class="ts-card-b" style="gap:0">
-						<div class="ts-kv"><span>${__("Regions")}</span><span>${__("{0} across {1} companies", [totalNexus, Object.keys(nexusByCompany).length])}</span></div>
-						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="indicator-pill green no-indicator-dot">${__("Daily at midnight")}</span></div>
+						<div class="ts-kv"><span>${__("Regions")}</span><span>${__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])}</span></div>
+						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span><span class="indicator-pill green no-indicator-dot">${__("Daily at midnight")}</span></span></div>
 					</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Accounts")}</b></div>
 					<div class="ts-card-b" style="gap:0">${accountRows}</div></div>

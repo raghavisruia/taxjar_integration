@@ -6,7 +6,7 @@ from taxjar_integration import __version__ as version
 setup(
 	name="taxjar_integration",
 	version=version,
-	description="Taxjar Integration with ERPNext",
+	description="TaxJar Integration with ERPNext",
 	author=" Frappe Technologies Pvt. Ltd.",
 	author_email="hello@frappe.io",
 	packages=find_packages(),
