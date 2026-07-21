@@ -359,9 +359,20 @@ _TRANSACTION_BREAKDOWN_FIELDS = [
 		read_only=1,
 	),
 	dict(
-		fieldname="taxjar_breakdown_html",
+		# Plain HTML (not part of taxjar_breakdown_html) so it isn't wrapped in
+		# the boxed "like-disabled-input" background a read-only Text Editor
+		# field gets - that box is meant for the table, not this pill.
+		fieldname="taxjar_freight_taxable_html",
 		fieldtype="HTML",
 		insert_after="taxjar_freight_taxable",
+	),
+	dict(
+		fieldname="taxjar_breakdown_html",
+		fieldtype="Text Editor",
+		insert_after="taxjar_freight_taxable_html",
+		is_virtual=1,
+		read_only=1,
+		allow_on_submit=1,
 	),
 ]
 

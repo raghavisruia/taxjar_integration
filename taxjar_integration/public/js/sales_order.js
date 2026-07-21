@@ -1,5 +1,6 @@
 frappe.ui.form.on("Sales Order", {
 	refresh(frm) {
+		taxjar_integration.render_shipping_taxability(frm);
 		taxjar_integration.render_tax_breakdown(frm);
 		taxjar_integration.render_status_cards(frm);
 		taxjar_integration.render_addresses(frm);

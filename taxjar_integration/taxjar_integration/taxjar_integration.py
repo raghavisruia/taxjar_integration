@@ -1086,6 +1086,64 @@ def _store_breakdown_data(tax_data, doc, usd_rate=None):
 				item.taxjar_item_breakdown_json = json.dumps(item_json)
 
 
+def get_taxjar_breakdown_html(doc):
+	"""Render the TaxJar Tax Breakdown table (plus, for multi-currency docs,
+	the USD sub-table above it) from doc.taxjar_breakdown_json.
+
+	Server-side Jinja render, same tax-break-up / table-bordered / table-hover
+	markup as core ERPNext's own Tax Breakup table (get_itemised_tax_breakup_html
+	in erpnext.controllers.taxes_and_totals) and india_compliance's GST Breakup
+	Table (GSTBreakup in india_compliance.gst_india.utils.jinja) - both render
+	their tables server-side rather than in the browser, which is also what
+	makes them show up in Print/PDF.
+
+	The shipping-taxability pill is a separate, plain-HTML field
+	(taxjar_freight_taxable_html, rendered client-side) rather than part of
+	this content - a Text Editor field wraps whatever is here in a boxed
+	"like-disabled-input" background, which reads fine for a table but not
+	for a standalone indicator.
+	"""
+	data = None
+	if getattr(doc, "taxjar_breakdown_json", None):
+		try:
+			data = json.loads(doc.taxjar_breakdown_json)
+		except (TypeError, ValueError):
+			data = None
+
+	html = frappe.render_template(
+		"templates/includes/taxjar_breakup.html",
+		dict(
+			data=data,
+			currency=(data or {}).get("currency") or getattr(doc, "currency", None) or "USD",
+		),
+	)
+	# Jinja's {% if/for %} control tags leave behind their surrounding blank
+	# lines/indentation in the output; a Text Editor field renders that
+	# whitespace as real vertical gaps. Same fix india_compliance applies to
+	# its own gst_breakup_table render (set_gst_breakup in
+	# india_compliance.gst_india.overrides.transaction).
+	return html.replace("\n", "").replace("\t", "")
+
+
+def set_taxjar_breakdown_html(doc, method=None, print_settings=None):
+	"""onload / before_print doc event: populate the taxjar_breakdown_html
+	virtual field.
+
+	Desk form (onload): pushed via set_onload, since the browser already holds
+	a separate copy of the doc by the time this runs - a thin client-side
+	shim (render_tax_breakdown in taxjar_utils.js) copies it onto the field.
+	Print/PDF (before_print): assigned directly onto doc, since print rendering
+	reads this same in-memory object in the same request - see frappe.www.printview.
+	"""
+	if not doc.meta.has_field("taxjar_breakdown_html"):
+		return
+	html = get_taxjar_breakdown_html(doc)
+	if method == "before_print":
+		doc.taxjar_breakdown_html = html
+	else:
+		doc.set_onload("_taxjar_breakdown_html", html)
+
+
 def check_for_nexus(doc, tax_dict):
 	"""Return True if the delivery is within a nexus. Clears TaxJar rows and returns False if not."""
 	company_config = get_company_config(doc.company)

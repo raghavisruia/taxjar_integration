@@ -40,12 +40,14 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	fetch_transaction_from_taxjar,
 	get_company_config,
 	get_line_item_dict,
+	get_taxjar_breakdown_html,
 	get_taxjar_response_html,
 	on_customer_delete,
 	on_customer_update,
 	on_customer_validate,
 	retry_all_failed_syncs,
 	set_sales_tax,
+	set_taxjar_breakdown_html,
 	sync_customer_to_taxjar,
 	sync_transaction_to_taxjar,
 	validate_return_against,
@@ -111,6 +113,23 @@ class _FakeItem:
 		return getattr(self, field, None)
 
 
+class _FakeMeta:
+	"""Stand-in for doc.meta - real doctype metadata, not instance state.
+
+	Deliberately NOT driven off which attributes _FakeDoc happens to have set:
+	a virtual field (is_virtual=1, no backing @property) is never set as a
+	plain instance attribute on a real Document until something explicitly
+	assigns it - hasattr(doc, fieldname) is unreliable for exactly the fields
+	set_taxjar_breakdown_html needs to check for. This bit taxjar_breakdown_html
+	in production: a hasattr guard silently no-opped for every real document.
+	"""
+	def __init__(self, fields=("taxjar_breakdown_html", "taxjar_breakdown_json", "taxjar_freight_taxable")):
+		self._fields = set(fields)
+
+	def has_field(self, fieldname):
+		return fieldname in self._fields
+
+
 class _FakeDoc:
 	"""Minimal stand-in for a Frappe document that supports append() on taxes."""
 	def __init__(self, company="Test Co", taxes=None, currency="USD"):
@@ -141,6 +160,9 @@ class _FakeDoc:
 		self.taxjar_ship_from = None
 		self.taxjar_ship_to = None
 		self.taxjar_freight_taxable = 0
+		self.taxjar_breakdown_html = None
+		self._onload = {}
+		self.meta = _FakeMeta()
 
 	def append(self, field, data):
 		if field == "taxes":
@@ -156,6 +178,12 @@ class _FakeDoc:
 
 	def get(self, field):
 		return getattr(self, field, [])
+
+	def set_onload(self, key, value):
+		self._onload[key] = value
+
+	def get_onload(self, key=None):
+		return self._onload[key] if key else self._onload
 
 
 def _make_doc(company="Test Co", taxes=None, currency="USD"):
@@ -5240,11 +5268,12 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 class TestTaxBreakdownCustomFields(UnitTestCase):
 
 	def test_transaction_breakdown_fields_defined(self):
-		self.assertEqual(len(_TRANSACTION_BREAKDOWN_FIELDS), 4)
+		self.assertEqual(len(_TRANSACTION_BREAKDOWN_FIELDS), 5)
 		fieldnames = [f["fieldname"] for f in _TRANSACTION_BREAKDOWN_FIELDS]
 		self.assertIn("taxjar_breakdown_section", fieldnames)
 		self.assertIn("taxjar_breakdown_json", fieldnames)
 		self.assertIn("taxjar_freight_taxable", fieldnames)
+		self.assertIn("taxjar_freight_taxable_html", fieldnames)
 		self.assertIn("taxjar_breakdown_html", fieldnames)
 
 	def test_freight_taxable_field_is_hidden_read_only_check(self):
@@ -5253,6 +5282,26 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 		self.assertEqual(field["hidden"], 1)
 		self.assertEqual(field["read_only"], 1)
 		self.assertEqual(field["insert_after"], "taxjar_breakdown_json")
+
+	def test_freight_taxable_html_is_plain_html_not_boxed(self):
+		"""Deliberately plain HTML, not Text Editor - a read-only Text Editor
+		field wraps its content in a boxed "like-disabled-input" background,
+		which is right for the table but wrong for a standalone pill."""
+		field = next(f for f in _TRANSACTION_BREAKDOWN_FIELDS if f["fieldname"] == "taxjar_freight_taxable_html")
+		self.assertEqual(field["fieldtype"], "HTML")
+		self.assertEqual(field["insert_after"], "taxjar_freight_taxable")
+
+	def test_breakdown_html_is_virtual_text_editor(self):
+		"""Server-rendered virtual field (set by onload/before_print via
+		set_taxjar_breakdown_html), same shape as india_compliance's
+		gst_breakup_table - not a plain HTML display field anymore, so it
+		actually shows up in Print/PDF, not just the desk form."""
+		field = next(f for f in _TRANSACTION_BREAKDOWN_FIELDS if f["fieldname"] == "taxjar_breakdown_html")
+		self.assertEqual(field["fieldtype"], "Text Editor")
+		self.assertEqual(field["is_virtual"], 1)
+		self.assertEqual(field["read_only"], 1)
+		self.assertEqual(field["allow_on_submit"], 1)
+		self.assertEqual(field["insert_after"], "taxjar_freight_taxable_html")
 
 	def test_sales_invoice_freight_taxable_allows_on_submit(self):
 		"""Written alongside taxjar_breakdown_json on the post-submission
@@ -5311,6 +5360,217 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 				self.assertEqual(f["insert_after"], "taxable_amount")
 
 
+# ── Tax Breakdown: server-side HTML rendering (get_taxjar_breakdown_html) ──
+# Same tax-break-up/table-bordered/table-hover markup as core ERPNext's Tax
+# Breakup table and india_compliance's GST Breakup Table, rendered server-side
+# via Jinja (templates/includes/taxjar_breakup.html) instead of built in JS.
+
+class TestGetTaxjarBreakdownHtml(UnitTestCase):
+
+	def test_no_json_shows_no_breakdown_message(self):
+		doc = _make_doc()
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("No TaxJar tax breakdown available", html)
+
+	def test_invalid_json_falls_back_to_no_breakdown_message(self):
+		doc = _make_doc()
+		doc.taxjar_breakdown_json = "not json"
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("No TaxJar tax breakdown available", html)
+
+	def test_renders_table_with_core_erpnext_markup(self):
+		"""Same skeleton as erpnext's itemised_tax_breakup.html /
+		india_compliance's gst_breakup.html - and, unlike the old JS builder,
+		no inline thead background overriding the default desk table theme."""
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn('class="tax-break-up"', html)
+		self.assertIn("table-bordered", html)
+		self.assertIn("table-hover", html)
+		self.assertIn("Jurisdiction", html)
+		self.assertNotIn("background-color", html)
+
+	def test_output_has_no_newlines_or_tabs(self):
+		"""Jinja's {% if/for %} control tags leave their surrounding blank
+		lines/indentation in the rendered output; a Text Editor field renders
+		that whitespace as real vertical gaps in the desk form (a large empty
+		block above the table). Same fix india_compliance applies to its own
+		gst_breakup_table render."""
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		doc.taxjar_freight_taxable = 1
+		html = get_taxjar_breakdown_html(doc)
+		self.assertNotIn("\n", html)
+		self.assertNotIn("\t", html)
+
+	def test_jurisdiction_rendered_bold(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("<strong>State</strong>", html)
+		self.assertIn("<strong>County</strong>", html)
+		self.assertIn("<strong>Special</strong>", html)
+
+	def test_no_usd_block_for_single_currency_doc(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertNotIn("Tax Calculation (USD)", html)
+
+	def test_usd_block_rendered_for_multi_currency_doc(self):
+		tax_data = _make_us_breakdown()
+		doc = _make_doc(currency="EUR")
+		_store_breakdown_data(tax_data, doc, usd_rate=1.1)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("Tax Calculation (USD)", html)
+		self.assertIn("Equivalent in Transaction Currency (EUR)", html)
+		self.assertIn("multi-currency transaction", html)
+
+	def test_pill_not_part_of_server_rendered_html(self):
+		"""The shipping-taxability pill moved to its own plain-HTML field
+		(taxjar_freight_taxable_html, rendered client-side by
+		render_shipping_taxability in taxjar_utils.js) - a read-only Text
+		Editor field boxes its whole content in a "like-disabled-input"
+		background, which reads fine around the table but wrong around a
+		standalone indicator pill sitting inside it."""
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		doc.taxjar_freight_taxable = 1
+		html = get_taxjar_breakdown_html(doc)
+		self.assertNotIn("Is shipping charges taxable?", html)
+		self.assertNotIn("indicator-pill", html)
+
+	def test_jurisdiction_and_name_are_html_escaped(self):
+		"""Defensive escaping of TaxJar-sourced jurisdiction/name text, same
+		posture as the old JS's frappe.utils.escape_html() calls."""
+		import json as _json
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		data = _json.loads(doc.taxjar_breakdown_json)
+		data["transaction"][0]["name"] = "<script>alert(1)</script>"
+		doc.taxjar_breakdown_json = _json.dumps(data)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertNotIn("<script>alert(1)</script>", html)
+		self.assertIn("&lt;script&gt;", html)
+
+
+# ── Tax Breakdown: onload/before_print wiring (set_taxjar_breakdown_html) ──
+
+class TestSetTaxjarBreakdownHtml(UnitTestCase):
+
+	def test_onload_sets_onload_key_not_field(self):
+		"""Desk form: pushed via set_onload for the client shim to copy onto
+		the field, since the browser already holds its own copy of the doc."""
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		set_taxjar_breakdown_html(doc, "onload")
+		self.assertIsNone(doc.taxjar_breakdown_html)
+		self.assertIn("Jurisdiction", doc.get_onload("_taxjar_breakdown_html"))
+
+	def test_before_print_sets_field_directly(self):
+		"""Print/PDF: assigned directly, since print rendering reads this same
+		in-memory doc in the same request - no client round trip involved.
+		Called as doc.run_method("before_print", print_settings) by
+		frappe.www.printview - the print_settings positional arg must not
+		raise a TypeError."""
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		_store_breakdown_data(tax_data, doc)
+		set_taxjar_breakdown_html(doc, "before_print", {"some": "print_settings"})
+		self.assertIsNotNone(doc.taxjar_breakdown_html)
+		self.assertIn("Jurisdiction", doc.taxjar_breakdown_html)
+		self.assertEqual(doc.get_onload(), {})
+
+	def test_noop_when_doc_has_no_breakdown_html_field(self):
+		doc = _make_doc()
+		doc.meta = _FakeMeta(fields=())
+		set_taxjar_breakdown_html(doc, "onload")
+		self.assertEqual(doc.get_onload(), {})
+
+	def test_real_document_virtual_field_has_no_instance_attribute_when_loaded_from_db(self):
+		"""Regression guard for the exact bug this class exists to prevent:
+		hasattr(doc, "taxjar_breakdown_html") is False on a document loaded via
+		Document.load_from_db(), because is_virtual fields with no backing
+		@property are never set as instance attributes there - load_from_db
+		populates BaseDocument.__init__ from a raw "SELECT *" row dict, which
+		only has real DB columns, and (unlike frappe.new_doc(), which does call
+		init_valid_columns() and so does NOT reproduce this) never backfills
+		virtual fields to None. A guard using hasattr() instead of
+		doc.meta.has_field() silently no-opped set_taxjar_breakdown_html for
+		every already-saved document - exactly what onload/before_print always
+		deal with.
+
+		Reproduces that exact construction path (BaseDocument.__init__ from a
+		bare dict, the same call load_from_db makes) without needing a
+		persisted record, since frappe.new_doc()/frappe.get_doc({...}) both
+		route through init_valid_columns() and would not reproduce the bug."""
+		from frappe.model.base_document import BaseDocument
+		from frappe.model.document import get_controller
+
+		controller = get_controller("Quotation")
+		doc = controller.__new__(controller)
+		doc.flags = frappe._dict()
+		BaseDocument.__init__(doc, {"doctype": "Quotation", "name": "QTN-TEST-0001", "company": "_Test Company"})
+
+		self.assertTrue(doc.meta.has_field("taxjar_breakdown_html"))
+		self.assertFalse(hasattr(doc, "taxjar_breakdown_html"))
+
+	def test_onload_populates_real_document_loaded_from_db(self):
+		"""End-to-end against the real onload dispatch path AND the
+		load_from_db-shaped construction from the test above - together these
+		cover the exact scenario that broke in production: a doc.meta.has_field()
+		guard (fixed) vs. the hasattr() guard (buggy) it replaced, wired through
+		the real set_onload()/__onload round trip."""
+		from frappe.desk.form.load import run_onload
+		from frappe.model.base_document import BaseDocument
+		from frappe.model.document import get_controller
+
+		controller = get_controller("Quotation")
+		doc = controller.__new__(controller)
+		doc.flags = frappe._dict()
+		BaseDocument.__init__(doc, {"doctype": "Quotation", "name": "QTN-TEST-0001", "company": "_Test Company"})
+		doc.items = []
+		doc.append("items", {"item_code": "_Test Item", "qty": 1, "rate": 100})
+		doc.taxjar_breakdown_json = frappe.as_json(_extract_breakdown_data(_make_us_breakdown(), doc))
+
+		run_onload(doc)
+
+		html = doc.get_onload("_taxjar_breakdown_html")
+		self.assertIsNotNone(html)
+		self.assertIn("Jurisdiction", html)
+
+
+class TestTaxjarBreakdownHtmlHooksRegistered(UnitTestCase):
+	"""onload/before_print never fire for a hook registered on the wrong key
+	(e.g. a child doctype - see the child-table field investigation for why
+	that matters) - so this pins the exact transaction-doctype grouping the
+	hook must be registered under."""
+
+	def _transaction_doc_events(self):
+		from taxjar_integration import hooks
+		for doctypes, events in hooks.doc_events.items():
+			key = doctypes if isinstance(doctypes, tuple) else (doctypes,)
+			if set(("Quotation", "Sales Order", "Sales Invoice")) <= set(key):
+				return events
+		return {}
+
+	def test_onload_registered_on_transaction_doctypes(self):
+		events = self._transaction_doc_events()
+		self.assertIn("set_taxjar_breakdown_html", events.get("onload", ""))
+
+	def test_before_print_registered_on_transaction_doctypes(self):
+		events = self._transaction_doc_events()
+		self.assertIn("set_taxjar_breakdown_html", events.get("before_print", ""))
+
+
 # ── Tax Breakdown: JS structure tests ───────────────────────────────────────
 
 class TestTaxBreakdownJS(UnitTestCase):
@@ -5322,6 +5582,14 @@ class TestTaxBreakdownJS(UnitTestCase):
 	def _read_js(self, filename):
 		import os
 		with open(os.path.join(self._js_dir(), filename)) as f:
+			return f.read()
+
+	def _read_breakup_template(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "templates", "includes", "taxjar_breakup.html",
+		))
+		with open(path) as f:
 			return f.read()
 
 	def test_shared_utils_defines_render_functions(self):
@@ -5433,14 +5701,28 @@ class TestTaxBreakdownJS(UnitTestCase):
 		self.assertIn("Please save to see tax breakdown.", fn)
 		self.assertIn("const text = is_new", fn)
 
-	def test_render_tax_breakdown_passes_is_new_to_no_breakdown_msg(self):
+	def test_render_tax_breakdown_copies_from_onload(self):
+		"""The table itself is rendered server-side (see the
+		get_taxjar_breakdown_html tests) - this just copies the result from
+		frm.doc.__onload onto the virtual field, with a client-side fallback
+		message for a truly new/unsaved doc (which never goes through the
+		server onload) and for the unexpected case of a saved doc missing
+		__onload entirely."""
 		js = self._read_js("taxjar_utils.js")
 		fn = js.split("render_tax_breakdown = function (frm) {")[1].split("\n};")[0]
-		self.assertEqual(fn.count("_no_breakdown_msg(frm.is_new())"), 2)
+		self.assertIn("_no_breakdown_msg(true)", fn)
+		self.assertIn("_no_breakdown_msg(false)", fn)
+		self.assertIn("frm.doc.__onload?._taxjar_breakdown_html", fn)
+		self.assertIn('frm.refresh_field("taxjar_breakdown_html")', fn)
 
-	def test_shipping_taxability_pill_defined(self):
+	def test_shipping_taxability_pill_defined_in_js(self):
+		"""Plain-HTML field (taxjar_freight_taxable_html), rendered
+		client-side straight off the already-loaded taxjar_freight_taxable
+		field - no server round trip needed, and deliberately not part of
+		templates/includes/taxjar_breakup.html since a read-only Text Editor
+		field would box it together with the table."""
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("_shipping_taxability_html = function (frm) {")[1].split("\n};")[0]
+		fn = js.split("render_shipping_taxability = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("taxjar_freight_taxable", fn)
 		self.assertIn("Is shipping charges taxable?", fn)
 		self.assertIn("indicator-pill", fn)
@@ -5449,40 +5731,45 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 	def test_shipping_taxability_pill_uses_bigger_font(self):
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("_shipping_taxability_html = function (frm) {")[1].split("\n};")[0]
+		fn = js.split("render_shipping_taxability = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("var(--text-md)", fn)
 		self.assertNotIn("var(--text-sm)", fn)
 
-	def test_shipping_taxability_pill_rendered_in_breakdown(self):
-		js = self._read_js("taxjar_utils.js")
-		fn = js.split("render_tax_breakdown = function (frm) {")[1].split("\n};")[0]
-		self.assertIn("_shipping_taxability_html(frm)", fn)
+	def test_shipping_taxability_pill_wired_into_refresh(self):
+		for filename in ("sales_invoice.js", "sales_order.js", "quotation.js"):
+			js = self._read_js(filename)
+			self.assertIn(
+				"taxjar_integration.render_shipping_taxability(frm)", js,
+				f"{filename} should call render_shipping_taxability on refresh",
+			)
 
-	def test_shipping_taxability_sits_directly_above_tax_breakup_table(self):
-		js = self._read_js("taxjar_utils.js")
-		fn = js.split("render_tax_breakdown = function (frm) {")[1].split("\n};")[0]
-		usd_block = fn.split("if (data.usd) {")[1].split("\n\t}\n")[0]
-		self.assertNotIn("_shipping_taxability_html", usd_block)
-		shipping_idx = fn.index("_shipping_taxability_html(frm)")
-		final_table_idx = fn.index("build_transaction_table(data.transaction")
-		self.assertLess(shipping_idx, final_table_idx)
-		self.assertEqual(
-			fn[shipping_idx:final_table_idx].count("build_transaction_table"), 0,
-			"no table call should sit between the pill and the Tax Breakup table it belongs to",
-		)
+	def test_breakup_template_has_multi_currency_support(self):
+		template = self._read_breakup_template()
+		self.assertIn("data.usd", template, "taxjar_breakup.html should check for USD breakdown data")
+		self.assertIn("Tax Calculation (USD)", template, "taxjar_breakup.html should have USD table heading")
+		self.assertIn("Equivalent in Transaction Currency", template, "taxjar_breakup.html should have converted table heading")
 
-	def test_js_has_multi_currency_support(self):
-		js = self._read_js("taxjar_utils.js")
-		self.assertIn("data.usd", js, "taxjar_utils.js should check for USD breakdown data")
-		self.assertIn("Tax Calculation (USD)", js, "taxjar_utils.js should have USD table heading")
-		self.assertIn("Equivalent in Transaction Currency", js, "taxjar_utils.js should have converted table heading")
+	def test_breakup_template_uses_erpnext_table_styling(self):
+		"""Same tax-break-up/table-bordered/table-hover markup as core
+		ERPNext's own Tax Breakup table and india_compliance's GST Breakup
+		Table - and, unlike the old JS builder, no inline thead background
+		overriding the default desk table theme."""
+		template = self._read_breakup_template()
+		self.assertIn("table-hover", template)
+		self.assertIn('class="tax-break-up"', template)
+		self.assertIn("overflow-x: auto", template)
+		self.assertNotIn("table-sm", template)
+		self.assertNotIn("background-color", template)
 
-	def test_js_uses_erpnext_table_styling(self):
+	def test_item_table_js_uses_erpnext_table_styling(self):
+		"""Item-level breakdown table (build_item_table) is still JS-rendered -
+		only the transaction-level table moved server-side."""
 		js = self._read_js("taxjar_utils.js")
-		self.assertIn("table-hover", js, "taxjar_utils.js should use table-hover class")
-		self.assertIn("tax-break-up", js, "taxjar_utils.js should use tax-break-up wrapper")
-		self.assertIn("overflow-x: auto", js, "taxjar_utils.js should have overflow-x auto")
-		self.assertNotIn("table-sm", js, "taxjar_utils.js should not use table-sm class")
+		fn = js.split("build_item_table = function (rows, currency) {")[1].split("\n};")[0]
+		self.assertIn("table-hover", fn)
+		self.assertIn("tax-break-up", fn)
+		self.assertIn("overflow-x: auto", fn)
+		self.assertNotIn("table-sm", fn)
 
 
 # ── Tax Breakdown: Multi-currency tests ─────────────────────────────────────

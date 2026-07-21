@@ -356,61 +356,6 @@ taxjar_integration._no_breakdown_msg = function (is_new) {
 	return `<p class="text-muted">${text}</p>`;
 };
 
-// Rendered inside render_tax_breakdown(), directly above the Tax Breakup
-// table, in the "TaxJar Tax Breakdown" section.
-taxjar_integration._shipping_taxability_html = function (frm) {
-	if (frm.doc.taxjar_freight_taxable === undefined || frm.doc.taxjar_freight_taxable === null) return "";
-	const taxable = cint(frm.doc.taxjar_freight_taxable);
-	const color = taxable ? "green" : "grey";
-	const label = taxable ? __("Yes") : __("No");
-	return `
-		<div style="margin-bottom: 10px; font-size: var(--text-md);">
-			<span class="text-muted">${__("Is shipping charges taxable?")}</span>
-			<span class="indicator-pill ${color}" style="margin-left: 6px; font-size: var(--text-md);">${label}</span>
-		</div>
-	`;
-};
-
-taxjar_integration._multi_currency_note = function (data) {
-	return `<p class="text-muted small">${
-		__("This is a multi-currency transaction. Amounts were converted from {0} to USD at a rate of {1} ({2}) for TaxJar tax calculation.",
-			[data.currency, data.exchange_rate, data.exchange_date])
-	}</p>`;
-};
-
-taxjar_integration.build_transaction_table = function (rows, totals, currency) {
-	const body = rows
-		.map(
-			(r) =>
-				`<tr>
-				<td>${frappe.utils.escape_html(r.jurisdiction)}</td>
-				<td>${frappe.utils.escape_html(r.name || "")}</td>
-				<td class="text-right">${(r.rate * 100).toFixed(3)}%</td>
-				<td class="text-right">${format_currency(r.tax_amount, currency)}</td>
-			</tr>`
-		)
-		.join("");
-
-	return `
-		<div class="tax-break-up" style="overflow-x: auto;">
-			<table class="table table-bordered table-hover">
-				<thead style="background-color: var(--subtle-fg);"><tr>
-					<th class="text-left">${__("Jurisdiction")}</th>
-					<th class="text-left">${__("Name")}</th>
-					<th class="text-right">${__("Rate")}</th>
-					<th class="text-right">${__("Tax Amount")}</th>
-				</tr></thead>
-				<tbody>${body}</tbody>
-				<tfoot><tr style="font-weight:bold">
-					<td>${__("Total")}</td>
-					<td></td>
-					<td class="text-right">${((totals.rate || 0) * 100).toFixed(3)}%</td>
-					<td class="text-right">${format_currency(totals.amount_to_collect || 0, currency)}</td>
-				</tr></tfoot>
-			</table>
-		</div>`;
-};
-
 taxjar_integration.build_item_table = function (rows, currency) {
 	const body = rows
 		.map(
@@ -440,40 +385,49 @@ taxjar_integration.build_item_table = function (rows, currency) {
 		</div>`;
 };
 
+// Plain HTML field, rendered client-side straight off the already-loaded
+// taxjar_freight_taxable Check field - no server round trip needed. Kept out
+// of taxjar_breakdown_html on purpose: a read-only Text Editor field wraps
+// its whole content in a boxed "like-disabled-input" background, which looks
+// right around the table but wrong around a standalone indicator pill.
+taxjar_integration.render_shipping_taxability = function (frm) {
+	if (!frm.fields_dict.taxjar_freight_taxable_html) return;
+	const wrapper = frm.fields_dict.taxjar_freight_taxable_html.$wrapper;
+
+	if (frm.doc.taxjar_freight_taxable === undefined || frm.doc.taxjar_freight_taxable === null) {
+		wrapper.html("");
+		return;
+	}
+
+	const taxable = cint(frm.doc.taxjar_freight_taxable);
+	const color = taxable ? "green" : "grey";
+	const label = taxable ? __("Yes") : __("No");
+	wrapper.html(`
+		<div style="margin-bottom: 10px; font-size: var(--text-md);">
+			<span class="text-muted">${__("Is shipping charges taxable?")}</span>
+			<span class="indicator-pill ${color}" style="margin-left: 6px; font-size: var(--text-md);">${label}</span>
+		</div>
+	`);
+};
+
+// The table itself (plus, for multi-currency docs, the USD sub-table above
+// it) is rendered server-side - see get_taxjar_breakdown_html() in
+// taxjar_integration.py and templates/includes/taxjar_breakup.html - same
+// tax-break-up/table-bordered/table-hover markup core ERPNext and
+// india_compliance use for their own Tax Breakup / GST Breakup tables, which
+// is also what makes it show up in Print/PDF. onload pushes the rendered
+// HTML onto frm.doc.__onload (the browser already holds its own copy of the
+// doc by the time onload runs, so it can't be written directly onto the
+// field) - this just copies it across.
 taxjar_integration.render_tax_breakdown = function (frm) {
 	if (!frm.fields_dict.taxjar_breakdown_html) return;
-	const wrapper = frm.fields_dict.taxjar_breakdown_html.$wrapper;
 
-	if (!frm.doc.taxjar_breakdown_json) {
-		wrapper.html(taxjar_integration._no_breakdown_msg(frm.is_new()));
-		return;
+	if (frm.is_new()) {
+		frm.doc.taxjar_breakdown_html = taxjar_integration._no_breakdown_msg(true);
+	} else {
+		frm.doc.taxjar_breakdown_html = frm.doc.__onload?._taxjar_breakdown_html || taxjar_integration._no_breakdown_msg(false);
 	}
-
-	let data;
-	try {
-		data = JSON.parse(frm.doc.taxjar_breakdown_json);
-	} catch (e) {
-		wrapper.html(taxjar_integration._no_breakdown_msg(frm.is_new()));
-		return;
-	}
-
-	let html = "";
-	const currency = data.currency || frm.doc.currency;
-
-	if (data.usd) {
-		html += taxjar_integration._multi_currency_note(data);
-		html += `<p class="text-muted small" style="margin-bottom:4px"><strong>${__("Tax Calculation (USD)")}</strong></p>`;
-		html += taxjar_integration.build_transaction_table(data.usd.transaction || [], data.usd.totals || {}, "USD");
-		html += `<p class="text-muted small" style="margin-top:12px;margin-bottom:4px"><strong>${
-			__("Equivalent in Transaction Currency ({0})", [currency])
-		}</strong></p>`;
-	}
-
-	// Right above the actual Tax Breakup table (the transaction-currency one,
-	// not the USD sub-table above it when this is a multi-currency doc).
-	html += taxjar_integration._shipping_taxability_html(frm);
-	html += taxjar_integration.build_transaction_table(data.transaction || [], data.totals || {}, currency);
-	wrapper.html(html);
+	frm.refresh_field("taxjar_breakdown_html");
 };
 
 taxjar_integration.render_single_item_breakdown = function (frm, cdn, item_doctype) {

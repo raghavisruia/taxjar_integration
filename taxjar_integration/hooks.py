@@ -132,7 +132,9 @@ doc_events = {
 		"on_cancel": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_delete",
 	},
 	("Quotation", "Sales Order", "Sales Invoice"): {
-		"validate": ["taxjar_integration.taxjar_integration.taxjar_integration.set_sales_tax"]
+		"validate": ["taxjar_integration.taxjar_integration.taxjar_integration.set_sales_tax"],
+		"onload": "taxjar_integration.taxjar_integration.taxjar_integration.set_taxjar_breakdown_html",
+		"before_print": "taxjar_integration.taxjar_integration.taxjar_integration.set_taxjar_breakdown_html",
 	},
 	"Address": {
 		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_address"

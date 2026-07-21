@@ -1,6 +1,7 @@
 frappe.ui.form.on("Sales Invoice", {
 	refresh(frm) {
 		_render_taxjar_response(frm);
+		taxjar_integration.render_shipping_taxability(frm);
 		taxjar_integration.render_tax_breakdown(frm);
 		_add_taxjar_buttons(frm);
 		taxjar_integration.render_status_cards(frm);
