@@ -43,6 +43,9 @@ class TaxJarSetup {
 		this.reached = 0;
 		this.state = null;
 		this.controls = {};
+		// API Credentials starts expanded - it's a required step, so hiding it
+		// by default would just cost an extra click every single time.
+		this._credsExpanded = true;
 		this._build_shell();
 		this._load_state();
 	}
@@ -85,6 +88,41 @@ class TaxJarSetup {
 		`).join(""));
 		this.$intervals.find(".ts-interval-btn").on("click", (e) => {
 			this._go(+$(e.currentTarget).closest(".ts-interval").data("i"));
+		});
+
+		// Delegated once here (rather than rebound per step render) so it
+		// keeps working for any .ts-info-btn added later by any step, without
+		// needing to re-wire it every time this.$body.html() replaces its contents.
+		this.$root.on("click", ".ts-info-btn", (e) => {
+			e.stopPropagation(); // don't also trigger whatever the button sits inside (a pill, a heading)
+			this._toggle_info_popover($(e.currentTarget));
+		});
+	}
+
+	// Click-to-show popover for the Retry pill's failure reason - no backing
+	// form field to hang frappe's native InfoCard off of here (API Mode and
+	// Enable API logs use the real thing instead - see their
+	// df.show_description_on_click), so this one spot stays hand-rolled.
+	_info_btn_html(text) {
+		return `<button type="button" class="ts-info-btn" data-info="${frappe.utils.escape_html(text)}">${frappe.utils.icon("triangle-alert", "md")}</button>`;
+	}
+
+	_toggle_info_popover($trigger) {
+		const reopening = $trigger.hasClass("ts-info-btn-active");
+		$(".ts-info-pop").remove();
+		this.$root.find(".ts-info-btn").removeClass("ts-info-btn-active");
+		$(document).off("click.tsInfoPop");
+		if (reopening) return;
+
+		$trigger.addClass("ts-info-btn-active");
+		const $pop = $(`<div class="ts-info-pop">${frappe.utils.escape_html($trigger.attr("data-info") || "")}</div>`).appendTo("body");
+		// position: fixed + getBoundingClientRect() are both viewport-relative,
+		// so no scroll-offset math is needed here.
+		const rect = $trigger[0].getBoundingClientRect();
+		$pop.css({ top: rect.bottom + 6, left: rect.left });
+		$(document).on("click.tsInfoPop", () => {
+			$pop.remove();
+			$trigger.removeClass("ts-info-btn-active");
 		});
 	}
 
@@ -218,114 +256,200 @@ class TaxJarSetup {
 		`);
 	}
 
+	// Two-button pill toggle (Sandbox | Live), a stand-in for a real frappe
+	// control - exposes only the get_value/set_value subset the rest of this
+	// file actually calls on this.controls.mode, and calls _on_mode_change()
+	// itself on a real click rather than needing a $input "change" event.
+	_render_mode_toggle($parent, initial) {
+		const $wrap = $(`
+			<div class="ts-segmented">
+				<button type="button" class="ts-seg-btn" data-value="Sandbox">${__("Sandbox")}</button>
+				<button type="button" class="ts-seg-btn" data-value="Live">${__("Live")}</button>
+			</div>
+		`).appendTo($parent);
+
+		let value = initial;
+		const setActive = () => {
+			$wrap.find(".ts-seg-btn").each((_, el) => {
+				const isActive = $(el).data("value") === value;
+				$(el).toggleClass("ts-seg-active", isActive).attr("aria-pressed", isActive);
+			});
+		};
+		setActive();
+
+		$wrap.find(".ts-seg-btn").on("click", (e) => {
+			const next = $(e.currentTarget).data("value");
+			if (next === value) return;
+			value = next;
+			setActive();
+			this._on_mode_change();
+		});
+
+		return {
+			get_value: () => value,
+			set_value: (v) => { value = v; setActive(); },
+		};
+	}
+
 	// ── Step 2: Connect API ─────────────────────────────────────────
 	_render_connect() {
 		const s = this.state || {};
+		const creds = (s.credentials && s.credentials.length) ? s.credentials : [{ company: null, token_last4: null }];
+
 		this.$body.html(`
-			<div class="ts-field ts-field-mode" style="max-width:280px"></div>
-			<label class="control-label">${__("API Token")}</label>
-			<div class="ts-cardgrid ts-cred-cards"></div>
-			<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
-			<label class="control-label" style="margin-top:24px">${__("API Logs")}</label>
-			<div class="ts-togrow ts-logtoggle">
-				<div class="ts-field-logging"></div>
-				<div class="ts-togtext">
-					<b>${__("Enable API Logs")}</b>
-					<p>${__("Records API requests, responses, and errors in TaxJar API Log.")}</p>
+			<div class="ts-card">
+				<div class="ts-card-b ts-mode-row">
+					<div>
+						<label class="control-label" style="margin:0">${__("API Mode")} <span class="ts-reqd">*</span></label>
+						<p class="ts-fieldnote" style="margin:2px 0 0">${__("Live requests affect real filings.")}</p>
+					</div>
+					<div class="ts-field-mode"></div>
 				</div>
 			</div>
-			<div class="ts-field ts-field-retention" style="max-width:200px;margin-top:14px"></div>
+
+			<div class="ts-card" style="margin-top:20px">
+				<div class="ts-card-h ts-cred-heading">
+					<span class="ts-acc-chevron">${frappe.utils.icon("chevron-right", "sm")}</span>
+					<b>${__("API Credentials")}</b>
+					<span class="ts-grow"></span>
+					<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
+				</div>
+				<div class="ts-card-b ts-cred-rows"></div>
+			</div>
+
+			<div class="ts-card ts-logtoggle" style="margin-top:20px">
+				<div class="ts-card-b">
+					<div class="ts-field-logging"></div>
+				</div>
+				<div class="ts-card-b ts-retention-row">
+					<div>
+						<label class="control-label" style="margin:0">${__("Retention")}</label>
+						<p class="ts-fieldnote" style="margin:2px 0 0">${__("Older logs are deleted automatically.")}</p>
+					</div>
+					<div class="ts-retention-wrap">
+						<div class="ts-field-retention"></div>
+						<span class="ts-retention-unit"></span>
+					</div>
+				</div>
+			</div>
 		`);
 
-		this.controls.mode = frappe.ui.form.make_control({
-			parent: this.$body.find(".ts-field-mode"),
-			df: { fieldtype: "Select", fieldname: "api_mode", label: __("API Mode"), options: ["Sandbox", "Live"], reqd: 1 },
-			render_input: true,
-		});
-		this.controls.mode.set_value(s.api_mode || "Sandbox");
-		this.controls.mode.$input.on("change", () => this._on_mode_change());
+		// A two-option toggle, not a native Select - Sandbox/Live is a binary
+		// choice worth showing both sides of at once rather than hiding one
+		// behind a closed dropdown. Not a real frappe control, so it can't
+		// get InfoCard for free the way Select did; the label+description
+		// are hand-authored instead (same as Enable API logs' own reverted
+		// plain-description treatment above).
+		this.controls.mode = this._render_mode_toggle(this.$body.find(".ts-field-mode"), s.api_mode || "Live");
 
-		// set_value() above resolves asynchronously (it runs through
-		// frappe.run_serially), so this.controls.mode.get_value() read synchronously
-		// right after it can still return the pre-set value — that's what made the
-		// token label below flip to "Sandbox token" even when the saved mode was
-		// Live. Track the intended mode from state directly instead of trusting the
-		// control mid-flight; _on_mode_change() (a real user-driven change event)
-		// keeps it in sync from here on.
-		this._modeIsLive = (s.api_mode || "Sandbox") === "Live";
+		// this.controls.mode.get_value() is safe to read synchronously here
+		// (unlike a real frappe control's set_value(), the toggle above has no
+		// frappe.run_serially step to resolve), but _modeIsLive stays its own
+		// tracked flag regardless, since credential cards not yet built at
+		// this point (see _add_credential_card below) need to read it too;
+		// _on_mode_change() keeps it in sync from here on.
+		this._modeIsLive = (s.api_mode || "Live") === "Live";
 
 		this._connectCards = [];
-		const creds = (s.credentials && s.credentials.length) ? s.credentials : [{ company: null, token_last4: null }];
 		creds.forEach((cred) => this._add_credential_card(cred));
+		// Reapplies whatever this instance's expand state already was (e.g. the
+		// user collapsed it, then went Back and returned) rather than always
+		// resetting to expanded on every re-render of this step.
+		this._set_creds_expanded(this._credsExpanded);
 
-		this.$body.find(".ts-add-cred").on("click", () => this._add_credential_card({ company: null, token_last4: null }));
+		this.$body.find(".ts-cred-heading").on("click", () => this._set_creds_expanded(!this._credsExpanded));
+		this.$body.find(".ts-add-cred").on("click", (e) => {
+			e.stopPropagation(); // don't also toggle the heading's own collapse
+			this._add_credential_card({ company: null, token_last4: null });
+			this._set_creds_expanded(true);
+		});
 
+		// fieldtype "Switch" (frappe.ui.form.ControlSwitch, controls/switch.js)
+		// is a real pill toggle already shipped and styled in frappe core
+		// (frappe/public/scss/common/controls.scss's .switch-control/
+		// .switch-visual/.switch-thumb, already part of the desk CSS bundle)
+		// - reachable from a plain script exactly like Check is, no Vue/
+		// frappe-ui package involved. Replaces the hand-rolled CSS checkbox
+		// (appearance:none + ::before track/thumb), which rendered as a
+		// broken grey ring instead of a clean switch in practice. Its own
+		// native label+description replace the hand-authored .ts-togtext.
 		this.controls.enableLogging = frappe.ui.form.make_control({
 			parent: this.$body.find(".ts-field-logging"),
-			df: { fieldtype: "Check", fieldname: "enable_taxjar_logging" },
+			df: {
+				fieldtype: "Switch", fieldname: "enable_taxjar_logging",
+				label: __("Enable API logs"),
+				description: __("Records API requests, responses, and errors in TaxJar API Log."),
+			},
 			render_input: true,
 		});
 		this.controls.enableLogging.set_value(s.enable_taxjar_logging ? 1 : 0);
 
+		// only_input: the unit text to the right already says what this
+		// number means, so a separate field label would be redundant.
 		this.controls.logRetention = frappe.ui.form.make_control({
 			parent: this.$body.find(".ts-field-retention"),
-			df: {
-				fieldtype: "Int", fieldname: "log_retention_days", label: __("Log Retention (Days)"),
-				description: __("Automatically delete API Logs older than this many days. Set 0 to retain logs."),
-			},
+			df: { fieldtype: "Int", fieldname: "log_retention_days" },
+			only_input: true,
 			render_input: true,
 		});
-		this.controls.logRetention.set_value(s.log_retention_days != null ? s.log_retention_days : 90);
+		this.controls.logRetention.set_value(s.log_retention_days != null ? s.log_retention_days : 15);
+
+		const $retentionUnit = this.$body.find(".ts-retention-unit");
+		const syncRetentionUnit = () => {
+			$retentionUnit.text(cint(this.controls.logRetention.get_value()) === 1 ? __("day") : __("days"));
+		};
+		// set_value() above resolves through frappe.run_serially, so reading
+		// get_value() back synchronously right here would still see the
+		// pre-set value on first render (same class of bug as _modeIsLive) -
+		// derive the initial unit word from the already-known state/default
+		// instead, and only trust get_value() from here on for the change event.
+		$retentionUnit.text(
+			(s.log_retention_days != null ? s.log_retention_days : 15) === 1 ? __("day") : __("days")
+		);
+		this.controls.logRetention.$input.on("input", syncRetentionUnit);
 
 		// Log Retention only means anything once logging is on — mirrors the
 		// doctype field's own depends_on: eval: doc.enable_taxjar_logging.
-		const $retentionField = this.$body.find(".ts-field-retention");
+		// Hides the whole row (label + description + input), not just the
+		// input - "Retention / Older logs are deleted automatically" with no
+		// way to see or edit the day count would read as broken, not off.
+		const $retentionField = this.$body.find(".ts-retention-row");
 		const syncRetentionVisibility = () => {
 			$retentionField.toggle(!!this.controls.enableLogging.get_value());
 		};
-		// set_value() above resolves asynchronously (frappe.run_serially), so
-		// get_value() read synchronously right here can still see the pre-set
-		// value - same class of bug as _modeIsLive/token label. That's exactly
-		// why this only ever appeared to work after a real toggle (a genuine
-		// click is a synchronous DOM event) and never on initial load with
-		// logging already enabled. Use the already-known state value directly
-		// for the initial visibility check instead of trusting the control
-		// mid-flight; the change handler (a real user-driven event) is safe.
+		// Same asynchronous-set_value gotcha as above - use the known state
+		// value for the initial visibility check, not a synchronous read.
 		$retentionField.toggle(!!s.enable_taxjar_logging);
 		this.controls.enableLogging.$input.on("change", syncRetentionVisibility);
 
 		this._sync_connect_gate();
 	}
 
+	_set_creds_expanded(expanded) {
+		this._credsExpanded = expanded;
+		this.$body.find(".ts-cred-rows").css("display", expanded ? "flex" : "none");
+		this.$body.find(".ts-cred-heading .ts-acc-chevron").toggleClass("ts-acc-chevron-open", expanded);
+	}
+
 	_add_credential_card(cred) {
-		// Header is just the company name + status — the Company field itself lives
-		// in the card body, so a long status message never has to share a row with
-		// a full-width form control (that's what was overflowing before).
+		// No per-row header anymore - the Company field itself is always
+		// visible in the row, so nothing else needs to identify which
+		// company a row is for. Rows are separated with a divider instead
+		// (see .ts-cred-row + .ts-cred-row in the CSS).
 		// A company that already has a saved token starts already "tested" -
 		// re-running the guided setup shouldn't visually demand a re-test of a
-		// connection that was already verified and hasn't changed - and reads
-		// that state with the exact same "Success" chip a fresh test produces,
-		// not a separate "Saved" wording that reads as somehow less certain
-		// and invites re-testing anyway.
+		// connection that was already verified and hasn't changed.
 		const alreadySaved = !!cred.token_last4;
 		const $card = $(`
-			<div class="ts-card">
-				<div class="ts-card-h">
-					<b class="ts-cred-name">${cred.company ? frappe.utils.escape_html(cred.company) : __("New company")}</b>
-					<div class="ts-card-h-right">
-						<span class="ts-chip ${alreadySaved ? "ok" : "idle"}">${alreadySaved ? `<span class="ts-chip-dot"></span> ${__("Success")}` : __("Not tested")}</span>
-						<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
-					</div>
-				</div>
-				<div class="ts-card-b">
-					<div class="ts-field-company"></div>
-					<div class="ts-field-token"></div>
-					<button class="btn btn-default btn-sm ts-test">${__("Test connection")}</button>
-				</div>
+			<div class="ts-cred-row">
+				<div class="ts-field-company"></div>
+				<div class="ts-field-token"></div>
+				<div class="ts-cred-action"></div>
+				<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
 			</div>
-		`).appendTo(this.$body.find(".ts-cred-cards"));
+		`).appendTo(this.$body.find(".ts-cred-rows"));
 
-		const entry = { company: cred.company, tested: alreadySaved, $card, controls: {} };
+		const entry = { company: cred.company, tested: alreadySaved, lastError: null, $card, controls: {} };
 		this._connectCards.push(entry);
 
 		const otherCompanies = () => this._connectCards
@@ -346,7 +470,7 @@ class TaxJarSetup {
 		// input - so without this guard, populating an already-saved card
 		// immediately re-fired onchange and reset entry.tested straight back to
 		// false right after alreadySaved had just set it true, wiping the
-		// "Success" chip the moment the card rendered.
+		// "Success" pill the moment the card rendered.
 		let restoringInitialCompany = !!cred.company;
 		companyControl.df.onchange = () => {
 			if (restoringInitialCompany) {
@@ -355,7 +479,6 @@ class TaxJarSetup {
 			}
 			entry.company = companyControl.get_value();
 			entry.tested = false;
-			$card.find(".ts-cred-name").text(entry.company || __("New company"));
 			this._reset_cred_status(entry);
 			this._sync_connect_gate();
 		};
@@ -375,7 +498,6 @@ class TaxJarSetup {
 				label: this._modeIsLive ? __("Live token") : __("Sandbox token"),
 				reqd: !cred.token_last4,
 				placeholder: cred.token_last4 ? __("•••••••••••• (ending in {0})", [cred.token_last4]) : "",
-				description: cred.token_last4 ? __("Leave blank to keep the saved token.") : "",
 			},
 			render_input: true,
 		});
@@ -388,7 +510,7 @@ class TaxJarSetup {
 		// A saved connection starts "tested" (see alreadySaved above), but that only
 		// holds while the stored token is still what's in effect. The moment the
 		// user actually types into this field, the value in play changes and the
-		// previous verification no longer applies — require a fresh Test connection
+		// previous verification no longer applies — require a fresh Connect
 		// before Continue is ungated again.
 		tokenControl.$input.on("input", () => {
 			if (!entry.tested) return;
@@ -397,8 +519,35 @@ class TaxJarSetup {
 			this._sync_connect_gate();
 		});
 
-		$card.find(".ts-test").on("click", () => this._test_connection(entry));
+		this._render_cred_action(entry);
 		$card.find(".ts-card-remove").on("click", () => this._remove_credential_card(entry, cred));
+	}
+
+	// The action slot cycles through three states: an idle "Connect" button,
+	// a transient "testing…" state (see _test_connection), and a result pill
+	// (green Success / yellow Retry) that replaces the button once tested —
+	// clicking the pill re-tests. Centralised here since every entry point
+	// that can invalidate a previous test (edit company, edit token, switch
+	// mode) needs to fall back to the same idle button.
+	_render_cred_action(entry) {
+		const $action = entry.$card.find(".ts-cred-action");
+		if (entry.tested) {
+			$action.html(`<span class="ts-chip ok ts-cred-pill"><span class="ts-chip-dot"></span> ${__("Success")}</span>`);
+		} else if (entry.lastError) {
+			// The warning icon sits outside the pill (not nested inside it, and
+			// not routed through the pill's own click handler at all - they're
+			// siblings, so clicking the icon can never also trigger a retry).
+			// No native InfoCard here: it's not a real form field, so there's
+			// no df/label for frappe's own control code to hang one off of -
+			// this is the one spot still using the hand-rolled popover.
+			$action.html(`
+				${this._info_btn_html(entry.lastError)}
+				<span class="ts-chip retry ts-cred-pill">${__("Retry")}</span>
+			`);
+		} else {
+			$action.html(`<button type="button" class="btn btn-default ts-test">${__("Connect")}</button>`);
+		}
+		$action.find(".ts-test, .ts-cred-pill").on("click", () => this._test_connection(entry));
 	}
 
 	_remove_credential_card(entry, cred) {
@@ -421,7 +570,8 @@ class TaxJarSetup {
 	}
 
 	_reset_cred_status(entry) {
-		entry.$card.find(".ts-card-h .ts-chip").attr("class", "ts-chip idle").text(__("Not tested"));
+		entry.lastError = null;
+		this._render_cred_action(entry);
 	}
 
 	_on_mode_change() {
@@ -436,7 +586,6 @@ class TaxJarSetup {
 			// carry it over without another round trip. Re-entry is required.
 			tokenCtrl.df.label = live ? __("Live token") : __("Sandbox token");
 			tokenCtrl.df.placeholder = "";
-			tokenCtrl.df.description = "";
 			tokenCtrl.df.reqd = 1;
 			tokenCtrl.refresh();
 			entry.tested = false;
@@ -451,10 +600,12 @@ class TaxJarSetup {
 			frappe.show_alert({ message: __("Select a company first."), indicator: "orange" });
 			return;
 		}
-		const $status = entry.$card.find(".ts-card-h .ts-chip");
-		const $btn = entry.$card.find(".ts-test");
-		$status.attr("class", "ts-chip warn").html(`<span class="ts-spin"></span> ${__("Contacting TaxJar…")}`);
-		$btn.prop("disabled", true);
+		// Transient state, not routed through _render_cred_action - nothing
+		// about entry.tested/lastError has changed yet, this is just what the
+		// action slot looks like while the request is in flight.
+		entry.$card.find(".ts-cred-action").html(
+			`<span class="ts-chip warn"><span class="ts-spin"></span> ${__("Contacting TaxJar…")}</span>`
+		);
 
 		this._call("test_connection", {
 			company,
@@ -462,16 +613,14 @@ class TaxJarSetup {
 			mode: this.controls.mode.get_value(),
 		}).then((res) => {
 			entry.tested = !!res.ok;
-			if (res.ok) {
-				$status.attr("class", "ts-chip ok").html(`<span class="ts-chip-dot"></span> ${__("Success")}`);
-			} else {
-				$status.attr("class", "ts-chip err").text(res.message || __("Could not connect."));
-			}
+			entry.lastError = res.ok ? null : (res.message || __("Could not connect."));
+			this._render_cred_action(entry);
 			this._sync_connect_gate();
 		}).catch(() => {
 			entry.tested = false;
-			$status.attr("class", "ts-chip err").text(__("Something went wrong."));
-		}).finally(() => $btn.prop("disabled", false));
+			entry.lastError = __("Something went wrong.");
+			this._render_cred_action(entry);
+		});
 	}
 
 	_sync_connect_gate() {
@@ -483,8 +632,24 @@ class TaxJarSetup {
 		// synchronously right here (this runs immediately after every card is
 		// added, on every render) could still see the pre-set value and
 		// wrongly gate Continue on an already-saved, already-tested credential.
-		const anyTested = this._connectCards.some((c) => c.tested && c.company);
-		this._set_next_gated(!anyTested, __("Test the connection for at least one company before continuing."));
+		//
+		// Every company must test successfully, not just one - an untested or
+		// failed credential left in the list here was reaching later steps
+		// (Nexus fetch pulls nexus for every company in one request and used
+		// to hard-crash with a raw 401 traceback the moment any one of them
+		// had a bad token) with no way back to fix it. Naming the specific
+		// company gives the user two concrete ways out: fix its token and
+		// re-test, or remove it.
+		const withCompany = this._connectCards.filter((c) => c.company);
+		if (!withCompany.length) {
+			this._set_next_gated(true, __("Add at least one company before continuing."));
+			return;
+		}
+		const untested = withCompany.find((c) => !c.tested);
+		this._set_next_gated(
+			!!untested,
+			untested ? __("Test the connection for {0} (or remove it) before continuing.", [untested.company]) : ""
+		);
 	}
 
 	_save_connect() {
@@ -564,6 +729,21 @@ class TaxJarSetup {
 				render_input: true,
 			});
 			if (cfg.shipping_account_head) shipControl.set_value(cfg.shipping_account_head);
+
+			// Pre-fill whichever ledger is still blank from the standard US chart of
+			// accounts (Sales Tax Payable / Shipping and Freight Income), so the admin
+			// sees accounts already filled in and can still override before saving.
+			if (!cfg.tax_account_head || !cfg.shipping_account_head) {
+				this._call("get_default_ledgers", { company: cred.company }).then((defaults) => {
+					defaults = defaults || {};
+					if (!cfg.tax_account_head && defaults.tax_account_head) {
+						taxControl.set_value(defaults.tax_account_head);
+					}
+					if (!cfg.shipping_account_head && defaults.shipping_account_head) {
+						shipControl.set_value(defaults.shipping_account_head);
+					}
+				});
+			}
 
 			this._accountCards.push({ company: cred.company, controls: { tax: taxControl, ship: shipControl } });
 		});

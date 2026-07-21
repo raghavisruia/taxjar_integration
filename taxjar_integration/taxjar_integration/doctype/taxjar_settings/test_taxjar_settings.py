@@ -16,7 +16,9 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_extract_breakdown_from_obj,
 	_format_address_short,
 	_format_address_suggestion,
+	_get_customer_exemption_type,
 	_get_customer_name,
+	_get_effective_exemption,
 	_get_transaction_date,
 	_get_usd_exchange_rate,
 	_has_taxjar_fields_changed,
@@ -56,6 +58,14 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 	_US_STATE_CODE_OPTIONS,
 	make_custom_fields,
 	validate_taxjar_tokens,
+)
+from taxjar_integration.taxjar_integration.regional.united_states import (
+	TAXJAR_TEMPLATE_TITLE,
+	_disable_default_us_templates,
+	_upsert_tax_template,
+	ensure_company_ledgers_and_template,
+	resolve_default_ledgers,
+	sync_all_company_tax_templates,
 )
 
 
@@ -130,6 +140,7 @@ class _FakeDoc:
 		self.taxjar_product_taxable_reason = None
 		self.taxjar_ship_from = None
 		self.taxjar_ship_to = None
+		self.taxjar_freight_taxable = 0
 
 	def append(self, field, data):
 		if field == "taxes":
@@ -557,6 +568,91 @@ class TestSetSalesTax(UnitTestCase):
 		self.assertEqual(len(tax_rows), 1)
 		self.assertEqual(tax_rows[0].tax_amount, 90.0)
 
+	def test_customer_taxable_status_true_when_not_exempt(self):
+		"""No taxjar_exemption_type set on the customer - status stays "Taxable",
+		matching the pre-existing default behaviour."""
+		doc = _make_doc(taxes=[])
+
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 85.0
+		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertEqual(doc.taxjar_customer_taxable, 1)
+		self.assertEqual(doc.taxjar_customer_taxable_reason, "Taxable")
+
+	def test_customer_taxable_status_reflects_exemption_type_even_when_tax_is_computed(self):
+		"""Regression guard: a customer with a TaxJar exemption_type set
+		(Wholesale/Government/Other) but without the blunt exempt_from_sales_tax
+		checkbox still reaches the TaxJar API call - region-scoped exemption is
+		TaxJar's own job via customer_id, not replicated here. Previously the
+		status matrix hardcoded "Is the customer taxable? Yes" regardless of
+		this, even when the customer's own master data said otherwise. The tax
+		amount itself is untouched (still whatever TaxJar computed) - only the
+		status label is corrected."""
+		doc = _make_doc(taxes=[])
+
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 0.0
+		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value="Wholesale"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertEqual(doc.taxjar_customer_taxable, 0)
+		self.assertIn("Wholesale", doc.taxjar_customer_taxable_reason)
+		tax_rows = [t for t in doc.taxes if t.account_head == "Sales Tax - TC"]
+		self.assertEqual(tax_rows[0].tax_amount, 0.0)
+
+	def test_customer_taxable_status_shows_transaction_override_distinctly(self):
+		"""taxjar_transaction_exempt (no customer-level exemption on file) must
+		read differently from a master-level exemption - "Overridden (...)",
+		not "Customer is exempt (...)" - so the applicability matrix makes clear
+		this was a one-off decision on this transaction, not the customer's
+		standing status."""
+		doc = _make_doc(taxes=[])
+		doc.taxjar_transaction_exempt = 1
+		doc.taxjar_transaction_exemption_type = "Government"
+
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 0.0
+		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertEqual(doc.taxjar_customer_taxable, 0)
+		self.assertEqual(doc.taxjar_customer_taxable_reason, "Overridden (Government)")
+
 	def test_clears_tax_rows_when_outside_nexus(self):
 		"""When the delivery state is not in nexus, sales tax rows must be removed."""
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Sales Tax 8%", 80.0)])
@@ -696,6 +792,36 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 
 # ── Phase 1: taxjar_state_code custom field on Address ───────────────────────
 
+class TestItemProductTaxCategoryQuickEntry(UnitTestCase):
+	"""product_tax_category should be pickable from Item's Quick Entry dialog
+	without being made globally mandatory - Frappe's quick_entry.js includes a
+	field when reqd OR allow_in_quick_entry is set (never both needed)."""
+
+	def _get_item_field(self):
+		captured = {}
+
+		def _capture(custom_fields, update=True):
+			captured.update(custom_fields)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields",
+			side_effect=_capture,
+		):
+			make_custom_fields()
+
+		return next(f for f in captured["Item"] if f["fieldname"] == "product_tax_category")
+
+	def test_allowed_in_quick_entry(self):
+		field = self._get_item_field()
+		self.assertEqual(field.get("allow_in_quick_entry"), 1)
+
+	def test_not_made_globally_mandatory(self):
+		"""allow_in_quick_entry, not reqd - ticking this shouldn't block saving
+		an Item from the full form when left blank."""
+		field = self._get_item_field()
+		self.assertFalse(field.get("reqd"))
+
+
 class TestAddressCustomField(UnitTestCase):
 
 	def _get_address_field_def(self):
@@ -743,6 +869,137 @@ class TestAddressCustomField(UnitTestCase):
 		options = set(_US_STATE_CODE_OPTIONS.split("\n"))
 		for code in SUPPORTED_STATE_CODES:
 			self.assertIn(code, options, f"State code {code!r} missing from taxjar_state_code options")
+
+
+# ── Transaction-level exemption override (taxjar_transaction_exempt) ────────
+
+
+class TestTransactionExemptionCustomFields(UnitTestCase):
+	"""JSON-shape assertions on the taxjar_transaction_exempt/exemption_type
+	custom fields - same intercept-create_custom_fields pattern as
+	TestAddressCustomField, no DB writes."""
+
+	def _get_custom_fields(self):
+		captured = {}
+
+		def _capture(custom_fields, update=True):
+			captured.update(custom_fields)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields",
+			side_effect=_capture,
+		):
+			make_custom_fields()
+
+		return captured
+
+	def _field(self, fields, fieldname):
+		return next(f for f in fields if f["fieldname"] == fieldname)
+
+	def test_present_on_all_three_transaction_doctypes(self):
+		captured = self._get_custom_fields()
+		for doctype in ("Quotation", "Sales Order", "Sales Invoice"):
+			fieldnames = [f["fieldname"] for f in captured[doctype]]
+			self.assertIn("taxjar_transaction_exempt", fieldnames, doctype)
+			self.assertIn("taxjar_transaction_exemption_type", fieldnames, doctype)
+
+	def test_not_present_on_customer(self):
+		"""Transaction-level override is per-document, not per-customer-master —
+		Customer exemption stays on taxjar_exemption_type."""
+		captured = self._get_custom_fields()
+		fieldnames = [f["fieldname"] for f in captured["Customer"]]
+		self.assertNotIn("taxjar_transaction_exempt", fieldnames)
+
+	def test_checkbox_sits_right_after_shipping_rule(self):
+		captured = self._get_custom_fields()
+		for doctype in ("Quotation", "Sales Order", "Sales Invoice"):
+			field = self._field(captured[doctype], "taxjar_transaction_exempt")
+			self.assertEqual(field["insert_after"], "shipping_rule", doctype)
+
+	def test_checkbox_is_a_check_field(self):
+		captured = self._get_custom_fields()
+		field = self._field(captured["Sales Invoice"], "taxjar_transaction_exempt")
+		self.assertEqual(field["fieldtype"], "Check")
+		self.assertEqual(field["label"], "Is transaction exempt from sales taxes?")
+
+	def test_exemption_type_select_options_and_visibility(self):
+		captured = self._get_custom_fields()
+		field = self._field(captured["Sales Invoice"], "taxjar_transaction_exemption_type")
+		self.assertEqual(field["fieldtype"], "Select")
+		self.assertEqual(field["options"], "\nWholesale\nGovernment\nOther")
+		self.assertNotIn("Non Exempt", field["options"])
+		self.assertIn("taxjar_transaction_exempt", field["depends_on"])
+		self.assertIn("taxjar_transaction_exempt", field["mandatory_depends_on"])
+		self.assertEqual(field["insert_after"], "incoterm")
+
+	def test_exemption_type_sits_right_after_incoterm(self):
+		captured = self._get_custom_fields()
+		for doctype in ("Quotation", "Sales Order", "Sales Invoice"):
+			field = self._field(captured[doctype], "taxjar_transaction_exemption_type")
+			self.assertEqual(field["insert_after"], "incoterm", doctype)
+
+
+class TestHideLegacyExemptFromSalesTax(UnitTestCase):
+
+	def test_hides_on_all_four_doctypes_when_column_exists(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			hide_legacy_exempt_from_sales_tax,
+		)
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.has_column", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter") as mock_setter:
+			hide_legacy_exempt_from_sales_tax()
+
+		self.assertEqual(mock_setter.call_count, 4)
+		doctypes = {c.args[0] for c in mock_setter.call_args_list}
+		self.assertEqual(doctypes, {"Quotation", "Sales Order", "Sales Invoice", "Customer"})
+		for call in mock_setter.call_args_list:
+			self.assertEqual(call.args[1], "exempt_from_sales_tax")
+			self.assertEqual(call.args[2], "hidden")
+			self.assertEqual(call.args[3], "1")
+
+	def test_skips_doctype_without_the_column(self):
+		"""Non-US company / column never created by ERPNext's regional setup —
+		no property setter attempted, avoids erroring on a nonexistent field."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			hide_legacy_exempt_from_sales_tax,
+		)
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.has_column", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter") as mock_setter:
+			hide_legacy_exempt_from_sales_tax()
+
+		mock_setter.assert_not_called()
+
+
+class TestSetTaxesFieldDescription(UnitTestCase):
+
+	def test_sets_description_on_all_three_transaction_doctypes(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			set_taxes_field_description,
+			_TAXES_FIELD_DESCRIPTION,
+		)
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter") as mock_setter:
+			set_taxes_field_description()
+
+		self.assertEqual(mock_setter.call_count, 3)
+		doctypes = {c.args[0] for c in mock_setter.call_args_list}
+		self.assertEqual(doctypes, {"Quotation", "Sales Order", "Sales Invoice"})
+		for call in mock_setter.call_args_list:
+			self.assertEqual(call.args[1], "taxes")
+			self.assertEqual(call.args[2], "description")
+			self.assertEqual(call.args[3], _TAXES_FIELD_DESCRIPTION)
+			self.assertEqual(call.args[4], "Table")
+
+	def test_does_not_touch_customer(self):
+		"""The "taxes" field lives on transaction doctypes only - Customer has
+		no such field, so it must never be targeted here."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			set_taxes_field_description,
+		)
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.make_property_setter") as mock_setter:
+			set_taxes_field_description()
+
+		doctypes = {c.args[0] for c in mock_setter.call_args_list}
+		self.assertNotIn("Customer", doctypes)
 
 
 # ── Phase 2: get_iso_3166_2_state_code ───────────────────────────────────────
@@ -955,14 +1212,13 @@ class TestValidateAddress(UnitTestCase):
 class TestAddressClientScript(UnitTestCase):
 	"""Structural tests: hooks registration and JS file content."""
 
-	_APP_ROOT = (
-		"/home/raghav/frappe-work/benches/v16-bench-group"
-		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-	)
+	def _app_root(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 	def _read_js(self):
 		import os
-		path = os.path.join(self._APP_ROOT, "public", "js", "address.js")
+		path = os.path.join(self._app_root(), "public", "js", "address.js")
 		with open(path) as f:
 			return f.read()
 
@@ -974,7 +1230,7 @@ class TestAddressClientScript(UnitTestCase):
 
 	def test_address_js_file_exists(self):
 		import os
-		path = os.path.join(self._APP_ROOT, "public", "js", "address.js")
+		path = os.path.join(self._app_root(), "public", "js", "address.js")
 		self.assertTrue(os.path.isfile(path), "public/js/address.js does not exist")
 
 	def test_address_js_has_state_handler(self):
@@ -1001,7 +1257,7 @@ class TestAddressClientScript(UnitTestCase):
 		referenced by address.js as taxjar_integration.US_STATE_NAMES.
 		"""
 		import os
-		path = os.path.join(self._APP_ROOT, "public", "js", "taxjar_utils.js")
+		path = os.path.join(self._app_root(), "public", "js", "taxjar_utils.js")
 		with open(path) as f:
 			js = f.read()
 		# address.js must reference the shared map rather than hardcode its own copy.
@@ -1049,14 +1305,10 @@ class TestAddressClientScript(UnitTestCase):
 class TestNexusHtmlRenderer(UnitTestCase):
 	"""Structural tests for the nexus grouped-HTML renderer in taxjar_settings.js."""
 
-	_SETTINGS_JS = (
-		"/home/raghav/frappe-work/benches/v16-bench-group"
-		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-		"/taxjar_integration/doctype/taxjar_settings/taxjar_settings.js"
-	)
-
 	def _read_js(self):
-		with open(self._SETTINGS_JS) as f:
+		import os
+		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.js")
+		with open(path) as f:
 			return f.read()
 
 	def test_settings_js_has_render_nexus_html_function(self):
@@ -1086,7 +1338,7 @@ class TestNexusHtmlRenderer(UnitTestCase):
 	def test_settings_js_has_empty_state_message(self):
 		"""When nexus is empty, a helpful message must be shown."""
 		js = self._read_js()
-		self.assertIn("Update Nexus List", js)
+		self.assertIn("No nexus regions loaded", js)
 
 	def test_settings_js_overflow_x_auto_for_responsiveness(self):
 		"""Table wrapper must use overflow-x: auto for narrow-screen support."""
@@ -1187,6 +1439,180 @@ class TestSyncNexusList(UnitTestCase):
 		)
 
 
+# ── Weekly Product Tax Category sync task ────────────────────────────────────
+
+class TestSyncProductTaxCategories(UnitTestCase):
+	"""Tests for the weekly scheduled task that refreshes Product Tax Category from
+	TaxJar. Mirrors sync_nexus_list's guard/error-handling pattern; reuses the
+	shared fetch_and_insert_categories() helper (also used by the manual "Update
+	Product Tax Category List" button) rather than new insert logic."""
+
+	def _category(self, product_tax_code, description, name):
+		category = MagicMock()
+		category.product_tax_code = product_tax_code
+		category.description = description
+		category.name = name
+		return category
+
+	def test_skips_when_taxjar_disabled(self):
+		"""No client is even requested when the master switch/company gate is off."""
+		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_client") as mock_get_client:
+			sync_product_tax_categories()
+		mock_get_client.assert_not_called()
+
+	def test_skips_when_no_client(self):
+		"""No usable credential (get_client returns None) -> no TaxJar call, no insert attempt."""
+		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.tasks.fetch_and_insert_categories") as mock_fetch:
+			sync_product_tax_categories()
+		mock_fetch.assert_not_called()
+
+	def test_maps_taxjar_categories_and_inserts_new_ones(self):
+		"""New categories from the API get inserted; the TaxJarCategory attribute shape
+		(.product_tax_code/.description/.name) is mapped to the dict shape
+		create_tax_categories() expects (product_tax_code/description/name)."""
+		frappe.db.delete("Product Tax Category", {"product_tax_code": "TEST_SYNC_NEW"})
+		self.addCleanup(frappe.db.delete, "Product Tax Category", {"product_tax_code": "TEST_SYNC_NEW"})
+
+		mock_client = MagicMock()
+		mock_client.categories.return_value = [
+			self._category("TEST_SYNC_NEW", "A brand new test category", "New Test Category"),
+		]
+		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=mock_client):
+			sync_product_tax_categories()
+
+		inserted = frappe.get_doc("Product Tax Category", "TEST_SYNC_NEW")
+		self.assertEqual(inserted.description, "A brand new test category")
+		self.assertEqual(inserted.category_name, "New Test Category")
+
+	def test_existing_category_is_left_untouched(self):
+		"""A category TaxJar still reports that already exists locally must not be
+		updated or duplicated - Items are already Linked to it by product_tax_code."""
+		existing = frappe.get_doc({
+			"doctype": "Product Tax Category",
+			"product_tax_code": "TEST_SYNC_EXISTING",
+			"category_name": "Original Name",
+			"description": "Original description",
+		}).insert(ignore_permissions=True)
+		self.addCleanup(frappe.db.delete, "Product Tax Category", {"product_tax_code": "TEST_SYNC_EXISTING"})
+
+		mock_client = MagicMock()
+		mock_client.categories.return_value = [
+			self._category("TEST_SYNC_EXISTING", "A changed description", "Changed Name"),
+		]
+		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=mock_client):
+			sync_product_tax_categories()
+
+		unchanged = frappe.get_doc("Product Tax Category", existing.name)
+		self.assertEqual(unchanged.category_name, "Original Name")
+		self.assertEqual(unchanged.description, "Original description")
+
+	def test_catches_exception_and_logs_error(self):
+		"""Exceptions from the TaxJar call must be caught and logged, not re-raised -
+		matching sync_nexus_list's error handling exactly."""
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = Exception("TaxJar API timeout")
+
+		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_traceback", return_value="traceback"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.log_error") as mock_log:
+			sync_product_tax_categories()  # must not raise
+
+		mock_log.assert_called_once_with("traceback", "TaxJar: Product tax category sync failed")
+
+	def test_hooks_registers_sync_product_tax_categories_as_weekly_job(self):
+		"""hooks.py must declare sync_product_tax_categories in scheduler_events['weekly']."""
+		from taxjar_integration import hooks
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.tasks.sync_product_tax_categories",
+			hooks.scheduler_events.get("weekly", []),
+		)
+
+
+# ── update_nexus_list(): a 401 from any one company must not crash the whole
+# fetch with a raw traceback (bug report: this is exactly what happened when
+# an untested/bad-token company reached the Nexus step) ─────────────────────
+
+class TestUpdateNexusListAuthError(UnitTestCase):
+	def setUp(self):
+		self.settings = frappe.get_single("TaxJar Settings")
+		self.settings.set("company_config", [{
+			"company": "_Test Company",
+			"tax_account_head": "Sales Tax - _TC",
+			"shipping_account_head": "Freight - _TC",
+		}])
+
+	def _taxjar_error(self, status_code, message="error"):
+		import taxjar.exceptions
+		error = taxjar.exceptions.TaxJarResponseError(message)
+		error.full_response = {"status_code": status_code}
+		return error
+
+	def test_401_throws_clear_message_naming_the_company(self):
+		"""Previously re-raised as a bare TaxJarResponseError - a 500 to the
+		browser with a raw traceback, for every company in the request, the
+		moment any one of them had a bad token."""
+		mock_client = MagicMock()
+		mock_client.nexus_regions.side_effect = self._taxjar_error(401, "401 Unauthorized")
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.log_taxjar_call"
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.update_nexus_list()
+
+		message = str(cm.exception)
+		self.assertIn("_Test Company", message)
+		self.assertIn("401", message)
+		# Both remedies the user actually has, named explicitly - matching
+		# the bug report's own wording ("put correct API key or remove the
+		# company").
+		self.assertIn("API key", message)
+		self.assertIn("remove", message)
+
+	def test_non_auth_taxjar_error_still_propagates_unchanged(self):
+		"""Only a 401 gets the special message - any other TaxJar error (500,
+		rate limit, ...) is not silently swallowed or reworded."""
+		import taxjar.exceptions
+		mock_client = MagicMock()
+		mock_client.nexus_regions.side_effect = self._taxjar_error(500, "500 Internal Server Error")
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.log_taxjar_call"
+		):
+			with self.assertRaises(taxjar.exceptions.TaxJarResponseError):
+				self.settings.update_nexus_list()
+
+	def test_successful_fetch_is_unaffected(self):
+		"""The happy path (no error at all) must still work exactly as before.
+		self.save() is stubbed out - _Test Company/its accounts aren't real
+		records in this site, and this test isn't about link validation."""
+		mock_client = MagicMock()
+		mock_client.nexus_regions.return_value = []
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.log_taxjar_call"
+		), patch.object(self.settings, "save"):
+			self.settings.update_nexus_list()  # must not raise
+		mock_client.nexus_regions.assert_called_once()
+
+
 # ── Phase 2: auto-enqueue nexus sync on first configuration ──────────────────
 
 class TestAutoNexusEnqueue(UnitTestCase):
@@ -1221,26 +1647,30 @@ class TestAutoNexusEnqueue(UnitTestCase):
 	def _call_on_update(self, doc):
 		"""Call on_update with frappe.flags.in_test=True and enqueue mocked."""
 		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.enqueue") as mock_enqueue, \
-		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.exists", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.toggle_tax_category_fields"):
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.exists", return_value=True):
 			doc.on_update()
 		return mock_enqueue
 
 	# Trigger conditions
 
 	def test_enqueues_when_features_enabled_config_present_nexus_empty(self):
-		"""The happy path: first save after setup should trigger a background nexus fetch."""
+		"""The happy path: first save after setup should trigger a background nexus fetch.
+
+		Also enqueues the (separate, always-on-with-company_config) ledger/template
+		sync job — see TestLedgerTemplateSyncEnqueue — so this asserts on the
+		nexus-specific call rather than call count.
+		"""
 		doc = self._settings(calculate_tax=1, has_company_config=True, has_nexus=False)
 		mock_enqueue = self._call_on_update(doc)
-		mock_enqueue.assert_called_once()
-		call_args = mock_enqueue.call_args
-		self.assertIn("sync_nexus_list", call_args[0][0])
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(len(nexus_calls), 1)
 
 	def test_enqueues_when_only_create_transactions_enabled(self):
 		"""create_transactions alone (without calculate_tax) should also trigger auto-fetch."""
 		doc = self._settings(calculate_tax=0, create_transactions=1, has_company_config=True, has_nexus=False)
 		mock_enqueue = self._call_on_update(doc)
-		mock_enqueue.assert_called_once()
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(len(nexus_calls), 1)
 
 	# Guard: nexus already populated
 
@@ -1280,6 +1710,63 @@ class TestAutoNexusEnqueue(UnitTestCase):
 		self.assertEqual(nexus_calls[0][1]["queue"], "short")
 
 
+class TestLedgerTemplateSyncEnqueue(UnitTestCase):
+	"""Tests for the on_update safety-net enqueue: ledger auto-fill + tax template
+	sync should run whenever company_config is non-empty, regardless of whether
+	the taxjar_enabled master switch or the per-company feature flags are on -
+	ledgers/template should be ready before those are ever flipped on."""
+
+	def _settings(self, has_company_config=True, taxjar_enabled=0):
+		doc = frappe.get_single("TaxJar Settings")
+		doc.taxjar_enabled = taxjar_enabled
+		if has_company_config:
+			doc.set("company_config", [{
+				"company": "_Test Company",
+				"tax_account_head": "Tax - TC",
+				"shipping_account_head": "Freight - TC",
+				"taxjar_calculate_tax": 0,
+				"taxjar_create_transactions": 0,
+			}])
+		else:
+			doc.set("company_config", [])
+		doc.set("nexus", [{"company": "_Test Company", "region": "California", "region_code": "CA",
+			"country": "United States", "country_code": "US"}])
+		doc.set("table_hvjw", [])
+		return doc
+
+	def _call_on_update(self, doc):
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.enqueue") as mock_enqueue, \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.exists", return_value=True):
+			doc.on_update()
+		return mock_enqueue
+
+	def _sync_calls(self, mock_enqueue):
+		return [c for c in mock_enqueue.call_args_list if "sync_all_company_tax_templates" in str(c)]
+
+	def test_enqueues_when_company_config_present(self):
+		doc = self._settings(has_company_config=True, taxjar_enabled=1)
+		sync_calls = self._sync_calls(self._call_on_update(doc))
+		self.assertEqual(len(sync_calls), 1)
+		self.assertIn("regional.united_states.sync_all_company_tax_templates", sync_calls[0][0][0])
+
+	def test_enqueues_even_when_master_switch_is_off(self):
+		"""Unlike the nexus fetch, this is not gated on features_enabled — ledgers
+		and the template should be ready before the switch is ever flipped on."""
+		doc = self._settings(has_company_config=True, taxjar_enabled=0)
+		sync_calls = self._sync_calls(self._call_on_update(doc))
+		self.assertEqual(len(sync_calls), 1)
+
+	def test_does_not_enqueue_when_company_config_empty(self):
+		doc = self._settings(has_company_config=False, taxjar_enabled=1)
+		sync_calls = self._sync_calls(self._call_on_update(doc))
+		self.assertEqual(len(sync_calls), 0)
+
+	def test_enqueue_uses_short_queue(self):
+		doc = self._settings(has_company_config=True, taxjar_enabled=1)
+		sync_calls = self._sync_calls(self._call_on_update(doc))
+		self.assertEqual(sync_calls[0][1]["queue"], "short")
+
+
 # ── TaxJar Customer API — _get_customer_name helper ─────────────────────────
 
 
@@ -1311,7 +1798,7 @@ class TestGetCustomerName(UnitTestCase):
 
 class TestGetTaxDataCustomerId(UnitTestCase):
 
-	def _call_get_tax_data(self, doc):
+	def _call_get_tax_data(self, doc, taxjar_customer_id=None, customer_exemption_type=None):
 		from taxjar_integration.taxjar_integration.taxjar_integration import get_tax_data
 
 		mock_company_config = MagicMock(
@@ -1327,17 +1814,46 @@ class TestGetTaxDataCustomerId(UnitTestCase):
 		)
 		mock_address.get.return_value = "TX"
 
+		# frappe.db.get_value is called for Country -> code lookups, Customer ->
+		# taxjar_customer_id, and Customer -> taxjar_exemption_type - a blanket
+		# return_value would answer all three identically and mask the bugs
+		# this class guards against, so each is faked by fieldname.
+		def fake_get_value(doctype, name=None, fieldname=None, **kwargs):
+			if doctype == "Customer":
+				if fieldname == "taxjar_customer_id":
+					return taxjar_customer_id
+				if fieldname == "taxjar_exemption_type":
+					return customer_exemption_type
+				return None
+			return "us"
+
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_company_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_address_details", return_value=mock_address), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_shipping_address_details", return_value=mock_address), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="us"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=fake_get_value), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_line_item_dict", return_value={}):
 			return get_tax_data(doc)
 
-	def test_customer_id_included_for_sales_invoice(self):
+	def test_customer_id_uses_synced_taxjar_customer_id_not_raw_name(self):
+		"""Regression guard: TaxJar stores/matches a customer's exemption record
+		under the normalized id sync_customer_to_taxjar() actually assigned (e.g.
+		"Alan-Houk"), not the raw ERPNext customer name ("Alan Houk") - sending
+		the raw name here silently misses the match and the customer's
+		exemption never applies, so tax gets calculated as if they had none."""
 		doc = _make_doc()
-		result = self._call_get_tax_data(doc)
-		self.assertEqual(result["customer_id"], "_Test Customer")
+		doc.customer = "Alan Houk"
+		result = self._call_get_tax_data(doc, taxjar_customer_id="Alan-Houk")
+		self.assertEqual(result["customer_id"], "Alan-Houk")
+
+	def test_customer_id_falls_back_to_safe_id_when_never_synced(self):
+		"""Customer hasn't been synced to TaxJar yet (taxjar_customer_id blank) -
+		falls back to the same normalization sync_customer_to_taxjar() would use,
+		so the id stays consistent whenever it does eventually sync."""
+		doc = _make_doc()
+		doc.customer = "Alan Houk"
+		result = self._call_get_tax_data(doc, taxjar_customer_id=None)
+		self.assertEqual(result["customer_id"], "Alan-Houk")
 
 	def test_customer_id_absent_for_lead_quotation(self):
 		doc = _make_doc()
@@ -1347,6 +1863,33 @@ class TestGetTaxDataCustomerId(UnitTestCase):
 		del doc.customer
 		result = self._call_get_tax_data(doc)
 		self.assertNotIn("customer_id", result)
+
+	def test_exemption_type_absent_when_no_exemption_applies(self):
+		doc = _make_doc()
+		doc.customer = "Alan Houk"
+		result = self._call_get_tax_data(doc)
+		self.assertNotIn("exemption_type", result)
+
+	def test_exemption_type_from_transaction_override(self):
+		"""taxjar_transaction_exempt with no customer-level exemption on file -
+		the payload carries the mapped (lowercase) exemption_type so TaxJar can
+		zero the tax without needing a synced Customer record."""
+		doc = _make_doc()
+		doc.customer = "Alan Houk"
+		doc.taxjar_transaction_exempt = 1
+		doc.taxjar_transaction_exemption_type = "Wholesale"
+		result = self._call_get_tax_data(doc)
+		self.assertEqual(result["exemption_type"], "wholesale")
+
+	def test_customer_exemption_type_takes_precedence_over_transaction_override(self):
+		"""Matches TaxJar's own documented precedence: a matched customer's
+		exemption_type wins over whatever order-level exemption_type is sent."""
+		doc = _make_doc()
+		doc.customer = "Alan Houk"
+		doc.taxjar_transaction_exempt = 1
+		doc.taxjar_transaction_exemption_type = "Wholesale"
+		result = self._call_get_tax_data(doc, customer_exemption_type="Government")
+		self.assertEqual(result["exemption_type"], "government")
 
 
 # ── TaxJar Customer API — check_sales_tax_exemption ─────────────────────────
@@ -1406,6 +1949,109 @@ class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
 
 		is_exempt, reason = check_sales_tax_exemption(doc, config)
 		self.assertFalse(is_exempt)
+
+
+# ── TaxJar Customer API — _get_customer_exemption_type ──────────────────────
+
+
+class TestGetCustomerExemptionType(UnitTestCase):
+	"""_get_customer_exemption_type() feeds the "Is the customer taxable?" status
+	shown on the transaction (see set_sales_tax) - distinct from
+	check_sales_tax_exemption()'s hard-stop exempt_from_sales_tax check, this
+	fires for customers who only have taxjar_exemption_type set (the TaxJar-
+	native path, where region-scoped exemption is still resolved by TaxJar
+	itself via customer_id, not here)."""
+
+	def _patch(self, exemption_type):
+		return patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value=exemption_type,
+		)
+
+	def test_returns_none_when_blank(self):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
+		     self._patch(None):
+			self.assertIsNone(_get_customer_exemption_type(doc))
+
+	def test_returns_none_when_non_exempt(self):
+		""""Non Exempt" is an explicit selectable option meaning "normal taxable
+		customer" - not a truthy exemption."""
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
+		     self._patch("Non Exempt"):
+			self.assertIsNone(_get_customer_exemption_type(doc))
+
+	def test_returns_exemption_type_when_set(self):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
+		     self._patch("Wholesale"):
+			self.assertEqual(_get_customer_exemption_type(doc), "Wholesale")
+
+	def test_returns_none_without_a_customer(self):
+		doc = _make_doc()
+		doc.doctype = "Quotation"
+		doc.quotation_to = "Lead"
+		doc.party_name = "LEAD-001"
+		del doc.customer
+		self.assertIsNone(_get_customer_exemption_type(doc))
+
+	def test_returns_none_when_column_missing(self):
+		"""Non-US company/region where the field was never installed."""
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=False):
+			self.assertIsNone(_get_customer_exemption_type(doc))
+
+
+class TestGetEffectiveExemption(UnitTestCase):
+	"""_get_effective_exemption() combines the customer master's exemption_type
+	with the transaction-level override, customer taking precedence - matches
+	TaxJar's own documented precedence rule for a matched customer_id."""
+
+	def _doc_with_transaction_override(self, exemption_type="Wholesale"):
+		doc = _make_doc()
+		doc.taxjar_transaction_exempt = 1
+		doc.taxjar_transaction_exemption_type = exemption_type
+		return doc
+
+	def test_customer_exemption_wins_when_both_set(self):
+		doc = self._doc_with_transaction_override("Wholesale")
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value="Government"):
+			result = _get_effective_exemption(doc)
+		self.assertEqual(result, ("Government", "customer"))
+
+	def test_transaction_override_used_when_customer_not_exempt(self):
+		doc = self._doc_with_transaction_override("Wholesale")
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None):
+			result = _get_effective_exemption(doc)
+		self.assertEqual(result, ("Wholesale", "transaction"))
+
+	def test_neither_set_returns_none_none(self):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None):
+			result = _get_effective_exemption(doc)
+		self.assertEqual(result, (None, None))
+
+	def test_checkbox_ticked_without_a_reason_selected_is_a_noop(self):
+		"""Reason is mandatory_depends_on the checkbox on the form, but a
+		document saved via API could still have the box ticked with no reason -
+		don't treat that as an exemption with no explanation."""
+		doc = _make_doc()
+		doc.taxjar_transaction_exempt = 1
+		doc.taxjar_transaction_exemption_type = None
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None):
+			result = _get_effective_exemption(doc)
+		self.assertEqual(result, (None, None))
+
+	def test_reason_set_without_checkbox_ticked_is_ignored(self):
+		"""Stale/leftover exemption_type value with the checkbox off must not
+		be treated as an active override."""
+		doc = _make_doc()
+		doc.taxjar_transaction_exempt = 0
+		doc.taxjar_transaction_exemption_type = "Wholesale"
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None):
+			result = _get_effective_exemption(doc)
+		self.assertEqual(result, (None, None))
 
 
 # ── TaxJar Customer API — sync_customer_to_taxjar ───────────────────────────
@@ -2407,14 +3053,13 @@ class TestGetTaxjarResponseHtml(UnitTestCase):
 
 class TestSalesInvoiceClientScript(UnitTestCase):
 
-	_APP_ROOT = (
-		"/home/raghav/frappe-work/benches/v16-bench-group"
-		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-	)
+	def _app_root(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 	def _read_js(self):
 		import os
-		path = os.path.join(self._APP_ROOT, "public", "js", "sales_invoice.js")
+		path = os.path.join(self._app_root(), "public", "js", "sales_invoice.js")
 		with open(path) as f:
 			return f.read()
 
@@ -2593,6 +3238,37 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		types = [r["transaction_type"] for r in result["invoices"]]
 		self.assertEqual(types, ["Invoice", "Credit Note", "Debit Note"])
 
+	def test_get_transactions_derives_doc_status_label(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
+		mock_rows = [
+			frappe._dict(
+				name="SINV-001", posting_date="2026-06-01", customer_name="A",
+				grand_total=100, is_return=False, is_debit_note=False, docstatus=0,
+				taxjar_sync_status="Not Applicable", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+			frappe._dict(
+				name="SINV-002", posting_date="2026-06-01", customer_name="B",
+				grand_total=50, is_return=False, is_debit_note=False, docstatus=1,
+				taxjar_sync_status="Synced", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+			frappe._dict(
+				name="SINV-003", posting_date="2026-06-01", customer_name="C",
+				grand_total=75, is_return=False, is_debit_note=False, docstatus=2,
+				taxjar_sync_status="Not Applicable", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+		]
+		with patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			return_value=mock_rows,
+		), patch(
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			return_value=3,
+		):
+			result = get_transactions(filters={}, page=1)
+
+		labels = [r["doc_status"] for r in result["invoices"]]
+		self.assertEqual(labels, ["Draft", "Submitted", "Cancelled"])
+
 	def test_get_transactions_truncates_long_error(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
 		long_error = "x" * 200
@@ -2685,6 +3361,109 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			js = f.read()
 		self.assertIn("Retry Selected", js)
 		self.assertIn("bulk_retry", js)
+
+	def _transactions_js(self):
+		import os
+		js_path = os.path.join(
+			os.path.dirname(__file__),
+			"..", "..", "page", "taxjar_transactions", "taxjar_transactions.js",
+		)
+		with open(os.path.normpath(js_path)) as f:
+			return f.read()
+
+	def test_column_order_and_no_last_synced_or_error_columns(self):
+		"""Posting Date, Customer, Sales Invoice, Type, Grand Total, Doc Status,
+		Sync Status - in that order. Last Synced and Error are gone as their
+		own columns; that information now surfaces via the Sync Status cell's
+		hover icons instead."""
+		js = self._transactions_js()
+		header_block = js.split("<thead>")[1].split("</thead>")[0]
+		for col in ("Posting Date", "Customer", "Sales Invoice", "Type",
+		            "Grand Total", "Doc Status", "Sync Status"):
+			self.assertIn(col, header_block)
+		self.assertNotIn("Last Synced", header_block)
+		self.assertNotIn("__(\"Error\")", header_block)
+
+		posting_idx = header_block.index("Posting Date")
+		customer_idx = header_block.index("Customer")
+		invoice_idx = header_block.index("Sales Invoice")
+		type_idx = header_block.index("Type")
+		total_idx = header_block.index("Grand Total")
+		doc_status_idx = header_block.index("Doc Status")
+		sync_status_idx = header_block.index("Sync Status")
+		self.assertTrue(
+			posting_idx < customer_idx < invoice_idx < type_idx
+			< total_idx < doc_status_idx < sync_status_idx
+		)
+
+	def test_row_reads_doc_status_field(self):
+		js = self._transactions_js()
+		render_fn = js.split("render_table() {")[1].split("\n\t}\n")[0]
+		self.assertIn("inv.doc_status", render_fn)
+		self.assertNotIn("taxjar_last_synced", render_fn.split("render_sync_status_cell")[0])
+
+	def _sync_status_cell_fn(self):
+		js = self._transactions_js()
+		return js.split("render_sync_status_cell(inv) {")[1].split("\n\t}\n")[0]
+
+	def test_sync_status_cell_uses_one_shape_for_every_status(self):
+		"""Failed reads the same as Synced/Queued/Not Applicable - a pill plus
+		(when there's something to say) a separate info icon, never a special-
+		cased warning icon + Retry button. Retrying goes through the checkbox +
+		bulk "Retry Selected" action instead."""
+		cell_fn = self._sync_status_cell_fn()
+		self.assertNotIn("triangle-alert", cell_fn)
+		self.assertNotIn("taxjar-retry-chip", cell_fn)
+		self.assertNotIn("taxjar-retry-one", cell_fn)
+		self.assertIn("inv.taxjar_sync_error", cell_fn)
+		self.assertIn('} else if (status === "Failed") {', cell_fn)
+
+	def test_sync_status_info_icon_shown_for_synced_queued_and_failed(self):
+		cell_fn = self._sync_status_cell_fn()
+		self.assertIn('frappe.utils.icon("info", "sm")', cell_fn)
+		self.assertIn('__("Last synced: {0}"', cell_fn)
+		self.assertIn('__("Queued for sync")', cell_fn)
+		# Info icon must be a separate element, not nested inside the pill span.
+		self.assertIn("const pill = `<span class=\"indicator-pill ${color}\">${label}</span>`;", cell_fn)
+		self.assertIn('data-info="${frappe.utils.escape_html(info_text)}"', cell_fn)
+		self.assertIn("return `${pill}${icon}`;", cell_fn)
+
+	def test_no_native_title_tooltip_on_sync_icon(self):
+		"""A native title attribute has a browser-enforced show delay and never
+		responds to a click - the popover is hand-rolled instead (see
+		_show_sync_popover), same reasoning as the guided setup's own
+		.ts-info-btn/.ts-info-pop pattern."""
+		cell_fn = self._sync_status_cell_fn()
+		self.assertNotIn("title=", cell_fn)
+
+	def test_sync_popover_shown_on_both_hover_and_click(self):
+		js = self._transactions_js()
+		make_table_fn = js.split("make_table() {")[1].split("\n\t}\n")[0]
+		self.assertIn('this.tbody.on("mouseenter", ".taxjar-sync-icon"', make_table_fn)
+		self.assertIn('this.tbody.on("mouseleave", ".taxjar-sync-icon"', make_table_fn)
+		self.assertIn('this.tbody.on("click", ".taxjar-sync-icon"', make_table_fn)
+		self.assertIn("_show_sync_popover", make_table_fn)
+
+	def test_sync_popover_shows_and_hides_without_delay(self):
+		js = self._transactions_js()
+		show_fn = js.split("_show_sync_popover($trigger) {")[1].split("\n\t}\n")[0]
+		self.assertIn("taxjar-sync-pop", show_fn)
+		self.assertNotIn("setTimeout", show_fn)
+		hide_fn = js.split("_hide_sync_popover() {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("setTimeout", hide_fn)
+
+	def test_sync_icon_css_uses_pointer_cursor_not_help(self):
+		"""cursor: help renders the browser's own question-mark cursor glyph
+		next to the pointer - easy to mistake for a stray "?" over the icon."""
+		import os
+		css_path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__),
+			"..", "..", "page", "taxjar_transactions", "taxjar_transactions.css",
+		))
+		with open(css_path) as f:
+			css = f.read()
+		self.assertIn("cursor: pointer;", css)
+		self.assertNotIn("cursor: help;", css)
 
 
 # ── Hooks registration — updated hooks ───────────────────────────────────────
@@ -2848,14 +3627,13 @@ class TestRetryFailedCustomerSyncs(UnitTestCase):
 
 class TestCustomerClientScriptUpdated(UnitTestCase):
 
-	_APP_ROOT = (
-		"/home/raghav/frappe-work/benches/v16-bench-group"
-		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-	)
+	def _app_root(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 	def _read_js(self):
 		import os
-		path = os.path.join(self._APP_ROOT, "public", "js", "customer.js")
+		path = os.path.join(self._app_root(), "public", "js", "customer.js")
 		with open(path) as f:
 			return f.read()
 
@@ -3300,29 +4078,26 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 
 	def test_page_json_exists(self):
 		import os
-		page_json = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/taxjar_integration/page/taxjar_customers/taxjar_customers.json"
-		)
+		page_json = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"page", "taxjar_customers", "taxjar_customers.json",
+		))
 		self.assertTrue(os.path.isfile(page_json))
 
 	def test_page_js_exists(self):
 		import os
-		page_js = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/taxjar_integration/page/taxjar_customers/taxjar_customers.js"
-		)
+		page_js = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"page", "taxjar_customers", "taxjar_customers.js",
+		))
 		self.assertTrue(os.path.isfile(page_js))
 
 	def test_page_js_has_regions_dialog(self):
 		import os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/taxjar_integration/page/taxjar_customers/taxjar_customers.js"
-		)
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"page", "taxjar_customers", "taxjar_customers.js",
+		))
 		with open(path) as f:
 			js = f.read()
 		self.assertIn("show_regions_dialog", js)
@@ -3332,11 +4107,10 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 
 	def test_workspace_has_page_link(self):
 		import json, os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/taxjar_integration/workspace/taxjar_integration/taxjar_integration.json"
-		)
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"workspace", "taxjar_integration", "taxjar_integration.json",
+		))
 		with open(path) as f:
 			ws = json.load(f)
 		page_links = [l for l in ws["links"] if l.get("link_to") == "taxjar-customers"]
@@ -3443,7 +4217,7 @@ class TestInstallSetup(UnitTestCase):
 		from taxjar_integration import hooks
 		self.assertIn("taxjar_integration.install.after_migrate", hooks.after_migrate)
 
-	def _run_setup(self, *, categories_exist, features_enabled):
+	def _run_setup(self, *, categories_exist):
 		from taxjar_integration import install
 
 		# frappe.db.exists is patched on the real frappe.db object (not a local
@@ -3463,40 +4237,435 @@ class TestInstallSetup(UnitTestCase):
 		with patch("taxjar_integration.install.make_custom_fields") as mock_make, \
 		     patch("taxjar_integration.install.add_product_tax_categories") as mock_cats, \
 		     patch("taxjar_integration.install.add_permissions") as mock_perms, \
-		     patch("taxjar_integration.install.toggle_tax_category_fields") as mock_toggle, \
-		     patch("taxjar_integration.install.frappe.db.exists", side_effect=fake_exists), \
-		     patch("taxjar_integration.install._is_taxjar_enabled", return_value=features_enabled):
+		     patch("taxjar_integration.install.sync_all_company_tax_templates") as mock_sync, \
+		     patch("taxjar_integration.install.hide_legacy_exempt_from_sales_tax") as mock_hide, \
+		     patch("taxjar_integration.install.set_taxes_field_description") as mock_desc, \
+		     patch("taxjar_integration.install.add_guided_setup_alert") as mock_alert, \
+		     patch("taxjar_integration.install.frappe.db.exists", side_effect=fake_exists):
 			install.setup_taxjar()
-		return mock_make, mock_cats, mock_perms, mock_toggle
+		return mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert
 
-	def test_after_install_runs_full_setup_and_hides_fields(self):
+	def test_after_install_runs_full_setup(self):
 		from taxjar_integration import install
 		with patch("taxjar_integration.install.setup_taxjar") as mock_setup:
 			install.after_install()
 		mock_setup.assert_called_once()
 
-		mock_make, mock_cats, mock_perms, mock_toggle = self._run_setup(
-			categories_exist=False, features_enabled=False
-		)
+		mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert = self._run_setup(categories_exist=False)
 		mock_make.assert_called_once()
 		mock_cats.assert_called_once()
 		mock_perms.assert_called_once()
-		mock_toggle.assert_called_once_with(hidden=True)
+		mock_sync.assert_called_once()
+		mock_hide.assert_called_once()
+		mock_desc.assert_called_once()
+		mock_alert.assert_called_once()
 
 	def test_setup_skips_category_seed_when_already_present(self):
-		mock_make, mock_cats, mock_perms, mock_toggle = self._run_setup(
-			categories_exist=True, features_enabled=False
-		)
+		mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert = self._run_setup(categories_exist=True)
 		mock_cats.assert_not_called()
 		mock_make.assert_called_once()
 		mock_perms.assert_called_once()
+		mock_sync.assert_called_once()
+		mock_hide.assert_called_once()
+		mock_desc.assert_called_once()
+		mock_alert.assert_called_once()
 
-	def test_setup_keeps_fields_visible_when_feature_enabled(self):
-		"""On migrate of a configured site, fields must stay visible."""
-		_make, _cats, _perms, mock_toggle = self._run_setup(
-			categories_exist=True, features_enabled=True
+
+# ── Workspace guided-setup alert banner ───────────────────────────────────────
+
+
+class TestGuidedSetupAlert(UnitTestCase):
+	"""Tests for install.add_guided_setup_alert(): the blue/outline banner at the
+	top of the workspace nudging first-time users toward the guided setup wizard."""
+
+	def setUp(self):
+		from taxjar_integration.install import GUIDED_SETUP_ALERT_BLOCK
+		self.block_name = GUIDED_SETUP_ALERT_BLOCK
+		frappe.db.delete("Custom HTML Block", {"name": self.block_name})
+		self._reset_workspace_content()
+		self.addCleanup(frappe.db.delete, "Custom HTML Block", {"name": self.block_name})
+		self.addCleanup(self._reset_workspace_content)
+
+	def _reset_workspace_content(self):
+		"""Strip any guided-setup-alert content block and custom_blocks child row
+		this test added, leaving the rest of the workspace (Setup/Manage/Sync cards)
+		exactly as it was."""
+		if not frappe.db.exists("Workspace", "TaxJar Integration"):
+			return
+		ws = frappe.get_doc("Workspace", "TaxJar Integration")
+		content = frappe.parse_json(ws.content or "[]")
+		filtered_content = [
+			block for block in content
+			if block.get("id") not in ("taxjar_guided_setup_alert", "taxjar_guided_setup_alert_spacer")
+		]
+		filtered_rows = [
+			row for row in (ws.custom_blocks or []) if row.custom_block_name != self.block_name
+		]
+		if filtered_content != content or len(filtered_rows) != len(ws.custom_blocks or []):
+			ws.content = frappe.as_json(filtered_content)
+			ws.set("custom_blocks", filtered_rows)
+			ws.save(ignore_permissions=True)
+
+	def test_creates_custom_html_block_with_expected_content(self):
+		from taxjar_integration.install import add_guided_setup_alert
+		add_guided_setup_alert()
+
+		block = frappe.get_doc("Custom HTML Block", self.block_name)
+		self.assertIn("taxjar-setup", block.html)
+		self.assertIn("blue", block.html)
+		self.assertIn("setup_complete", block.script)
+
+	def test_registers_custom_blocks_child_row(self):
+		"""The `custom_blocks` child table on Workspace is what the block editor
+		actually looks up (by label) to resolve a "custom_block" content entry into
+		a live widget - without a matching row here the content block has nothing
+		to render, regardless of it being present in `content`."""
+		from taxjar_integration.install import add_guided_setup_alert
+		add_guided_setup_alert()
+
+		ws = frappe.get_doc("Workspace", "TaxJar Integration")
+		matches = [row for row in ws.custom_blocks if row.custom_block_name == self.block_name]
+		self.assertEqual(len(matches), 1)
+		self.assertEqual(matches[0].label, self.block_name)
+
+	def test_inserts_content_block_at_full_width(self):
+		"""Setup/Manage/Sync now sit in one row (4 + 4 + 4), so the banner spans
+		the full row width above them rather than being paired with a spacer."""
+		from taxjar_integration.install import add_guided_setup_alert
+		add_guided_setup_alert()
+
+		ws = frappe.get_doc("Workspace", "TaxJar Integration")
+		content = frappe.parse_json(ws.content or "[]")
+		alert_blocks = [b for b in content if b.get("data", {}).get("custom_block_name") == self.block_name]
+
+		self.assertEqual(len(alert_blocks), 1)
+		self.assertEqual(alert_blocks[0]["data"]["col"], 12)
+		self.assertNotIn(
+			"taxjar_guided_setup_alert_spacer", [b.get("id") for b in content]
 		)
-		mock_toggle.assert_called_once_with(hidden=False)
+
+	def test_heals_stale_width_and_spacer_from_a_previous_version(self):
+		"""A layout change here (col: 4 + spacer -> col: 12) must also reach sites
+		that already ran an earlier version of this function, not just fresh
+		installs - same self-healing principle as the html/script sync above."""
+		from taxjar_integration.install import add_guided_setup_alert
+
+		ws = frappe.get_doc("Workspace", "TaxJar Integration")
+		content = frappe.parse_json(ws.content or "[]")
+		stale_content = [
+			{
+				"id": "taxjar_guided_setup_alert",
+				"type": "custom_block",
+				"data": {"custom_block_name": self.block_name, "col": 4},
+			},
+			{"id": "taxjar_guided_setup_alert_spacer", "type": "spacer", "data": {"col": 8}},
+			*content,
+		]
+		ws.content = frappe.as_json(stale_content)
+		ws.save(ignore_permissions=True)
+
+		add_guided_setup_alert()
+
+		ws = frappe.get_doc("Workspace", "TaxJar Integration")
+		content = frappe.parse_json(ws.content or "[]")
+		alert_blocks = [b for b in content if b.get("data", {}).get("custom_block_name") == self.block_name]
+
+		self.assertEqual(len(alert_blocks), 1)
+		self.assertEqual(alert_blocks[0]["data"]["col"], 12)
+		self.assertNotIn(
+			"taxjar_guided_setup_alert_spacer", [b.get("id") for b in content]
+		)
+
+	def test_idempotent_on_repeated_calls(self):
+		"""Running setup/migrate repeatedly must not duplicate the block, the
+		custom_blocks child row, or the Custom HTML Block record."""
+		from taxjar_integration.install import add_guided_setup_alert
+		add_guided_setup_alert()
+		add_guided_setup_alert()
+		add_guided_setup_alert()
+
+		self.assertEqual(frappe.db.count("Custom HTML Block", {"name": self.block_name}), 1)
+
+		ws = frappe.get_doc("Workspace", "TaxJar Integration")
+		content = frappe.parse_json(ws.content or "[]")
+		alert_blocks = [b for b in content if b.get("data", {}).get("custom_block_name") == self.block_name]
+		self.assertEqual(len(alert_blocks), 1)
+
+		matches = [row for row in ws.custom_blocks if row.custom_block_name == self.block_name]
+		self.assertEqual(len(matches), 1)
+
+	def test_syncs_html_on_already_migrated_sites(self):
+		"""A style/copy edit to the constants in install.py must reach sites that
+		already ran setup once before, not just fresh installs - the app is the
+		source of truth, same convention as create_custom_fields(update=True)."""
+		from taxjar_integration import install
+
+		install.add_guided_setup_alert()
+		stale = frappe.get_doc("Custom HTML Block", self.block_name)
+		stale.html = "<div>stale content from a previous version</div>"
+		stale.script = ""
+		stale.save(ignore_permissions=True)
+
+		install.add_guided_setup_alert()
+
+		refreshed = frappe.get_doc("Custom HTML Block", self.block_name)
+		self.assertEqual(refreshed.html, install.GUIDED_SETUP_ALERT_HTML)
+		self.assertEqual(refreshed.script, install.GUIDED_SETUP_ALERT_SCRIPT)
+
+
+# ── Nexus & Product Category tab: count/last-updated summary ─────────────────
+
+
+class TestProductTaxCategorySummary(UnitTestCase):
+	"""Tests for TaxJarSettings.get_product_tax_category_summary(), rendered on the
+	renamed 'Nexus & Product Category' tab."""
+
+	def setUp(self):
+		self.settings = frappe.get_single("TaxJar Settings")
+
+	def test_count_matches_table_and_last_updated_matches_max_modified(self):
+		row = frappe.get_doc({
+			"doctype": "Product Tax Category",
+			"product_tax_code": "TEST_SUMMARY_ROW",
+			"category_name": "Summary Test Category",
+			"description": "For summary test",
+		}).insert(ignore_permissions=True)
+		self.addCleanup(frappe.db.delete, "Product Tax Category", {"product_tax_code": "TEST_SUMMARY_ROW"})
+
+		summary = self.settings.get_product_tax_category_summary()
+
+		self.assertEqual(summary["count"], frappe.db.count("Product Tax Category"))
+		self.assertEqual(
+			summary["last_updated"],
+			frappe.db.get_value(
+				"Product Tax Category", filters={}, fieldname="modified", order_by="modified desc"
+			),
+		)
+
+	def test_zero_rows_returns_none_last_updated_without_raising(self):
+		real_count = frappe.db.count
+		real_get_value = frappe.db.get_value
+
+		def fake_count(doctype, *args, **kwargs):
+			if doctype == "Product Tax Category":
+				return 0
+			return real_count(doctype, *args, **kwargs)
+
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Product Tax Category":
+				return None
+			return real_get_value(doctype, *args, **kwargs)
+
+		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.count", side_effect=fake_count), \
+		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.get_value", side_effect=fake_get_value):
+			summary = self.settings.get_product_tax_category_summary()  # must not raise
+
+		self.assertEqual(summary["count"], 0)
+		self.assertIsNone(summary["last_updated"])
+
+	def test_js_formats_last_updated_via_user_timezone_not_comment_when(self):
+		"""comment_when()/prettyDate() blanks the display whenever it computes a
+		negative day-diff (pretty_date.js: `if (day_diff < 0) return ""`) - which
+		happens for any real timestamp once System Settings' timezone drifts far
+		enough from the browser's own. str_to_user() converts system tz -> user tz
+		via moment-timezone and just formats it, with no comparison against the
+		browser's local clock at all, so it can't hit that guard."""
+		import os
+		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.js")
+		with open(path) as f:
+			js = f.read()
+
+		self.assertIn("frappe.datetime.str_to_user(summary.last_updated)", js)
+		self.assertNotIn("frappe.datetime.comment_when(summary.last_updated)", js)
+
+
+class TestRefreshProductTaxCategories(UnitTestCase):
+	"""Tests for TaxJarSettings.refresh_product_tax_categories(), the manual
+	"Update Product Tax Category List" button - unlike the weekly scheduled job this
+	is user-triggered, so a missing credential must raise, not silently no-op."""
+
+	def setUp(self):
+		self.settings = frappe.get_single("TaxJar Settings")
+
+	def _category(self, product_tax_code, description, name):
+		category = MagicMock()
+		category.product_tax_code = product_tax_code
+		category.description = description
+		category.name = name
+		return category
+
+	def test_throws_clear_error_when_no_client(self):
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=None,
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.refresh_product_tax_categories()
+		self.assertIn("API credentials", str(cm.exception))
+
+	def test_inserts_new_categories_and_returns_summary(self):
+		frappe.db.delete("Product Tax Category", {"product_tax_code": "TEST_REFRESH_NEW"})
+		self.addCleanup(frappe.db.delete, "Product Tax Category", {"product_tax_code": "TEST_REFRESH_NEW"})
+
+		mock_client = MagicMock()
+		mock_client.categories.return_value = [
+			self._category("TEST_REFRESH_NEW", "A refresh-button test category", "Refresh Test Category"),
+		]
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		):
+			summary = self.settings.refresh_product_tax_categories()
+
+		inserted = frappe.get_doc("Product Tax Category", "TEST_REFRESH_NEW")
+		self.assertEqual(inserted.category_name, "Refresh Test Category")
+		self.assertEqual(summary["count"], frappe.db.count("Product Tax Category"))
+
+	def test_does_not_depend_on_taxjar_enabled(self):
+		"""Categories aren't company-scoped, so a valid client is enough - this must
+		not gate on _is_taxjar_enabled() the way the weekly scheduled job does."""
+		mock_client = MagicMock()
+		mock_client.categories.return_value = []
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings._is_taxjar_enabled",
+			return_value=False,
+		):
+			self.settings.refresh_product_tax_categories()  # must not raise or no-op
+		mock_client.categories.assert_called_once()
+
+	def test_connection_error_raises_clear_message(self):
+		"""Regression guard: this call used to have no try/except at all, so a
+		connection blip surfaced as an unhandled exception instead of a clean
+		message like every other TaxJar call site in this app."""
+		import taxjar.exceptions
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.refresh_product_tax_categories()
+		self.assertIn("unreachable", str(cm.exception))
+
+	def test_401_response_error_raises_invalid_token_message(self):
+		import taxjar.exceptions
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 401}
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = err
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.refresh_product_tax_categories()
+		self.assertIn("Invalid TaxJar API token", str(cm.exception))
+
+	def test_other_response_error_raises_sanitized_message(self):
+		import taxjar.exceptions
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 400, "detail": "to_state is invalid"}
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = err
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.refresh_product_tax_categories()
+		self.assertIn("State", str(cm.exception))  # sanitize_error_response renames "to state" -> "State"
+
+
+class TestFetchAndInsertCategoriesLogging(UnitTestCase):
+	"""fetch_and_insert_categories() is shared by the manual button and the
+	weekly cron - it logs via log_taxjar_call() same as every other TaxJar call
+	site, then re-raises so each caller keeps its own presentation behaviour."""
+
+	MOD = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def test_logs_request_and_success(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			fetch_and_insert_categories,
+		)
+		mock_client = MagicMock()
+		mock_client.categories.return_value = []
+		with patch(f"{self.MOD}.log_taxjar_call") as mock_log:
+			fetch_and_insert_categories(mock_client)
+
+		actions = [c.kwargs.get("action") or c.args[0] for c in mock_log.call_args_list]
+		statuses = [c.kwargs.get("status") for c in mock_log.call_args_list]
+		self.assertIn("categories", actions)
+		self.assertIn("request", statuses)
+		self.assertIn("success", statuses)
+
+	def test_logs_error_and_reraises(self):
+		import taxjar.exceptions
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			fetch_and_insert_categories,
+		)
+		mock_client = MagicMock()
+		mock_client.categories.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
+
+		with patch(f"{self.MOD}.log_taxjar_call") as mock_log:
+			with self.assertRaises(taxjar.exceptions.TaxJarConnectionError):
+				fetch_and_insert_categories(mock_client)
+
+		error_calls = [c for c in mock_log.call_args_list if c.kwargs.get("status") == "error"]
+		self.assertEqual(len(error_calls), 1)
+
+
+class TestTaxJarSettingsJsonNexusTab(UnitTestCase):
+	"""JSON-level assertions on the doctype fixture itself - matches the pattern used
+	by TestWorkspaceBranding below for the workspace fixture."""
+
+	def _doctype_json(self):
+		import json, os
+		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.json")
+		with open(path) as f:
+			return json.load(f)
+
+	def _field(self, doctype_json, fieldname):
+		for field in doctype_json["fields"]:
+			if field["fieldname"] == fieldname:
+				return field
+		self.fail(f"Field {fieldname!r} not found in TaxJar Settings JSON")
+
+	def test_nexus_tab_renamed(self):
+		doctype_json = self._doctype_json()
+		tab = self._field(doctype_json, "nexus_tab")
+		self.assertEqual(tab["label"], "Nexus & Product Category")
+
+	def test_product_tax_category_summary_fields_present(self):
+		doctype_json = self._doctype_json()
+		section = self._field(doctype_json, "product_tax_category_section")
+		self.assertEqual(section["fieldtype"], "Section Break")
+
+		html_field = self._field(doctype_json, "product_tax_category_html")
+		self.assertEqual(html_field["fieldtype"], "HTML")
+
+		self.assertIn("product_tax_category_section", doctype_json["field_order"])
+		self.assertIn("product_tax_category_html", doctype_json["field_order"])
+
+	def test_update_product_tax_category_button_present(self):
+		doctype_json = self._doctype_json()
+		btn = self._field(doctype_json, "update_product_tax_category_btn")
+		self.assertEqual(btn["fieldtype"], "Button")
+		self.assertEqual(btn["label"], "Update Product Tax Category List")
+		self.assertIn("update_product_tax_category_btn", doctype_json["field_order"])
+
+	def test_fresh_install_defaults(self):
+		"""A never-configured TaxJar Settings singleton (fresh install, before the
+		guided setup wizard has saved anything) should present Live / logging on /
+		15-day retention - not the previous Sandbox / logging off / 5-day
+		combination."""
+		doctype_json = self._doctype_json()
+		self.assertEqual(self._field(doctype_json, "api_mode")["default"], "Live")
+		self.assertEqual(self._field(doctype_json, "enable_taxjar_logging")["default"], "1")
+		self.assertEqual(self._field(doctype_json, "log_retention_days")["default"], "15")
 
 
 # ── Problem 3: single branded workspace ──────────────────────────────────────
@@ -3550,7 +4719,7 @@ class TestWorkspaceBranding(UnitTestCase):
 
 	def test_icon_is_valid_not_dollar_sign(self):
 		ws = self._workspace()
-		self.assertEqual(ws["icon"], "money-coins-1")
+		self.assertEqual(ws["icon"], "coins")
 
 	def test_sidebar_mirrors_card_groups(self):
 		"""The generated sidebar mirrors the workspace card groups: each card
@@ -3581,6 +4750,20 @@ class TestWorkspaceBranding(UnitTestCase):
 		self.assertEqual(groups["Setup"], ["taxjar-setup", "TaxJar Settings", "TaxJar API Log"])
 		self.assertEqual(groups["Manage"], ["taxjar-customers", "Product Tax Category"])
 		self.assertEqual(groups["Sync"], ["taxjar-transactions"])
+
+	def test_home_entry_uses_an_icon_that_exists_in_the_bundled_lucide_sprite(self):
+		"""Regression guard: the desk sidebar resolves an icon name straight to
+		#icon-<name> in frappe's bundled lucide sprite (frappe/public/icons/lucide/
+		icons.svg) with no fallback - "home" was never in that sprite (only
+		"house" is), so the Home entry silently rendered no icon at all."""
+		from taxjar_integration.install import sync_taxjar_workspace_sidebar
+
+		sync_taxjar_workspace_sidebar()
+		doc = frappe.get_doc("Workspace", "TaxJar Integration")
+
+		home_items = [item for item in doc.sidebar_items if item.label == "Home"]
+		self.assertEqual(len(home_items), 1)
+		self.assertEqual(home_items[0].icon, "house")
 
 	def test_link_cards(self):
 		ws = self._workspace()
@@ -3773,6 +4956,17 @@ class TestExtractBreakdownData(UnitTestCase):
 		self.assertAlmostEqual(state_row["rate"], 0.0625)
 		self.assertAlmostEqual(state_row["tax_amount"], 6.25)
 
+	def test_special_district_row_gets_a_static_label_not_a_blank_name(self):
+		"""TaxJar's jurisdictions object has no per-special-district name (unlike
+		state/county/city) - a blank cell there reads like missing data, so this
+		row gets a static descriptive label instead."""
+		tax_data = _make_us_breakdown()
+		doc = _make_doc()
+		result = _extract_breakdown_data(tax_data, doc)
+
+		special_row = next(r for r in result["transaction"] if r["jurisdiction"] == "Special")
+		self.assertEqual(special_row["name"], "SPECIAL DISTRICT")
+
 	def test_us_breakdown_totals(self):
 		tax_data = _make_us_breakdown()
 		doc = _make_doc()
@@ -3881,6 +5075,14 @@ class TestClearBreakdownData(UnitTestCase):
 		_clear_breakdown_data(doc)
 		self.assertIsNone(doc.items[0].taxjar_item_breakdown_json)
 
+	def test_clears_freight_taxable(self):
+		"""A stale "Shipping Taxability: Yes" pill must not survive past the
+		point where the tax rows themselves get removed (exempt/no nexus)."""
+		doc = _make_doc()
+		doc.taxjar_freight_taxable = 1
+		_clear_breakdown_data(doc)
+		self.assertEqual(doc.taxjar_freight_taxable, 0)
+
 	def test_handles_doc_without_breakdown_field(self):
 		doc = MagicMock()
 		doc.get.return_value = []
@@ -3947,6 +5149,28 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		data = json.loads(doc.taxjar_breakdown_json)
 		self.assertEqual(len(data["transaction"]), 4)
 		self.assertAlmostEqual(data["totals"]["amount_to_collect"], 9.75)
+
+	def test_freight_taxable_set_from_tax_data(self):
+		"""doc.taxjar_freight_taxable mirrors TaxJar's own freight_taxable flag on
+		the tax_for_order response, both ways (True and False are both real,
+		meaningful values - not "unset")."""
+		for freight_taxable, expected in ((True, 1), (False, 0)):
+			with self.subTest(freight_taxable=freight_taxable):
+				tax_data = _make_us_breakdown()
+				tax_data.freight_taxable = freight_taxable
+				doc = _make_doc()
+
+				with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+					set_sales_tax(doc, None)
+
+				self.assertEqual(doc.taxjar_freight_taxable, expected)
 
 	def test_breakdown_json_populated_on_items(self):
 		import json
@@ -4016,11 +5240,38 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 class TestTaxBreakdownCustomFields(UnitTestCase):
 
 	def test_transaction_breakdown_fields_defined(self):
-		self.assertEqual(len(_TRANSACTION_BREAKDOWN_FIELDS), 3)
+		self.assertEqual(len(_TRANSACTION_BREAKDOWN_FIELDS), 4)
 		fieldnames = [f["fieldname"] for f in _TRANSACTION_BREAKDOWN_FIELDS]
 		self.assertIn("taxjar_breakdown_section", fieldnames)
 		self.assertIn("taxjar_breakdown_json", fieldnames)
+		self.assertIn("taxjar_freight_taxable", fieldnames)
 		self.assertIn("taxjar_breakdown_html", fieldnames)
+
+	def test_freight_taxable_field_is_hidden_read_only_check(self):
+		field = next(f for f in _TRANSACTION_BREAKDOWN_FIELDS if f["fieldname"] == "taxjar_freight_taxable")
+		self.assertEqual(field["fieldtype"], "Check")
+		self.assertEqual(field["hidden"], 1)
+		self.assertEqual(field["read_only"], 1)
+		self.assertEqual(field["insert_after"], "taxjar_breakdown_json")
+
+	def test_sales_invoice_freight_taxable_allows_on_submit(self):
+		"""Written alongside taxjar_breakdown_json on the post-submission
+		recalculation path - needs the same allow_on_submit exemption."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+
+		captured = {}
+
+		def _capture(custom_fields, update=True):
+			captured.update(custom_fields)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields",
+			side_effect=_capture,
+		):
+			make_custom_fields()
+
+		field = next(f for f in captured["Sales Invoice"] if f["fieldname"] == "taxjar_freight_taxable")
+		self.assertEqual(field.get("allow_on_submit"), 1)
 
 	def test_item_breakdown_fields_defined(self):
 		self.assertEqual(len(_ITEM_BREAKDOWN_FIELDS), 3)
@@ -4064,15 +5315,13 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 
 class TestTaxBreakdownJS(UnitTestCase):
 
-	JS_DIR = (
-		"/home/raghav/frappe-work/benches/v16-bench-group"
-		"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-		"/public/js"
-	)
+	def _js_dir(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "public", "js"))
 
 	def _read_js(self, filename):
 		import os
-		with open(os.path.join(self.JS_DIR, filename)) as f:
+		with open(os.path.join(self._js_dir(), filename)) as f:
 			return f.read()
 
 	def test_shared_utils_defines_render_functions(self):
@@ -4086,20 +5335,12 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 	def test_quotation_js_exists(self):
 		import os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/public/js/quotation.js"
-		)
+		path = os.path.join(self._js_dir(), "quotation.js")
 		self.assertTrue(os.path.isfile(path))
 
 	def test_sales_order_js_exists(self):
 		import os
-		path = os.path.join(
-			"/home/raghav/frappe-work/benches/v16-bench-group"
-			"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-			"/public/js/sales_order.js"
-		)
+		path = os.path.join(self._js_dir(), "sales_order.js")
 		self.assertTrue(os.path.isfile(path))
 
 	def test_quotation_js_has_render_functions(self):
@@ -4146,20 +5387,89 @@ class TestTaxBreakdownJS(UnitTestCase):
 			"sales_invoice.js": "Sales Invoice Item",
 		}
 		for filename, child_dt in child_doctypes.items():
-			path = os.path.join(
-				"/home/raghav/frappe-work/benches/v16-bench-group"
-				"/v16-taxjar-bench/apps/taxjar_integration/taxjar_integration"
-				"/public/js",
-				filename,
-			)
+			path = os.path.join(self._js_dir(), filename)
 			with open(path) as f:
 				js = f.read()
 			self.assertIn(child_dt, js, f"{filename} should register handler on {child_dt}")
 			self.assertIn("form_render", js, f"{filename} should use form_render event")
 
+	def test_status_cards_never_render_reason_text(self):
+		"""No reason text anywhere in the matrix - only the answer pill (and,
+		for a transaction-level override, the extra "Overridden" pill)."""
+		js = self._read_js("taxjar_utils.js")
+		render_fn = js.split("render_status_cards = function (frm) {")[1].split("\n};")[0]
+		self.assertNotIn("card.reason", render_fn)
+		self.assertNotIn("taxjar-status-card-reason", render_fn)
+		self.assertNotIn("taxjar_product_taxable_reason", render_fn)
+
+	def test_status_card_shows_overridden_pill_only_for_transaction_override(self):
+		"""A second "Overridden" pill appears under "Is the customer taxable?"
+		only when the reason came from taxjar_transaction_exempt (server sets
+		it to "Overridden (<type>)") - not for a master-level customer
+		exemption ("Customer is exempt (<type>)") or the plain taxable case."""
+		js = self._read_js("taxjar_utils.js")
+		render_fn = js.split("render_status_cards = function (frm) {")[1].split("\n};")[0]
+		self.assertIn('.startsWith("Overridden")', render_fn)
+		self.assertIn("taxjar-status-card-override", render_fn)
+		self.assertIn('card.overridden ? `<div class="taxjar-status-card-override">', render_fn)
+
+	def test_status_cards_use_skipped_instead_of_na(self):
+		js = self._read_js("taxjar_utils.js")
+		render_fn = js.split("render_status_cards = function (frm) {")[1].split("\n};")[0]
+		self.assertNotIn('__("N/A")', render_fn)
+		self.assertIn('__("Skipped")', render_fn)
+
+	def test_status_card_override_css_exists(self):
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn(".taxjar-status-card-override {", js)
+
 	def test_js_has_no_breakdown_message(self):
 		js = self._read_js("taxjar_utils.js")
 		self.assertIn("No TaxJar tax breakdown available", js, "taxjar_utils.js should have no-breakdown message")
+
+	def test_no_breakdown_msg_distinguishes_unsaved_doc(self):
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("_no_breakdown_msg = function (is_new) {")[1].split("\n};")[0]
+		self.assertIn("Please save to see tax breakdown.", fn)
+		self.assertIn("const text = is_new", fn)
+
+	def test_render_tax_breakdown_passes_is_new_to_no_breakdown_msg(self):
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("render_tax_breakdown = function (frm) {")[1].split("\n};")[0]
+		self.assertEqual(fn.count("_no_breakdown_msg(frm.is_new())"), 2)
+
+	def test_shipping_taxability_pill_defined(self):
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("_shipping_taxability_html = function (frm) {")[1].split("\n};")[0]
+		self.assertIn("taxjar_freight_taxable", fn)
+		self.assertIn("Is shipping charges taxable?", fn)
+		self.assertIn("indicator-pill", fn)
+		self.assertIn('__("Yes")', fn)
+		self.assertIn('__("No")', fn)
+
+	def test_shipping_taxability_pill_uses_bigger_font(self):
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("_shipping_taxability_html = function (frm) {")[1].split("\n};")[0]
+		self.assertIn("var(--text-md)", fn)
+		self.assertNotIn("var(--text-sm)", fn)
+
+	def test_shipping_taxability_pill_rendered_in_breakdown(self):
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("render_tax_breakdown = function (frm) {")[1].split("\n};")[0]
+		self.assertIn("_shipping_taxability_html(frm)", fn)
+
+	def test_shipping_taxability_sits_directly_above_tax_breakup_table(self):
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("render_tax_breakdown = function (frm) {")[1].split("\n};")[0]
+		usd_block = fn.split("if (data.usd) {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("_shipping_taxability_html", usd_block)
+		shipping_idx = fn.index("_shipping_taxability_html(frm)")
+		final_table_idx = fn.index("build_transaction_table(data.transaction")
+		self.assertLess(shipping_idx, final_table_idx)
+		self.assertEqual(
+			fn[shipping_idx:final_table_idx].count("build_transaction_table"), 0,
+			"no table call should sit between the pill and the Tax Breakup table it belongs to",
+		)
 
 	def test_js_has_multi_currency_support(self):
 		js = self._read_js("taxjar_utils.js")
@@ -4339,6 +5649,19 @@ class TestSetTaxStatusFields(UnitTestCase):
 		_set_tax_status_fields(doc, ship_from="Austin, TX 78701", ship_to="New York, NY 10001")
 		self.assertEqual(doc.taxjar_ship_from, "Austin, TX 78701")
 		self.assertEqual(doc.taxjar_ship_to, "New York, NY 10001")
+
+	def test_sets_freight_taxable_true(self):
+		doc = _make_doc()
+		_set_tax_status_fields(doc, freight_taxable=True)
+		self.assertEqual(doc.taxjar_freight_taxable, 1)
+
+	def test_sets_freight_taxable_false_not_skipped(self):
+		"""False is a real, meaningful value here (not "unset") - it must still
+		be written, not treated the same as omitting the argument."""
+		doc = _make_doc()
+		doc.taxjar_freight_taxable = 1
+		_set_tax_status_fields(doc, freight_taxable=False)
+		self.assertEqual(doc.taxjar_freight_taxable, 0)
 
 	def test_skips_none_values(self):
 		doc = _make_doc()
@@ -4563,6 +5886,56 @@ class TestGuidedSetupState(UnitTestCase):
 		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
 			self.assertRaises(frappe.PermissionError, get_setup_state)
 
+	def test_blank_api_mode_falls_back_to_live_not_sandbox(self):
+		"""Matches the doctype's own new default (see TestTaxJarSettingsJsonNexusTab.
+		test_fresh_install_defaults) - this fallback only bites if api_mode is ever
+		explicitly blank rather than genuinely unset."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		s.api_mode = ""
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			state = get_setup_state()
+		self.assertEqual(state["api_mode"], "Live")
+
+	def test_unconfigured_shows_fresh_defaults_over_stale_saved_values(self):
+		"""Regression guard: a DocType JSON "default" only ever applies the
+		very first time a Single doctype field is ever saved - it does NOT
+		retroactively re-apply once a value has been stored, even an old
+		default from before this one changed (e.g. log_retention_days=5,
+		leftover from before the default became 15). No credentials and no
+		company config is this wizard's own signal to show the current
+		recommended defaults regardless of what stale value is stored."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		s.api_mode = "Sandbox"
+		s.enable_taxjar_logging = 0
+		s.log_retention_days = 5
+		s.table_hvjw = []
+		s.company_config = []
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			state = get_setup_state()
+		self.assertEqual(state["api_mode"], "Live")
+		self.assertTrue(state["enable_taxjar_logging"])
+		self.assertEqual(state["log_retention_days"], 15)
+
+	def test_configured_site_keeps_its_stored_values(self):
+		"""Once either credentials or company config exist, stored values -
+		even ones that differ from the recommended defaults - are respected,
+		not silently overridden."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_state
+		s = self._settings()
+		s.api_mode = "Sandbox"
+		s.enable_taxjar_logging = 0
+		s.log_retention_days = 5
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			state = get_setup_state()
+		self.assertEqual(state["api_mode"], "Sandbox")
+		self.assertFalse(state["enable_taxjar_logging"])
+		self.assertEqual(state["log_retention_days"], 5)
+
 
 # ── Phase 2: test_connection ───────────────────────────────────────────────
 
@@ -4614,6 +5987,29 @@ class TestGuidedSetupTestConnection(UnitTestCase):
 
 		self.assertFalse(res["ok"])
 		mock_client_cls.assert_not_called()
+
+	def test_blank_mode_and_blank_settings_falls_back_to_live_token_field(self):
+		"""No explicit mode param, no saved api_mode - defaults to Live, so a
+		saved live_token (not sandbox_token) is what gets read."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import test_connection
+		cred = frappe._dict(company="Frappe Tech", name="cred-1", sandbox_token="", live_token="enc")
+		s = self._settings(mode="", creds=[cred])
+		mock_client = MagicMock()
+		captured = {}
+
+		def fake_decrypt(dt, name, field, raise_exception=False):
+			captured["field"] = field
+			return "live-token-value"
+
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s), \
+		     patch(_SETUP_MODULE + ".get_decrypted_password", side_effect=fake_decrypt), \
+		     patch(_SETUP_MODULE + ".taxjar.Client", return_value=mock_client):
+			res = test_connection(company="Frappe Tech")
+
+		self.assertTrue(res["ok"])
+		self.assertEqual(res["mode"], "Live")
+		self.assertEqual(captured["field"], "live_token")
 
 	def test_401_returns_invalid_token_message(self):
 		import taxjar.exceptions
@@ -4994,30 +6390,26 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("company_flags", save_features_call)
 		self.assertIn('this._call("save_features", { company_flags })', save_features_call)
 
-	def test_connect_step_uses_native_select_link_password_controls(self):
+	def test_connect_step_uses_native_link_password_controls(self):
+		"""API Mode moved off a native Select onto a hand-built segmented
+		toggle (see test_connect_mode_is_a_segmented_toggle) - Company/token
+		stay real frappe controls."""
 		js = self._js()
-		self.assertIn('fieldtype: "Select", fieldname: "api_mode"', js)
 		self.assertIn('fieldtype: "Link", fieldname: "company"', js)
 		self.assertIn('fieldtype: "Password", fieldname: "token"', js)
 		# Continue is gated on at least one successful test, not just field presence.
 		self.assertIn("_sync_connect_gate", js)
 		self.assertIn("tested", js)
 
-	def test_connect_step_has_no_vestigial_empty_fieldnote(self):
-		"""A leftover <p class="ts-fieldnote">{{ " " }}</p> (a translated single
-		space, no real content) between API Mode and the API Token label added
-		its own margin on top of the field's and the label's, compounding into
-		an oversized, unintentional-looking gap."""
-		js = self._js()
-		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
-		self.assertNotIn("ts-fieldnote", render_connect)
-
 	def test_connect_step_has_api_log_toggle_and_retention(self):
 		"""The Connect step previously had no way to enable/disable API Logs,
 		even though save_connection/get_setup_state already supported
-		enable_taxjar_logging and log_retention_days end to end."""
+		enable_taxjar_logging and log_retention_days end to end. "Switch" (a
+		real pill toggle shipped in frappe core, controls/switch.js), not
+		"Check" - a hand-rolled CSS checkbox-as-switch rendered as a broken
+		grey ring in practice."""
 		js = self._js()
-		self.assertIn('fieldtype: "Check", fieldname: "enable_taxjar_logging"', js)
+		self.assertIn('fieldtype: "Switch", fieldname: "enable_taxjar_logging"', js)
 		self.assertIn('fieldtype: "Int", fieldname: "log_retention_days"', js)
 		# Retention only means anything once logging is on.
 		self.assertIn("syncRetentionVisibility", js)
@@ -5061,13 +6453,28 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("_set_next_gated", js)
 		self.assertIn("this._nextGated", js)
 		self.assertIn(
-			'__("Test the connection for at least one company before continuing.")', js
+			'__("Test the connection for {0} (or remove it) before continuing.", [untested.company])', js
 		)
 		# _on_next() must check the gate before anything else, so a click while
 		# gated always shows the message rather than silently trying to save.
 		on_next = js.split("_on_next() {")[1].split("\n\t}\n")[0]
 		self.assertIn("this._nextGated", on_next)
 		self.assertIn("frappe.show_alert", on_next)
+
+	def test_connect_gate_requires_every_company_tested_not_just_one(self):
+		"""Regression guard for the actual bug report: gating on "at least one
+		company tested" let an untested or failed credential ride along past
+		Connect - invisible until the Nexus step later fetched nexus for every
+		company in one request and hard-crashed with a raw 401 traceback the
+		moment any one of them turned out to have a bad token. Every company
+		with a name must test successfully now, and the gate message names the
+		specific offending company with both ways out: fix its token and
+		re-test, or remove it."""
+		js = self._js()
+		gate = js.split("_sync_connect_gate() {")[1].split("\n\t}\n")[0]
+		self.assertIn("const withCompany = this._connectCards.filter((c) => c.company);", gate)
+		self.assertIn("const untested = withCompany.find((c) => !c.tested);", gate)
+		self.assertNotIn("c.controls.company.get_value()", gate)
 
 	def test_connect_gate_reads_tracked_company_not_control_mid_flight(self):
 		"""Regression guard: _sync_connect_gate() runs synchronously right after
@@ -5080,7 +6487,7 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		used instead."""
 		js = self._js()
 		gate = js.split("_sync_connect_gate() {")[1].split("\n\t}\n")[0]
-		self.assertIn("c.tested && c.company", gate)
+		self.assertIn("c.company", gate)
 		self.assertNotIn("c.controls.company.get_value()", gate)
 
 	def test_test_connection_button_is_not_plain_default(self):
@@ -5096,6 +6503,340 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		js = self._js()
 		self.assertIn("otherCompanies", js)
 		self.assertIn("not in", js)
+
+	# ── Connect step redesign v4: API Mode alone, Enable API logs moved below
+	# API Credentials as a toggle-switch row, credential rows top-aligned
+	# (per latest user feedback, superseding v3's shared top-row/divider) ──
+
+	def test_connect_mode_is_a_segmented_toggle_not_a_dropdown(self):
+		"""Sandbox/Live is a binary choice, shown as a two-button pill toggle
+		instead of hiding one option behind a closed <select> dropdown -
+		_render_mode_toggle is a hand-built stand-in exposing only the
+		get_value/set_value subset the rest of the file calls on
+		this.controls.mode, not a real frappe control (so no native
+		show_description_on_click/InfoCard for it - the label+description
+		are hand-authored instead, same as Enable API logs)."""
+		js = self._js()
+		self.assertNotIn('fieldtype: "Select", fieldname: "api_mode"', js)
+		self.assertIn(
+			'this.controls.mode = this._render_mode_toggle(this.$body.find(".ts-field-mode"), s.api_mode || "Live");',
+			js,
+		)
+		toggle_fn = js.split("_render_mode_toggle($parent, initial) {")[1].split("\n\t}\n")[0]
+		self.assertIn('data-value="Sandbox"', toggle_fn)
+		self.assertIn('data-value="Live"', toggle_fn)
+		self.assertIn("get_value: () => value,", toggle_fn)
+		self.assertIn("set_value: (v) => { value = v; setActive(); },", toggle_fn)
+		# A real click drives _on_mode_change() directly - no $input "change"
+		# event to bind, since this isn't a real frappe control.
+		self.assertIn("this._on_mode_change();", toggle_fn)
+
+		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
+		mode_card = render_connect.split('<div class="ts-field-mode">')[0]
+		self.assertIn('<label class="control-label" style="margin:0">', mode_card)
+		self.assertIn('<span class="ts-reqd">*</span>', mode_card)
+		self.assertIn('<p class="ts-fieldnote" style="margin:2px 0 0">', mode_card)
+		self.assertIn("Live requests affect real filings.", mode_card)
+
+	def test_connect_logs_card_sits_below_api_credentials(self):
+		"""Enable API logs' position has moved a few times across rounds
+		(shared row with API Mode -> below Credentials -> above Credentials)
+		- settled below/after API Credentials, each card getting the same
+		20px top margin for consistent spacing between all three cards."""
+		js = self._js()
+		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
+		self.assertLess(
+			render_connect.index('class="ts-card-h ts-cred-heading"'),
+			render_connect.index('class="ts-card ts-logtoggle"'),
+		)
+		self.assertIn('<div class="ts-card ts-logtoggle" style="margin-top:20px">', render_connect)
+
+	def test_connect_logs_card_has_toggle_row_then_retention_row(self):
+		"""One card, two rows divided by a border: the Switch control (its own
+		native label+description, .ts-field-logging is its only content) on
+		top, Retention (a plain label+description on the left, the day-count
+		input on the right - the same label-left/control-right shape as
+		.ts-mode-row) below it."""
+		js = self._js()
+		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
+		logtoggle = render_connect.split('<div class="ts-card ts-logtoggle"')[1].split("`);")[0]
+
+		retention_row = logtoggle.split('<div class="ts-card-b ts-retention-row">')[1]
+		self.assertIn('<label class="control-label" style="margin:0">${__("Retention")}</label>', retention_row)
+		self.assertIn("Older logs are deleted automatically.", retention_row)
+		self.assertIn('class="ts-retention-wrap"', retention_row)
+
+		self.assertLess(
+			logtoggle.index('class="ts-field-logging"'),
+			logtoggle.index('class="ts-card-b ts-retention-row"'),
+		)
+
+		logging_control = js.split("this.controls.enableLogging = frappe.ui.form.make_control({")[1].split("});")[0]
+		self.assertIn('fieldtype: "Switch", fieldname: "enable_taxjar_logging"', logging_control)
+		self.assertIn('label: __("Enable API logs")', logging_control)
+		self.assertIn(
+			'description: __("Records API requests, responses, and errors in TaxJar API Log.")', logging_control
+		)
+
+	def test_connect_logs_toggle_uses_frappe_core_switch_control(self):
+		"""fieldtype "Switch" (frappe.ui.form.ControlSwitch, controls/switch.js)
+		is a real pill toggle already shipped and styled in frappe core
+		(common/controls.scss's .switch-control/.switch-visual/.switch-thumb,
+		already part of the desk CSS bundle - no extra CSS/import needed
+		here) - not a hand-rolled CSS checkbox, which rendered as a broken
+		grey ring in practice, and not frappe-ui's Vue Switch component
+		either (confirmed not feasible from this plain, unbundled page
+		script - frappe-ui isn't even installed in this bench, and Vue isn't
+		exposed as a global here)."""
+		js = self._js()
+		self.assertNotIn('input[type="checkbox"]', js)
+		self.assertNotIn("appearance: none", js)
+
+		import os
+		switch_path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "..", "..", "frappe", "frappe",
+			"public", "js", "frappe", "form", "controls", "switch.js"))
+		self.assertTrue(os.path.isfile(switch_path), "frappe core's Switch control must exist for fieldtype: \"Switch\" to work")
+
+		css = open(os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))).read()
+		self.assertNotIn('input[type="checkbox"]', css)
+
+	def test_connect_retention_row_has_border_divider_and_hides_as_one_unit(self):
+		""".ts-retention-row gets a border-top (the divider between the two
+		rows), and syncRetentionVisibility toggles the whole row - hiding it
+		wholesale rather than leaving "Retention / Older logs are deleted
+		automatically" visible with no functioning input when logging is off."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		retention_row_rule = css.split(".taxjar-setup .ts-retention-row {")[1].split("}")[0]
+		self.assertIn("border-top: 1px solid var(--border-color)", retention_row_rule)
+
+		js = self._js()
+		self.assertIn('const $retentionField = this.$body.find(".ts-retention-row");', js)
+
+	def test_info_popover_is_click_to_show_not_hover(self):
+		"""The info popover is built and shown from a real click handler
+		(delegated once in _build_shell, not rebound per render), not a CSS
+		:hover rule - works the same on touch and desktop."""
+		js = self._js()
+		self.assertIn('this.$root.on("click", ".ts-info-btn"', js)
+		self.assertIn("_toggle_info_popover", js)
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertNotIn(":hover .ts-info-pop", css)
+		self.assertNotIn(".ts-info-pop:hover", css)
+
+	def test_info_popover_toggles_closed_on_second_click_of_same_button(self):
+		js = self._js()
+		fn = js.split("_toggle_info_popover($trigger) {")[1].split("\n\t}\n")[0]
+		self.assertIn('const reopening = $trigger.hasClass("ts-info-btn-active");', fn)
+		self.assertIn("if (reopening) return;", fn)
+
+	def test_connect_retention_default_is_fifteen_and_shows_pluralised_unit(self):
+		"""Default is 15 days, and the "day"/"days" unit word is a separate
+		visible element next to the input (not baked into the input itself),
+		pluralised off the live value - just the bare unit word, not "day/days
+		retention", since the row now has its own "Retention" label doing that
+		job (saying it twice on one row read redundant)."""
+		js = self._js()
+		self.assertIn(
+			"this.controls.logRetention.set_value(s.log_retention_days != null ? s.log_retention_days : 15);", js
+		)
+		self.assertIn("ts-retention-unit", js)
+		self.assertIn(
+			'$retentionUnit.text(cint(this.controls.logRetention.get_value()) === 1 ? __("day") : __("days"));',
+			js,
+		)
+
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "doctype", "taxjar_settings", "taxjar_settings.json"))
+		import json
+		with open(path) as f:
+			meta = json.load(f)
+		field = next(f for f in meta["fields"] if f["fieldname"] == "log_retention_days")
+		self.assertEqual(field["default"], "15")
+
+	def test_connect_credentials_section_is_one_collapsible_heading(self):
+		"""Replaces the old per-company collapsible header with a single,
+		generic "API Credentials" heading for the whole section - clicking it
+		toggles every row at once, not one company at a time."""
+		js = self._js()
+		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
+		self.assertIn('class="ts-card-h ts-cred-heading"', render_connect)
+		self.assertIn('__("API Credentials")', render_connect)
+		self.assertIn("_set_creds_expanded", js)
+		self.assertIn(
+			'this.$body.find(".ts-cred-heading").on("click", () => this._set_creds_expanded(!this._credsExpanded));',
+			js,
+		)
+
+	def test_connect_add_company_button_lives_inside_the_heading(self):
+		"""'+ Add another company' sits inside .ts-cred-heading itself, not
+		below the row list - and stopPropagation keeps clicking it from also
+		toggling the heading's own collapse."""
+		js = self._js()
+		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
+		heading = render_connect.split('<div class="ts-card-h ts-cred-heading">')[1].split("</div>")[0]
+		self.assertIn("ts-add-cred", heading)
+		add_click = js.split('this.$body.find(".ts-add-cred").on("click", (e) => {')[1].split("\n\t\t});")[0]
+		self.assertIn("e.stopPropagation();", add_click)
+		self.assertIn("this._add_credential_card({ company: null, token_last4: null });", add_click)
+		self.assertIn("this._set_creds_expanded(true);", add_click)
+
+	def test_connect_credentials_section_starts_expanded(self):
+		"""Required step - starting collapsed would just cost an extra click
+		on every single visit."""
+		js = self._js()
+		self.assertIn("this._credsExpanded = true;", js)
+
+	def test_connect_credential_rows_are_flat_with_dividers_not_accordion_cards(self):
+		"""Each company is one plain .ts-cred-row (Company / Live token /
+		action slot / remove), always fully visible once the section is
+		expanded - not its own collapsible card."""
+		js = self._js()
+		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t_render_cred_action")[0]
+		self.assertIn('<div class="ts-cred-row">', add_card)
+		self.assertNotIn("ts-acc-row", add_card)
+		self.assertNotIn("ts-acc-head", add_card)
+
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		row_rule = css.split(".taxjar-setup .ts-cred-row {")[1].split("}")[0]
+		self.assertIn("align-items: flex-start", row_rule)
+		self.assertIn(".ts-cred-row + .ts-cred-row { padding-top: 12px; border-top:", css)
+
+	def test_connect_credential_row_labels_top_align_regardless_of_field_height(self):
+		"""Regression guard: bottom-aligning the row (the previous approach)
+		visibly staggered the Company/Live token labels whenever one field
+		grew taller than the other (e.g. a per-field description) - reported
+		as "alignment breaks after save". Top-aligning is what stays correct
+		regardless of which field ends up taller. The action slot/remove
+		button opt out via align-self: flex-end so they line up with the
+		bottom of the input boxes themselves (Company and Live token are now
+		equal height) rather than align-self: center, which centered against
+		the full label+input span and floated up near the label line -
+		reported as the pill/remove not lining up with the inputs."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertIn(
+			".taxjar-setup .ts-cred-row .ts-cred-action { flex: none; display: flex; align-items: center; gap: 6px; align-self: flex-end; }",
+			css,
+		)
+		self.assertIn(".taxjar-setup .ts-cred-row .ts-card-remove { align-self: flex-end; }", css)
+
+	def test_connect_token_field_has_no_per_field_description(self):
+		""""Leave blank to keep the saved token." was the extra description
+		line that made an already-saved credential's Live token field taller
+		than Company - removed rather than compensated for, since the
+		placeholder ("...ending in 2429") already conveys there's a stored
+		token."""
+		js = self._js()
+		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t_render_cred_action")[0]
+		token_control = add_card.split("const tokenControl = frappe.ui.form.make_control({")[1].split("});")[0]
+		self.assertNotIn("description", token_control)
+		self.assertNotIn("Leave blank to keep the saved token.", js)
+		on_mode_change = js.split("_on_mode_change() {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("tokenCtrl.df.description", on_mode_change)
+
+	def test_connect_test_connection_pill_replaces_button_on_result(self):
+		"""_render_cred_action cycles the action slot through an idle "Connect"
+		button, a green Success pill, and a yellow Retry pill - the pill
+		replaces the button rather than sitting beside it."""
+		js = self._js()
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn('$action.html(`<span class="ts-chip ok ts-cred-pill">', fn)
+		self.assertIn('$action.html(`<button type="button" class="btn btn-default ts-test">${__("Connect")}</button>`);', fn)
+		self.assertIn('<span class="ts-chip retry ts-cred-pill">${__("Retry")}</span>', fn)
+
+	def test_connect_failed_state_shows_warning_icon_outside_the_pill(self):
+		"""The warning icon is a sibling of the Retry pill, not nested inside
+		it - so clicking the icon (to see the failure reason) is never also
+		routed through the pill's own click-to-retry handler."""
+		js = self._js()
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		failed_branch = fn.split("else if (entry.lastError) {")[1].split("} else {")[0]
+		# The info button call comes before the pill span, and is not nested
+		# inside its <span> tag.
+		self.assertLess(
+			failed_branch.index("this._info_btn_html(entry.lastError)"),
+			failed_branch.index('<span class="ts-chip retry ts-cred-pill">'),
+		)
+		self.assertNotIn(
+			'<span class="ts-chip retry ts-cred-pill">${this._info_btn_html', failed_branch
+		)
+		self.assertIn("this._info_btn_html(entry.lastError)", fn)
+		# Triangle-alert (a warning icon), not the plain info icon used
+		# elsewhere - the failure state reads as a warning, not neutral info.
+		# "md" (20px), not "xs" (12px) - too small to read as a warning at a
+		# glance next to normal body text.
+		info_btn_fn = js.split("_info_btn_html(text) {")[1].split("\n\t}\n")[0]
+		self.assertIn('frappe.utils.icon("triangle-alert", "md")', info_btn_fn)
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		info_btn_rule = css.split(".taxjar-setup .ts-info-btn {")[1].split("}")[0]
+		self.assertIn("width: 26px", info_btn_rule)
+		self.assertIn("height: 26px", info_btn_rule)
+
+	def test_retry_pill_is_visually_distinct_yellow_not_the_neutral_warn_chip(self):
+		""".warn stays the neutral "in progress" chip (the Connect spinner and
+		the unrelated Nexus fetch-status chip both still use it) - the new
+		Retry state needed to be actually yellow, so it gets its own .retry
+		class rather than repurposing .warn and silently recolouring those
+		other two spinners too."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		retry_rule = css.split(".taxjar-setup .ts-chip.retry {")[1].split("}")[0]
+		self.assertIn("yellow", retry_rule)
+		warn_rule = css.split(".taxjar-setup .ts-chip.warn {")[1].split("}")[0]
+		self.assertNotIn("yellow", warn_rule)
+
+	def test_connect_button_renamed_to_connect(self):
+		"""The idle action-slot button reads "Connect", not "Test connection"."""
+		js = self._js()
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn('${__("Connect")}</button>', fn)
+		self.assertNotIn("Test connection", fn)
+
+	def test_connect_pill_click_retests(self):
+		"""Clicking either result pill re-runs the test - the same handler as
+		the idle button, just bound to whichever element ends up in the slot."""
+		js = self._js()
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn(
+			'$action.find(".ts-test, .ts-cred-pill").on("click", () => this._test_connection(entry));', fn
+		)
+
+	def test_connect_edits_fall_back_through_reset_cred_status_to_idle_button(self):
+		"""Editing company or token after a test must clear lastError too, not
+		just tested - otherwise _render_cred_action would still show the old
+		Failed pill instead of falling back to the idle button."""
+		js = self._js()
+		fn = js.split("_reset_cred_status(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn("entry.lastError = null;", fn)
+		self.assertIn("this._render_cred_action(entry);", fn)
+
+	def test_connect_css_supports_credentials_section_and_rows(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		css = open(path).read()
+		self.assertIn(".ts-cred-heading { cursor: pointer; }", css)
+		self.assertIn(".ts-acc-chevron-open { transform: rotate(90deg); }", css)
+		self.assertIn(".ts-cred-pill { cursor: pointer; }", css)
 
 	def test_accounts_step_uses_company_scoped_account_links(self):
 		js = self._js()
@@ -5128,13 +6869,17 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertNotIn("ts-banner", js)
 
 	def test_token_label_reads_tracked_mode_not_control_mid_flight(self):
-		"""this.controls.mode.set_value() resolves asynchronously (frappe.run_serially),
-		so reading get_value() on it synchronously right after - as the token label
-		used to - could still see the pre-set value and show "Sandbox token" even in
-		Live mode. The label must read a plain instance flag set directly from state
-		instead."""
+		"""_modeIsLive is a plain instance flag set directly from state, read
+		by the token label instead of this.controls.mode.get_value() - a
+		holdover from when mode was a real frappe control whose set_value()
+		resolved asynchronously (frappe.run_serially), so a synchronous read
+		right after could still see the pre-set value. The segmented toggle
+		that replaced it has no such async step, but _modeIsLive is still
+		needed for a different reason: it must exist before any credential
+		card is built (see _add_credential_card), not just after a real
+		change event."""
 		js = self._js()
-		self.assertIn("this._modeIsLive = (s.api_mode || \"Sandbox\") === \"Live\";", js)
+		self.assertIn("this._modeIsLive = (s.api_mode || \"Live\") === \"Live\";", js)
 		self.assertIn('label: this._modeIsLive ? __("Live token") : __("Sandbox token")', js)
 		self.assertNotIn('label: this.controls.mode.get_value() === "Live"', js)
 		# _on_mode_change is a real change event, so it's safe to read the control
@@ -5142,27 +6887,28 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		on_mode_change = js.split("_on_mode_change() {")[1].split("\n\t}\n")[0]
 		self.assertIn("this._modeIsLive = live;", on_mode_change)
 
-	def test_credential_card_starts_saved_not_not_tested_when_already_connected(self):
+	def test_credential_card_starts_saved_shows_success_pill_when_already_connected(self):
 		"""Re-running the guided setup for a company with a stored token must not
-		visually demand a re-test of a connection nothing has changed about - and
-		reads that state with the exact same "Success" chip a fresh test
-		produces, not a separate "Saved" wording that reads as less certain and
-		invites re-testing anyway."""
+		visually demand a re-test of a connection nothing has changed about -
+		_render_cred_action reads entry.tested straight into the same "Success"
+		pill a fresh test produces, not a separate "Saved" wording that reads
+		as less certain and invites re-testing anyway."""
 		js = self._js()
 		self.assertIn("const alreadySaved = !!cred.token_last4;", js)
-		self.assertIn('tested: alreadySaved', js)
-		self.assertIn('alreadySaved ? `<span class="ts-chip-dot"></span> ${__("Success")}` : __("Not tested")', js)
+		self.assertIn("tested: alreadySaved", js)
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn('$action.html(`<span class="ts-chip ok ts-cred-pill"><span class="ts-chip-dot"></span> ${__("Success")}</span>`);', fn)
 
 	def test_restoring_existing_company_does_not_fire_onchange_reset(self):
 		"""Regression guard: frappe's set_value() invokes df.onchange itself as
 		part of setting the value, not only on real user input. Populating an
 		already-saved card's Company field with its existing value (so the
 		field isn't blank) therefore fired the "company changed" reset and
-		immediately wiped the "Success" chip _add_credential_card had just set,
-		straight back to "Not tested" - the exact bug reported. A guard must
+		immediately wiped the "Success" pill _add_credential_card had just set,
+		straight back to the idle button - the exact bug reported. A guard must
 		skip that reset exactly once, for the initial programmatic restore."""
 		js = self._js()
-		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t}\n\n\t_remove_credential_card")[0]
+		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t_render_cred_action")[0]
 		self.assertIn("let restoringInitialCompany = !!cred.company;", add_card)
 		onchange = add_card.split("companyControl.df.onchange = () => {")[1].split("};")[0]
 		self.assertIn("if (restoringInitialCompany)", onchange)
@@ -5329,3 +7075,399 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		card_rule = css.split(".taxjar-setup .ts-card {")[1].split("}")[0]
 		self.assertNotIn("overflow: hidden", card_rule)
 		self.assertIn("minmax(280px, 420px)", css)
+
+
+# ── Regional: United States — ledger auto-select & tax template sync ────────
+
+
+class _FakeTemplateRow:
+	def __init__(self, **kwargs):
+		self.__dict__.update(kwargs)
+
+	def get(self, field):
+		return getattr(self, field, None)
+
+	def set(self, field, value):
+		setattr(self, field, value)
+
+
+class _FakeTemplateDoc:
+	"""Minimal stand-in for a Sales Taxes and Charges Template doc."""
+	def __init__(self, name, taxes=None, is_default=0):
+		self.name = name
+		self.taxes = taxes or []
+		self.is_default = is_default
+		self.saved = False
+
+	def append(self, field, data):
+		if field == "taxes":
+			self.taxes.append(_FakeTemplateRow(**data))
+
+	def save(self, ignore_permissions=False):
+		self.saved = True
+
+	def insert(self, ignore_permissions=False):
+		self.saved = True
+
+
+def _fake_company_lookup(abbr="TC", cost_center="Main - TC"):
+	"""Side_effect for frappe.db.get_value("Company", company, field)."""
+	def _get(doctype, company, field):
+		return {"abbr": abbr, "cost_center": cost_center}.get(field)
+	return _get
+
+
+REGIONAL = "taxjar_integration.taxjar_integration.regional.united_states"
+
+
+class TestResolveDefaultLedgers(UnitTestCase):
+
+	def test_matches_by_account_number_first(self):
+		def fake_get_value(doctype, filters):
+			if filters.get("account_number") == "21400":
+				return "Sales Tax Payable - TC"
+			if filters.get("account_number") == "41200":
+				return "Shipping and Freight Income - TC"
+			return None
+
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value):
+			result = resolve_default_ledgers("Test Co")
+
+		self.assertEqual(result["tax_account_head"], "Sales Tax Payable - TC")
+		self.assertEqual(result["shipping_account_head"], "Shipping and Freight Income - TC")
+
+	def test_falls_back_to_account_name_when_number_not_found(self):
+		def fake_get_value(doctype, filters):
+			if "account_number" in filters:
+				return None
+			if filters.get("account_name") == "Sales Tax Payable":
+				return "Custom Sales Tax - TC"
+			if filters.get("account_name") == "Shipping and Freight Income":
+				return "Custom Freight - TC"
+			return None
+
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value):
+			result = resolve_default_ledgers("Test Co")
+
+		self.assertEqual(result["tax_account_head"], "Custom Sales Tax - TC")
+		self.assertEqual(result["shipping_account_head"], "Custom Freight - TC")
+
+	def test_returns_none_when_neither_found(self):
+		"""Non-standard chart of accounts: no account, no exception."""
+		with patch(f"{REGIONAL}.frappe.db.get_value", return_value=None):
+			result = resolve_default_ledgers("Test Co")
+
+		self.assertIsNone(result["tax_account_head"])
+		self.assertIsNone(result["shipping_account_head"])
+
+	def test_lookup_is_company_scoped(self):
+		def fake_get_value(doctype, filters):
+			if filters.get("company") == "Test Co" and filters.get("account_number") == "21400":
+				return "Sales Tax Payable - TC"
+			return None
+
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value):
+			result = resolve_default_ledgers("Other Co")
+
+		self.assertIsNone(result["tax_account_head"])
+
+
+class TestEnsureCompanyLedgersAndTemplate(UnitTestCase):
+
+	def _row(self, company="Test Co", tax_account_head=None, shipping_account_head=None, calculate_tax=0):
+		row = MagicMock()
+		row.name = "row-1"
+		row.company = company
+		row.tax_account_head = tax_account_head
+		row.shipping_account_head = shipping_account_head
+		row.taxjar_calculate_tax = calculate_tax
+		return row
+
+	def test_backfills_both_blank_fields(self):
+		row = self._row()
+		resolved = {"tax_account_head": "Sales Tax Payable - TC", "shipping_account_head": "Shipping and Freight Income - TC"}
+
+		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set, \
+		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
+		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
+			ensure_company_ledgers_and_template(row)
+
+		mock_set.assert_called_once_with("TaxJar Company Config", "row-1", resolved)
+		self.assertEqual(row.tax_account_head, resolved["tax_account_head"])
+		self.assertEqual(row.shipping_account_head, resolved["shipping_account_head"])
+		mock_upsert.assert_called_once_with("Test Co", resolved["tax_account_head"], is_default=False)
+		mock_disable.assert_not_called()
+
+	def test_does_not_overwrite_existing_ledger_value(self):
+		"""An admin's own choice is never overwritten, even if it differs from what
+		the standard-CoA lookup would resolve."""
+		row = self._row(tax_account_head="Manual Tax - TC", shipping_account_head="Manual Freight - TC")
+		resolved = {"tax_account_head": "Sales Tax Payable - TC", "shipping_account_head": "Shipping and Freight Income - TC"}
+
+		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set, \
+		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert:
+			ensure_company_ledgers_and_template(row)
+
+		mock_set.assert_not_called()
+		mock_upsert.assert_called_once_with("Test Co", "Manual Tax - TC", is_default=False)
+
+	def test_backfills_only_the_blank_field(self):
+		row = self._row(tax_account_head="Manual Tax - TC", shipping_account_head=None)
+		resolved = {"tax_account_head": "Sales Tax Payable - TC", "shipping_account_head": "Shipping and Freight Income - TC"}
+
+		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set, \
+		     patch(f"{REGIONAL}._upsert_tax_template"):
+			ensure_company_ledgers_and_template(row)
+
+		mock_set.assert_called_once_with(
+			"TaxJar Company Config", "row-1", {"shipping_account_head": resolved["shipping_account_head"]}
+		)
+		self.assertEqual(row.tax_account_head, "Manual Tax - TC")
+		self.assertEqual(row.shipping_account_head, resolved["shipping_account_head"])
+
+	def test_leaves_blank_and_skips_template_when_neither_resolves(self):
+		row = self._row()
+		resolved = {"tax_account_head": None, "shipping_account_head": None}
+
+		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set, \
+		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
+		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
+			ensure_company_ledgers_and_template(row)
+
+		mock_set.assert_not_called()
+		mock_upsert.assert_not_called()
+		mock_disable.assert_not_called()
+
+	def test_gates_is_default_on_taxjar_calculate_tax(self):
+		row = self._row(tax_account_head="Tax - TC", calculate_tax=1)
+		resolved = {"tax_account_head": None, "shipping_account_head": None}
+
+		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
+		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
+			ensure_company_ledgers_and_template(row)
+
+		mock_upsert.assert_called_once_with("Test Co", "Tax - TC", is_default=True)
+		mock_disable.assert_called_once_with("Test Co")
+
+	def test_does_not_disable_defaults_when_calculate_tax_off(self):
+		"""Ledgers/template stay in sync even with tax calc off, but ERPNext's own
+		defaults are only ever disabled once TaxJar's template is actually active."""
+		row = self._row(tax_account_head="Tax - TC", calculate_tax=0)
+		resolved = {"tax_account_head": None, "shipping_account_head": None}
+
+		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
+		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
+			ensure_company_ledgers_and_template(row)
+
+		mock_upsert.assert_called_once_with("Test Co", "Tax - TC", is_default=False)
+		mock_disable.assert_not_called()
+
+
+class TestUpsertTaxTemplate(UnitTestCase):
+
+	def _patch_company_lookups(self, abbr="TC", cost_center="Main - TC"):
+		return patch(f"{REGIONAL}.frappe.db.get_value", side_effect=_fake_company_lookup(abbr, cost_center))
+
+	def test_creates_new_template_with_single_actual_row(self):
+		created = {}
+
+		def fake_get_doc(arg):
+			created["dict"] = arg
+			doc = _FakeTemplateDoc(name=f"{arg['title']} - TC", taxes=list(arg["taxes"]), is_default=arg["is_default"])
+			created["doc"] = doc
+			return doc
+
+		with self._patch_company_lookups(), \
+		     patch(f"{REGIONAL}.frappe.db.exists", return_value=False), \
+		     patch(f"{REGIONAL}.frappe.get_doc", side_effect=fake_get_doc):
+			name = _upsert_tax_template("Test Co", "Sales Tax Payable - TC", is_default=True)
+
+		self.assertEqual(created["dict"]["doctype"], "Sales Taxes and Charges Template")
+		self.assertEqual(created["dict"]["title"], TAXJAR_TEMPLATE_TITLE)
+		self.assertEqual(created["dict"]["is_default"], 1)
+		self.assertEqual(len(created["dict"]["taxes"]), 1)
+
+		row = created["dict"]["taxes"][0]
+		self.assertEqual(row["charge_type"], "Actual")
+		self.assertEqual(row["account_head"], "Sales Tax Payable - TC")
+		self.assertEqual(row["description"], TAXJAR_ROW_DESCRIPTION)
+		self.assertEqual(row["cost_center"], "Main - TC")
+		self.assertEqual(name, created["doc"].name)
+
+	def test_no_shipping_row_is_ever_added(self):
+		created = {}
+
+		def fake_get_doc(arg):
+			created["dict"] = arg
+			return _FakeTemplateDoc(name="x", taxes=list(arg["taxes"]), is_default=arg["is_default"])
+
+		with self._patch_company_lookups(), \
+		     patch(f"{REGIONAL}.frappe.db.exists", return_value=False), \
+		     patch(f"{REGIONAL}.frappe.get_doc", side_effect=fake_get_doc):
+			_upsert_tax_template("Test Co", "Sales Tax Payable - TC", is_default=True)
+
+		self.assertEqual(len(created["dict"]["taxes"]), 1)
+
+	def test_updates_existing_template_account_head_when_changed(self):
+		existing_row = _FakeTemplateRow(charge_type="Actual", account_head="Old Tax - TC",
+			description=TAXJAR_ROW_DESCRIPTION, cost_center="Main - TC")
+		doc = _FakeTemplateDoc(name="TaxJar Sales Tax - TC", taxes=[existing_row], is_default=1)
+
+		with self._patch_company_lookups(), \
+		     patch(f"{REGIONAL}.frappe.db.exists", return_value=True), \
+		     patch(f"{REGIONAL}.frappe.get_doc", return_value=doc):
+			_upsert_tax_template("Test Co", "New Tax - TC", is_default=True)
+
+		self.assertEqual(doc.taxes[0].account_head, "New Tax - TC")
+		self.assertTrue(doc.saved)
+
+	def test_no_save_when_already_in_sync(self):
+		"""Idempotency: a second sync with identical inputs makes zero writes."""
+		existing_row = _FakeTemplateRow(charge_type="Actual", account_head="Tax - TC",
+			description=TAXJAR_ROW_DESCRIPTION, cost_center="Main - TC")
+		doc = _FakeTemplateDoc(name="TaxJar Sales Tax - TC", taxes=[existing_row], is_default=1)
+
+		with self._patch_company_lookups(), \
+		     patch(f"{REGIONAL}.frappe.db.exists", return_value=True), \
+		     patch(f"{REGIONAL}.frappe.get_doc", return_value=doc):
+			_upsert_tax_template("Test Co", "Tax - TC", is_default=True)
+
+		self.assertFalse(doc.saved)
+
+	def test_is_default_flip_triggers_save(self):
+		existing_row = _FakeTemplateRow(charge_type="Actual", account_head="Tax - TC",
+			description=TAXJAR_ROW_DESCRIPTION, cost_center="Main - TC")
+		doc = _FakeTemplateDoc(name="TaxJar Sales Tax - TC", taxes=[existing_row], is_default=1)
+
+		with self._patch_company_lookups(), \
+		     patch(f"{REGIONAL}.frappe.db.exists", return_value=True), \
+		     patch(f"{REGIONAL}.frappe.get_doc", return_value=doc):
+			_upsert_tax_template("Test Co", "Tax - TC", is_default=False)
+
+		self.assertEqual(doc.is_default, 0)
+		self.assertTrue(doc.saved)
+
+
+class TestDisableDefaultUsTemplates(UnitTestCase):
+
+	def test_disables_matching_titles_only(self):
+		existing = {"US ST 6%": "US ST 6% - TC", "US ST 4%": "US ST 4% - TC"}
+
+		def fake_get_value(doctype, filters):
+			return existing.get(filters.get("title"))
+
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value), \
+		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set:
+			_disable_default_us_templates("Test Co")
+
+		self.assertEqual(mock_set.call_count, 2)
+		disabled_names = {c.args[1] for c in mock_set.call_args_list}
+		self.assertEqual(disabled_names, {"US ST 6% - TC", "US ST 4% - TC"})
+		for call in mock_set.call_args_list:
+			self.assertEqual(call.args[2], {"is_default": 0, "disabled": 1})
+
+	def test_noop_when_none_present(self):
+		with patch(f"{REGIONAL}.frappe.db.get_value", return_value=None), \
+		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set:
+			_disable_default_us_templates("Test Co")
+
+		mock_set.assert_not_called()
+
+	def test_does_not_touch_similarly_named_custom_template(self):
+		"""Only the three exact literal titles are ever matched - a user's own
+		template named e.g. "US ST 6% (custom)" is untouched."""
+		with patch(f"{REGIONAL}.frappe.db.get_value", return_value=None) as mock_get:
+			_disable_default_us_templates("Test Co")
+
+		queried_titles = {c.args[1]["title"] for c in mock_get.call_args_list}
+		self.assertEqual(queried_titles, {"US ST 6%", "US ST 4%", "US ST 6.25%"})
+
+
+class TestSyncAllCompanyTaxTemplates(UnitTestCase):
+
+	def test_iterates_explicit_rows_without_touching_settings_singleton(self):
+		rows = [MagicMock(), MagicMock()]
+
+		with patch(f"{REGIONAL}.ensure_company_ledgers_and_template") as mock_ensure, \
+		     patch(f"{REGIONAL}.frappe.get_single") as mock_get_single:
+			sync_all_company_tax_templates(rows)
+
+		mock_get_single.assert_not_called()
+		self.assertEqual(mock_ensure.call_count, 2)
+
+	def test_reads_from_settings_singleton_when_rows_omitted(self):
+		settings = MagicMock()
+		row = MagicMock()
+		settings.company_config = [row]
+
+		with patch(f"{REGIONAL}.ensure_company_ledgers_and_template") as mock_ensure, \
+		     patch(f"{REGIONAL}.frappe.get_single", return_value=settings):
+			sync_all_company_tax_templates()
+
+		mock_ensure.assert_called_once_with(row)
+
+	def test_true_noop_on_empty_company_config(self):
+		"""Fresh install: nothing configured yet, nothing to reconcile."""
+		settings = MagicMock()
+		settings.company_config = []
+
+		with patch(f"{REGIONAL}.ensure_company_ledgers_and_template") as mock_ensure, \
+		     patch(f"{REGIONAL}.frappe.get_single", return_value=settings):
+			sync_all_company_tax_templates()
+
+		mock_ensure.assert_not_called()
+
+
+class TestGetDefaultLedgersAPI(UnitTestCase):
+	"""Whitelisted wrapper in taxjar_setup.py - the guided setup JS's _call()
+	helper hardcodes that module path, so the real lookup in regional/united_states.py
+	needs a thin pass-through here to be reachable from the client."""
+
+	def test_delegates_to_resolve_default_ledgers_with_read_permission_check(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_default_ledgers
+
+		resolved = {"tax_account_head": "Tax - TC", "shipping_account_head": "Freight - TC"}
+		with patch("taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup.frappe.has_permission") as mock_perm, \
+		     patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved) as mock_resolve:
+			result = get_default_ledgers("Test Co")
+
+		mock_perm.assert_called_once_with("TaxJar Settings", "read", throw=True)
+		mock_resolve.assert_called_once_with("Test Co")
+		self.assertEqual(result, resolved)
+
+
+class TestAccountsStepLedgerAutoFill(UnitTestCase):
+	"""String/structure assertions on _render_accounts() - same pattern as
+	TestGuidedSetupPhase2JS since there's no JS runtime in this test suite."""
+
+	def _js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"))
+		return open(path).read()
+
+	def _render_accounts_body(self):
+		js = self._js()
+		return js.split("_render_accounts()")[1].split("\n\t_save_accounts()")[0]
+
+	def test_render_accounts_calls_get_default_ledgers(self):
+		self.assertIn('this._call("get_default_ledgers"', self._render_accounts_body())
+
+	def test_autofill_is_guarded_on_blank_fields(self):
+		"""Must not fire for a company whose ledgers are already fully configured -
+		otherwise revisiting the wizard makes a wasted round trip on every load."""
+		body = self._render_accounts_body()
+		call_site = body.split('this._call("get_default_ledgers"')[0]
+		self.assertIn("if (!cfg.tax_account_head || !cfg.shipping_account_head)", call_site[-400:])
+
+	def test_autofill_never_overwrites_an_already_set_field(self):
+		body = self._render_accounts_body()
+		autofill_block = body.split('this._call("get_default_ledgers"')[1]
+		self.assertIn("if (!cfg.tax_account_head && defaults.tax_account_head)", autofill_block)
+		self.assertIn("if (!cfg.shipping_account_head && defaults.shipping_account_head)", autofill_block)

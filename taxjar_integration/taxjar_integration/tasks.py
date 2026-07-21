@@ -3,6 +3,10 @@ import frappe
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_is_taxjar_enabled,
 	company_creates_transactions,
+	get_client,
+)
+from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+	fetch_and_insert_categories,
 )
 
 
@@ -27,6 +31,29 @@ def sync_nexus_list():
 		doc.update_nexus_list()
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "TaxJar: Nexus sync failed")
+
+
+def sync_product_tax_categories():
+	"""Weekly job: pull TaxJar's current category list and insert any new ones.
+
+	TaxJar doesn't publish a fixed update cadence for categories (added on an ongoing
+	basis, not on a schedule), so weekly polling rather than daily. Reuses
+	fetch_and_insert_categories() (shared with the manual "Update Product Tax
+	Category List" button), which only inserts categories missing by
+	product_tax_code - existing rows (and any Item already linked to them) are
+	never touched.
+	"""
+	if not _is_taxjar_enabled():
+		return
+
+	client = get_client()
+	if not client:
+		return
+
+	try:
+		fetch_and_insert_categories(client)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "TaxJar: Product tax category sync failed")
 
 
 def retry_failed_taxjar_syncs():

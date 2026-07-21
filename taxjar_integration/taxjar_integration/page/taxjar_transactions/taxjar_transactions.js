@@ -126,14 +126,13 @@ class TaxJarTransactionSync {
 					<thead>
 						<tr>
 							<th style="width: 30px;"></th>
-							<th>${__("Sales Invoice")}</th>
 							<th style="width: 110px;">${__("Posting Date")}</th>
 							<th style="width: 180px;">${__("Customer")}</th>
+							<th>${__("Sales Invoice")}</th>
 							<th style="width: 110px;">${__("Type")}</th>
 							<th style="width: 120px;">${__("Grand Total")}</th>
-							<th style="width: 120px;">${__("Sync Status")}</th>
-							<th style="width: 150px;">${__("Last Synced")}</th>
-							<th>${__("Error")}</th>
+							<th style="width: 100px;">${__("Doc Status")}</th>
+							<th style="width: 140px;">${__("Sync Status")}</th>
 						</tr>
 					</thead>
 					<tbody class="taxjar-transactions-body"></tbody>
@@ -148,6 +147,43 @@ class TaxJarTransactionSync {
 		this.not_configured_panel = $('<div class="taxjar-not-configured"></div>')
 			.hide()
 			.appendTo(this.page.main);
+
+		// Delegated once here (rather than rebound on every render_table()
+		// call) so it keeps working across re-renders without re-wiring.
+		// Shows immediately on hover - no native-tooltip delay - and also
+		// toggles on click, since hover never fires on touch devices.
+		this.tbody.on("mouseenter", ".taxjar-sync-icon", (e) => {
+			this._show_sync_popover($(e.currentTarget));
+		});
+		this.tbody.on("mouseleave", ".taxjar-sync-icon", () => this._hide_sync_popover());
+		this.tbody.on("click", ".taxjar-sync-icon", (e) => {
+			e.stopPropagation();
+			this._show_sync_popover($(e.currentTarget));
+		});
+	}
+
+	_show_sync_popover($trigger) {
+		this._hide_sync_popover();
+		const text = $trigger.attr("data-info") || "";
+		const $pop = $(`<div class="taxjar-sync-pop">${frappe.utils.escape_html(text)}</div>`).appendTo("body");
+		// position: fixed + getBoundingClientRect() are both viewport-relative,
+		// so no scroll-offset math is needed here. Sync Status is the table's
+		// last column, right up against the viewport edge, so the popover's
+		// own width is clamped back on-screen rather than just using rect.left.
+		const rect = $trigger[0].getBoundingClientRect();
+		const pop_width = $pop.outerWidth();
+		const left = Math.min(rect.left, window.innerWidth - pop_width - 12);
+		$pop.css({ top: rect.bottom + 6, left: Math.max(12, left) });
+		this._active_pop = $pop;
+		$(document).on("click.taxjarSyncPop", () => this._hide_sync_popover());
+	}
+
+	_hide_sync_popover() {
+		if (this._active_pop) {
+			this._active_pop.remove();
+			this._active_pop = null;
+		}
+		$(document).off("click.taxjarSyncPop");
 	}
 
 	show_not_configured() {
@@ -242,7 +278,7 @@ class TaxJarTransactionSync {
 
 		if (!this.invoices || !this.invoices.length) {
 			this.tbody.append(`
-				<tr><td colspan="9" class="text-muted text-center" style="padding: 40px;">
+				<tr><td colspan="8" class="text-muted text-center" style="padding: 40px;">
 					${__("No transactions found")}
 				</td></tr>
 			`);
@@ -251,31 +287,17 @@ class TaxJarTransactionSync {
 
 		this.invoices.forEach((inv) => {
 			const checked = this.selected.has(inv.name) ? "checked" : "";
-			const status_color = STATUS_COLORS[inv.taxjar_sync_status] || "grey";
-			const status_label = inv.taxjar_sync_status === "Not Applicable" ? __("NA") : __(inv.taxjar_sync_status);
-			const status_html = inv.taxjar_sync_status
-				? `<span class="indicator-pill ${status_color}">${status_label}</span>`
-				: "";
-
-			const last_synced = inv.taxjar_last_synced
-				? frappe.datetime.prettyDate(inv.taxjar_last_synced)
-				: "";
-
-			const error_html = inv.taxjar_sync_error
-				? `<span class="text-danger" title="${frappe.utils.escape_html(inv.taxjar_sync_error)}">${frappe.utils.escape_html(inv.taxjar_sync_error)}</span>`
-				: "";
 
 			const row = $(`
 				<tr data-invoice="${frappe.utils.escape_html(inv.name)}">
 					<td><input type="checkbox" class="taxjar-row-check" ${checked}></td>
-					<td><a href="/app/sales-invoice/${encodeURIComponent(inv.name)}">${frappe.utils.escape_html(inv.name)}</a></td>
 					<td>${frappe.utils.escape_html(inv.posting_date)}</td>
 					<td>${frappe.utils.escape_html(inv.customer_name || "")}</td>
+					<td><a href="/app/sales-invoice/${encodeURIComponent(inv.name)}">${frappe.utils.escape_html(inv.name)}</a></td>
 					<td>${frappe.utils.escape_html(inv.transaction_type || "")}</td>
 					<td style="text-align: right;">${frappe.format(inv.grand_total, { fieldtype: "Currency" })}</td>
-					<td>${status_html}</td>
-					<td>${last_synced}</td>
-					<td>${error_html}</td>
+					<td>${frappe.utils.escape_html(inv.doc_status || "")}</td>
+					<td>${this.render_sync_status_cell(inv)}</td>
 				</tr>
 			`);
 
@@ -290,6 +312,35 @@ class TaxJarTransactionSync {
 
 			this.tbody.append(row);
 		});
+	}
+
+	// One consistent shape for every status: a pill, and - whenever there's
+	// something worth surfacing beyond the pill's own text - a separate info
+	// icon to its right (never nested inside the pill) whose popover carries
+	// the detail: last-synced time for Synced, a queued note for Queued, the
+	// actual error for Failed. Retrying a failed row goes through the
+	// checkbox + "Retry Selected" bulk action rather than a dedicated button
+	// here, so Failed reads the same as every other status.
+	render_sync_status_cell(inv) {
+		const status = inv.taxjar_sync_status;
+		if (!status) return "";
+
+		const color = STATUS_COLORS[status] || "grey";
+		const label = status === "Not Applicable" ? __("NA") : __(status);
+		const pill = `<span class="indicator-pill ${color}">${label}</span>`;
+
+		let info_text = "";
+		if (status === "Synced" && inv.taxjar_last_synced) {
+			info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(inv.taxjar_last_synced)]);
+		} else if (status === "Queued") {
+			info_text = __("Queued for sync");
+		} else if (status === "Failed") {
+			info_text = inv.taxjar_sync_error || __("Unknown error");
+		}
+		if (!info_text) return pill;
+
+		const icon = `<button type="button" class="taxjar-sync-icon" data-info="${frappe.utils.escape_html(info_text)}">${frappe.utils.icon("info", "sm")}</button>`;
+		return `${pill}${icon}`;
 	}
 
 	render_pagination(data) {

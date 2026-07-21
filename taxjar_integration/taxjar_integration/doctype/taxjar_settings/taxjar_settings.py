@@ -22,6 +22,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_is_taxjar_enabled,
 	get_client,
 	log_taxjar_call,
+	sanitize_error_response,
 )
 
 
@@ -55,11 +56,8 @@ class TaxJarSettings(Document):
 		features_enabled = _is_taxjar_enabled(self)
 
 		# Custom fields, the Product Tax Category master and permissions are all set up
-		# at install / migrate (see install.setup_taxjar), so on save we only flip field
-		# visibility — a couple of cheap db.set_value calls. The single slow piece, the
+		# at install / migrate (see install.setup_taxjar). The single slow piece, the
 		# live token check, runs in the background so it never blocks the save.
-		toggle_tax_category_fields(hidden=not features_enabled)
-
 		if features_enabled and self.table_hvjw:
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.validate_taxjar_tokens",
@@ -72,6 +70,19 @@ class TaxJarSettings(Document):
 		if features_enabled and self.company_config and not self.nexus:
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
+				queue="short",
+				now=frappe.flags.in_test,
+			)
+
+		# Safety net for ledger auto-fill + tax template sync: not gated on
+		# features_enabled, since a company's ledgers/template should be ready
+		# before the master switch flips on. Re-reads company_config fresh once the
+		# job runs rather than passing rows through the queue (child-row objects
+		# aren't safe to serialize across the RQ boundary). Idempotent per-row, so
+		# repeated saves converge rather than re-doing work.
+		if self.company_config:
+			frappe.enqueue(
+				"taxjar_integration.taxjar_integration.regional.united_states.sync_all_company_tax_templates",
 				queue="short",
 				now=frappe.flags.in_test,
 			)
@@ -112,6 +123,26 @@ class TaxJarSettings(Document):
 				log_taxjar_call(action="nexus_regions", status="request", context={"company": config.company})
 				nexus = client.nexus_regions()
 				log_taxjar_call(action="nexus_regions", status="success", response=nexus, context={"company": config.company})
+			except taxjar.exceptions.TaxJarResponseError as e:
+				log_taxjar_call(action="nexus_regions", status="error", error=str(e), context={"company": config.company})
+				# One bad credential used to crash this loop for every company
+				# with a raw 401 traceback (the guided setup's own Connect step
+				# now requires every company to test successfully before this
+				# step is reachable, but this doctype method is also called
+				# directly - e.g. the "Update Nexus List" button on the TaxJar
+				# Settings form, or the nightly sync_nexus_list job - so it
+				# needs its own clear message rather than relying on that gate).
+				full = getattr(e, "full_response", None) or {}
+				status = full.get("status_code") if isinstance(full, dict) else None
+				if status == 401:
+					frappe.throw(
+						frappe._(
+							"TaxJar rejected the API credential for {0} (401 Unauthorized). "
+							"Enter a correct API key for {0} on the Connect step, or remove {0} "
+							"from API Credentials, to continue."
+						).format(config.company)
+					)
+				raise
 			except Exception as e:
 				log_taxjar_call(action="nexus_regions", status="error", error=str(e), context={"company": config.company})
 				raise
@@ -130,6 +161,46 @@ class TaxJarSettings(Document):
 				})
 
 		self.save()
+
+	@frappe.whitelist()
+	def get_product_tax_category_summary(self):
+		"""Live count and most-recent modification time for Product Tax Category rows,
+		rendered next to the "Nexus & Product Category" tab. Reads straight off the
+		table rather than a separate tracking field, so it's correct whether rows came
+		from the install-time seed or the weekly TaxJar sync (tasks.sync_product_tax_categories).
+		"""
+		return {
+			"count": frappe.db.count("Product Tax Category"),
+			"last_updated": frappe.db.get_value(
+				"Product Tax Category", filters={}, fieldname="modified", order_by="modified desc"
+			),
+		}
+
+	@frappe.whitelist()
+	def refresh_product_tax_categories(self):
+		"""Manual "Update Product Tax Category List" button: unlike the weekly
+		scheduled job (which logs and moves on - see tasks.sync_product_tax_categories),
+		this is user-triggered, so any TaxJar error should surface as a clear
+		message rather than an unhandled exception. Categories aren't
+		company-scoped, so any configured credential is enough - this doesn't gate
+		on _is_taxjar_enabled()."""
+		client = get_client()
+		if not client:
+			frappe.throw(frappe._("Could not connect to TaxJar. Check your API credentials."))
+
+		try:
+			fetch_and_insert_categories(client)
+		except taxjar.exceptions.TaxJarConnectionError:
+			frappe.throw(frappe._("TaxJar API is unreachable. Please try again later."))
+		except taxjar.exceptions.TaxJarResponseError as err:
+			full = getattr(err, "full_response", None) or {}
+			status = full.get("status_code") if isinstance(full, dict) else None
+			if status == 401:
+				frappe.throw(frappe._("Invalid TaxJar API token. Please check your credentials."))
+			frappe.throw(frappe._("Failed to fetch categories from TaxJar: {0}").format(sanitize_error_response(err)))
+
+		return self.get_product_tax_category_summary()
+
 
 def validate_taxjar_tokens(user=None):
 	"""Background job: verify each TaxJar credential against a lightweight endpoint.
@@ -176,17 +247,6 @@ def _alert_token_issue(user, message, indicator):
 	)
 
 
-def toggle_tax_category_fields(hidden):
-	hidden = 1 if hidden else 0
-	for dt in ("Item", "Sales Invoice Item"):
-		frappe.db.set_value(
-			"Custom Field",
-			{"dt": dt, "fieldname": "product_tax_category"},
-			"hidden",
-			hidden,
-		)
-
-
 def add_product_tax_categories():
 	if PRODUCT_TAX_CATEGORY_DATA_FILE.parent != BASE_DIR or not PRODUCT_TAX_CATEGORY_DATA_FILE.is_file():
 		frappe.throw(frappe._("Product tax category fixture file is missing or invalid"))
@@ -204,6 +264,34 @@ def create_tax_categories(data):
 			tax_category.product_tax_code = d.get("product_tax_code")
 			tax_category.category_name = d.get("name")
 			tax_category.db_insert()
+
+
+def fetch_and_insert_categories(client):
+	"""Pull TaxJar's current category list via the given client and insert any new
+	ones. Shared by tasks.sync_product_tax_categories() (the weekly scheduled job)
+	and TaxJarSettings.refresh_product_tax_categories() (the manual button) so the
+	TaxJarCategory -> dict mapping only lives in one place.
+
+	Logs the call via log_taxjar_call() same as every other TaxJar call site,
+	then re-raises on error so each caller keeps its own presentation behaviour
+	(the manual button throws a clear message; the scheduled job logs via
+	frappe.log_error and moves on)."""
+	try:
+		log_taxjar_call(action="categories", status="request")
+		categories = client.categories()
+		log_taxjar_call(action="categories", status="success", response=categories)
+	except Exception as err:
+		log_taxjar_call(action="categories", status="error", error=str(err))
+		raise
+
+	create_tax_categories([
+		{
+			"product_tax_code": category.product_tax_code,
+			"description": category.description,
+			"name": category.name,
+		}
+		for category in categories
+	])
 
 
 # Single source of truth: the leading "" yields a blank first option in the Select.
@@ -263,9 +351,17 @@ _TRANSACTION_BREAKDOWN_FIELDS = [
 		read_only=1,
 	),
 	dict(
+		fieldname="taxjar_freight_taxable",
+		fieldtype="Check",
+		insert_after="taxjar_breakdown_json",
+		label="Shipping Taxable (TaxJar)",
+		hidden=1,
+		read_only=1,
+	),
+	dict(
 		fieldname="taxjar_breakdown_html",
 		fieldtype="HTML",
-		insert_after="taxjar_breakdown_json",
+		insert_after="taxjar_freight_taxable",
 	),
 ]
 
@@ -335,6 +431,36 @@ def _item_tax_fields(*, allow_breakdown_on_submit=False):
 	]
 
 
+def _transaction_exemption_fields():
+	"""Per-transaction TaxJar exemption override, in the Details tab's Taxes and
+	Charges section - the checkbox after Shipping Rule, the reason Select after
+	Incoterm (their respective columns' own last field).
+
+	Unlike ERPNext's own regional exempt_from_sales_tax checkbox this replaces
+	(see hide_legacy_exempt_from_sales_tax()), ticking this one does NOT skip
+	the TaxJar API call - exemption_type is sent in the tax_for_order/
+	create_order payload so TaxJar computes and records the exemption itself
+	(see _get_effective_exemption() in taxjar_integration.py).
+	"""
+	return [
+		dict(
+			fieldname="taxjar_transaction_exempt",
+			fieldtype="Check",
+			insert_after="shipping_rule",
+			label="Is transaction exempt from sales taxes?",
+		),
+		dict(
+			fieldname="taxjar_transaction_exemption_type",
+			fieldtype="Select",
+			insert_after="incoterm",
+			label="Reason for Exemption",
+			options="\nWholesale\nGovernment\nOther",
+			depends_on="eval: doc.taxjar_transaction_exempt",
+			mandatory_depends_on="eval: doc.taxjar_transaction_exempt",
+		),
+	]
+
+
 def make_custom_fields(update=True):
 	custom_fields = {
 		"Sales Invoice Item": _item_tax_fields(allow_breakdown_on_submit=True),
@@ -347,16 +473,19 @@ def make_custom_fields(update=True):
 				insert_after="item_group",
 				options="Product Tax Category",
 				label="Product Tax Category",
+				allow_in_quick_entry=1,
 			)
 		],
 		"Quotation": [
 			*_TRANSACTION_BREAKDOWN_FIELDS,
+			*_transaction_exemption_fields(),
 			dict(fieldname="taxjar_tab", fieldtype="Tab Break",
 				insert_after="company_contact_person", label="TaxJar"),
 			*_make_status_fields("taxjar_tab"),
 		],
 		"Sales Order": [
 			*_TRANSACTION_BREAKDOWN_FIELDS,
+			*_transaction_exemption_fields(),
 			dict(fieldname="taxjar_tab", fieldtype="Tab Break",
 				insert_after="company_contact_person", label="TaxJar"),
 			*_make_status_fields("taxjar_tab"),
@@ -373,8 +502,9 @@ def make_custom_fields(update=True):
 			)
 		],
 		"Sales Invoice": [
-			*[{**f, "allow_on_submit": 1} if f["fieldname"] == "taxjar_breakdown_json" else f
+			*[{**f, "allow_on_submit": 1} if f["fieldname"] in ("taxjar_breakdown_json", "taxjar_freight_taxable") else f
 			  for f in _TRANSACTION_BREAKDOWN_FIELDS],
+			*_transaction_exemption_fields(),
 			dict(
 				fieldname="taxjar_tab",
 				fieldtype="Tab Break",
@@ -515,6 +645,38 @@ def make_custom_fields(update=True):
 		"Sales Invoice", "return_against", "no_copy", "0", "Check",
 		for_doctype=False,
 	)
+
+
+_EXEMPT_FROM_SALES_TAX_DOCTYPES = ("Quotation", "Sales Order", "Sales Invoice", "Customer")
+
+
+def hide_legacy_exempt_from_sales_tax():
+	"""Hide ERPNext's own regional "exempt_from_sales_tax" checkbox (created by
+	erpnext/regional/united_states/setup.py, not this app - it fires whenever a
+	Company's country is United States, independent of TaxJar being installed).
+
+	Customer exemption is now managed at the Customer master level
+	(taxjar_exemption_type) and, per-transaction, via taxjar_transaction_exempt
+	- both of which actually reach TaxJar's API, unlike this blunt local-only
+	checkbox. The field itself is still read by check_sales_tax_exemption() as
+	a safety net for any already-set old records; only hidden here so nobody
+	sets it fresh once TaxJar is installed.
+	"""
+	for doctype in _EXEMPT_FROM_SALES_TAX_DOCTYPES:
+		if frappe.db.has_column(doctype, "exempt_from_sales_tax"):
+			make_property_setter(doctype, "exempt_from_sales_tax", "hidden", "1", "Check")
+
+
+_TAXES_FIELD_DOCTYPES = ("Quotation", "Sales Order", "Sales Invoice")
+_TAXES_FIELD_DESCRIPTION = "Please save to fetch sales tax from TaxJar."
+
+
+def set_taxes_field_description():
+	"""Hint on the native "taxes" (Sales Taxes and Charges) table field, so a
+	freshly-defaulted TaxJar template row showing a $0 Actual amount doesn't
+	read as broken - it's populated by set_sales_tax() on save, not on load."""
+	for doctype in _TAXES_FIELD_DOCTYPES:
+		make_property_setter(doctype, "taxes", "description", _TAXES_FIELD_DESCRIPTION, "Table")
 
 
 def add_permissions():

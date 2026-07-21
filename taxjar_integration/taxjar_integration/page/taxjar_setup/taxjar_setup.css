@@ -142,15 +142,22 @@
 /* Test connection is the one action per credential card that actually matters
    before Continue unlocks — a plain .btn-default blended into the card, so it
    gets its own bolder, ink-bordered treatment (still monochrome, secondary to
-   the solid "Save & continue" CTA). */
+   the solid "Save & continue" CTA). Explicit padding/line-height rather than
+   relying on .btn-sm (too short) or plain .btn (its padding alone still
+   doesn't match a frappe-control input's height) — sitting inline next to
+   Company/Live token in the same row, it needs to visually match them. */
 .taxjar-setup .ts-test {
 	border: 1.5px solid var(--text-color); color: var(--text-color); font-weight: 600;
-	background: var(--card-bg);
+	background: var(--card-bg); padding: 6px 16px; line-height: 1.4;
 }
 .taxjar-setup .ts-test:hover { background: var(--control-bg); }
 .taxjar-setup .ts-test:disabled { opacity: 0.6; cursor: default; }
-/* Cards with no header (Welcome-style flat use) fall back to plain padding. */
-.taxjar-setup .ts-card:not(:has(.ts-card-h)) { padding: 4px 16px; }
+/* Cards with no header AND no body wrapper (flat content straight inside
+   .ts-card) fall back to plain padding. Excludes cards that do have a
+   .ts-card-b (e.g. Connect's headerless API Mode card) — that div already
+   carries its own 14px padding, and this rule stacking on top of it would
+   double the inset compared to every header-carrying card. */
+.taxjar-setup .ts-card:not(:has(.ts-card-h)):not(:has(.ts-card-b)) { padding: 4px 16px; }
 
 /* Fixed max column width (not 1fr) so a lone card doesn't stretch to fill the
    whole 880px content width — it stays a sane form-card size regardless of
@@ -199,6 +206,115 @@
 .taxjar-setup label.control-label { display: block; margin: 18px 0 10px; }
 .taxjar-setup label.control-label:first-child { margin-top: 0; }
 
+/* API Mode: label+description on the left, control on the right - hand-
+   authored (not a native control label) since the segmented toggle below
+   isn't a real frappe control and can't carry frappe's own reqd asterisk.
+   flex-direction: row since this sits on .ts-card-b, whose own base rule
+   sets flex-direction: column. */
+.taxjar-setup .ts-mode-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 24px; }
+.taxjar-setup .ts-reqd { color: var(--text-danger, #d1242f); }
+
+/* Sandbox/Live as a two-button pill toggle rather than a closed dropdown -
+   it's a binary choice, worth showing both sides of at once. */
+.taxjar-setup .ts-segmented {
+	display: inline-flex; flex: none; padding: 3px; gap: 2px;
+	border: 1px solid var(--border-color); border-radius: 999px; background: var(--control-bg);
+}
+.taxjar-setup .ts-seg-btn {
+	border: none; background: none; padding: 6px 18px; border-radius: 999px;
+	font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); cursor: pointer;
+	transition: background 0.15s ease, color 0.15s ease;
+}
+.taxjar-setup .ts-seg-btn.ts-seg-active { background: var(--text-color); color: var(--card-bg); }
+.taxjar-setup .ts-seg-btn:not(.ts-seg-active):hover { color: var(--text-color); }
+
+/* Enable API logs: one card, two stacked rows divided by a border - top row
+   is fieldtype "Switch" (frappe.ui.form.ControlSwitch), a real pill toggle
+   already shipped and styled in frappe core (common/controls.scss's
+   .switch-control/.switch-visual/.switch-thumb, already part of the desk
+   CSS bundle - no extra import needed, and no custom CSS of our own for the
+   switch itself any more). Bottom row is a plain label+description-on-the-
+   left, input-on-the-right row (same shape as .ts-mode-row above) for
+   Retention. Each row is its own .ts-card-b (own 14px padding on all
+   sides), so the divider naturally gets ~28px of breathing room without any
+   extra gap math - unlike .ts-cred-row's divider, these aren't flex
+   children of a shared gapped container to double-count against.
+   flex-direction: row on .ts-retention-row for the same reason as
+   .ts-mode-row - .ts-card-b's own base rule sets flex-direction: column
+   (the toggle row has only one child, .ts-field-logging, so it doesn't
+   need the override). */
+.taxjar-setup .ts-retention-row {
+	display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 24px;
+	border-top: 1px solid var(--border-color);
+}
+.taxjar-setup .ts-retention-wrap { display: flex; align-items: center; gap: 6px; }
+.taxjar-setup .ts-retention-wrap .ts-field-retention { width: 60px; }
+.taxjar-setup .ts-retention-unit { color: var(--text-muted); font-size: var(--text-sm); white-space: nowrap; }
+
+/* Click-to-show popover for the Retry pill's failure reason - the one
+   remaining spot with no backing form field to hang frappe's own InfoCard
+   off of (see _info_btn_html's comment). */
+.taxjar-setup .ts-info-btn {
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 26px; height: 26px; padding: 0; vertical-align: -7px;
+	border: none; background: none; color: var(--yellow-500); cursor: pointer; border-radius: 50%;
+}
+.taxjar-setup .ts-info-btn:hover,
+.taxjar-setup .ts-info-btn.ts-info-btn-active { background: var(--control-bg); }
+/* Appended to <body>, not .taxjar-setup - deliberately outside the page's own
+   scoping so it can sit above any card regardless of which one triggered it,
+   without needing every card to be a positioned ancestor. position: fixed so
+   its coordinates (from getBoundingClientRect(), viewport-relative) don't
+   need scroll-offset math. */
+.ts-info-pop {
+	position: fixed; z-index: 1000; max-width: 280px;
+	background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
+	box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
+	padding: 8px 12px; font-size: var(--text-sm); color: var(--text-color);
+}
+
+/* API Credentials: one section, collapsible as a whole (not per-row like the
+   old per-company accordion) - the heading carries the chevron, the label,
+   and "+ Add another company" all in one row, again via a .ts-grow spacer
+   rather than justify-content: space-between (3 children here too). */
+.taxjar-setup .ts-cred-heading { cursor: pointer; }
+.taxjar-setup .ts-acc-chevron { display: inline-flex; color: var(--text-muted); transition: transform 0.15s; }
+.taxjar-setup .ts-acc-chevron-open { transform: rotate(90deg); }
+/* .ts-cred-rows' open/closed display is toggled via inline style from JS
+   (see _set_creds_expanded) rather than a class, sidestepping jQuery
+   .toggle()'s inline-display-guessing footgun entirely. Its "open" layout is
+   just .ts-card-b's own base flex-column/padding/gap - no extra rule needed. */
+
+/* Each credential row: Company / Live token / action slot side by side.
+   flex-start (not flex-end) - Company and Live token don't always have the
+   same height (a saved token's row used to be one line taller thanks to a
+   "Leave blank to keep the saved token." description, since removed, but
+   the underlying risk remains: any per-field description throws bottom-
+   alignment off and visibly staggers the two labels). Top-aligning the
+   labels is what stays correct regardless of which field ends up taller;
+   the action slot/remove button opt out via their own align-self: flex-end
+   so they line up with the bottom of the input boxes themselves (Company
+   and Live token now being equal height, their shared bottom edge is a
+   reliable anchor) rather than align-self: center, which centers against
+   the row's full label+input span and visibly floats up near the label line.
+   Divider between rows instead of each row being its own bordered card,
+   since there's no longer a per-row header to divide. Only padding-top (not
+   margin-top) on the divider rule - .ts-cred-rows (.ts-card-b) already
+   contributes its own 12px flex gap between rows, and adding a margin on
+   top of that would double-stack the same way .ts-card-b .form-group's
+   margin fix above avoids doing. */
+.taxjar-setup .ts-cred-row { display: flex; align-items: flex-start; gap: 12px; }
+.taxjar-setup .ts-cred-row + .ts-cred-row { padding-top: 12px; border-top: 1px solid var(--border-color); }
+.taxjar-setup .ts-cred-row .ts-field-company,
+.taxjar-setup .ts-cred-row .ts-field-token { flex: 1; min-width: 0; }
+/* flex here too: the Failed state puts a warning icon and the Retry pill
+   side by side as two separate elements (not one nested inside the other). */
+.taxjar-setup .ts-cred-row .ts-cred-action { flex: none; display: flex; align-items: center; gap: 6px; align-self: flex-end; }
+.taxjar-setup .ts-cred-row .ts-card-remove { align-self: flex-end; }
+/* .ts-cred-pill (the Success/Failed replacement for the button) stays
+   clickable to re-test, so it needs the same pointer affordance. */
+.taxjar-setup .ts-cred-pill { cursor: pointer; }
+
 /* status chips — wraps rather than overflows, since error/status text (e.g.
    "Invalid token (401). Check you copied…") can run much longer than "OK". */
 .taxjar-setup .ts-chip {
@@ -207,7 +323,11 @@
 	border: 1px solid transparent; white-space: normal; text-align: left; max-width: 100%;
 }
 .taxjar-setup .ts-chip.idle { background: var(--control-bg); color: var(--text-muted); }
+/* .warn is the neutral "in progress" state (Connect/Nexus fetch spinners) -
+   .retry is the distinct, actually-yellow state for a failed connection that
+   needs the user to act, so the two must not share a class. */
 .taxjar-setup .ts-chip.warn { border-color: var(--border-color); color: var(--text-muted); }
+.taxjar-setup .ts-chip.retry { background: var(--yellow-100); color: var(--yellow-700, #9a6304); }
 .taxjar-setup .ts-chip.err { border-color: var(--text-color); color: var(--text-color); }
 /* Success is the one chip that gets a colour cue — a small green dot rather
    than a solid fill, so it still reads as calm/inline rather than a loud badge. */

@@ -11,3 +11,45 @@
 .report-summary .summary-item + .summary-item {
 	border-left: 1px solid var(--border-color);
 }
+
+/* Sync Status column - a status pill plus a separate small info icon (never
+   nested inside the pill) whose click-or-hover popover carries the detail:
+   last-synced time, a queued note, or the failure reason. cursor: pointer,
+   not help - "help" makes the browser draw its own question-mark cursor
+   glyph next to the pointer, which reads as a stray "?" floating over the
+   icon. */
+.taxjar-sync-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	margin-left: 6px;
+	padding: 0;
+	border: none;
+	background: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	vertical-align: middle;
+}
+
+.taxjar-sync-icon:hover {
+	color: var(--text-color);
+}
+
+/* Appended to <body>, not .taxjar-table-wrapper - deliberately outside the
+   table's own scoping so it isn't clipped by the table/card's overflow, and
+   position: fixed so its coordinates (from getBoundingClientRect(), viewport-
+   relative) don't need scroll-offset math. Shown on hover AND click (see
+   _show_sync_popover) rather than the native title attribute, which both
+   enforces its own show delay and never responds to a click at all. */
+.taxjar-sync-pop {
+	position: fixed;
+	z-index: 1000;
+	max-width: 280px;
+	padding: 8px 12px;
+	border-radius: var(--border-radius-md);
+	background: var(--fg-color);
+	border: 1px solid var(--border-color);
+	box-shadow: var(--shadow-md);
+	font-size: var(--text-sm);
+	color: var(--text-color);
+}

@@ -16,7 +16,7 @@ function _render_nexus_html(frm) {
 				border-radius: var(--border-radius-md);
 				margin: 8px 0;
 			">
-				No nexus regions loaded. Click <strong>Update Nexus List</strong> to fetch from TaxJar.
+				No nexus regions loaded.
 			</div>
 		`);
 		return;
@@ -115,6 +115,62 @@ function _render_nexus_html(frm) {
 	wrapper.html(html);
 }
 
+function _render_product_tax_category_html(frm) {
+	const wrapper = frm.fields_dict.product_tax_category_html.$wrapper;
+
+	frm.call({
+		doc: frm.doc,
+		method: 'get_product_tax_category_summary',
+		callback: (r) => {
+			const summary = r.message || {};
+			const count = summary.count || 0;
+
+			if (!count) {
+				wrapper.html(`
+					<div style="
+						padding: 24px;
+						text-align: center;
+						color: var(--text-muted);
+						font-size: 13px;
+						border: 1px dashed var(--border-color);
+						border-radius: var(--border-radius-md);
+						margin: 8px 0;
+					">
+						No product tax categories loaded.
+					</div>
+				`);
+				return;
+			}
+
+			// str_to_user() converts system tz -> user tz via moment-timezone and just
+			// formats it - no comparison against the browser's local clock, so it can't
+			// hit comment_when()/prettyDate()'s "future date" guard (pretty_date.js:21,
+			// `if (day_diff < 0) return ""`), which blanked this out whenever the site's
+			// System Settings timezone drifted far enough from the browser's own.
+			const last_updated = summary.last_updated
+				? frappe.datetime.str_to_user(summary.last_updated)
+				: __('Never');
+
+			wrapper.html(`
+				<div style="
+					border: 1px solid var(--border-color);
+					border-radius: var(--border-radius-md);
+					padding: 16px;
+					text-align: center;
+				">
+					<div style="font-size: 13px;">
+						<a href="/app/product-tax-category">${count} ${__('Product Tax Categories')}</a>
+						${__('are configured.')}
+					</div>
+					<div style="color: var(--text-muted); font-size: 12px; margin-top: 4px;">
+						${__('Last updated')}: ${last_updated}
+					</div>
+				</div>
+			`);
+		},
+	});
+}
+
 function _set_setup_intro(frm) {
 	// Guided-setup banner: shown until setup is completed, linking into the wizard.
 	// Manual editing of the form below stays fully available either way.
@@ -148,6 +204,7 @@ frappe.ui.form.on('TaxJar Settings', {
 	refresh(frm) {
 		_set_setup_intro(frm);
 		_render_nexus_html(frm);
+		_render_product_tax_category_html(frm);
 		_set_api_mode_description(frm);
 
 		const account_query = (doc, cdt, cdn) => {
@@ -170,6 +227,17 @@ frappe.ui.form.on('TaxJar Settings', {
 				frm.refresh();
 				_render_nexus_html(frm);
 				frappe.show_alert({ message: __('Nexus regions fetched and updated.'), indicator: 'green' }, 5);
+			},
+		});
+	},
+
+	update_product_tax_category_btn(frm) {
+		frm.call({
+			doc: frm.doc,
+			method: 'refresh_product_tax_categories',
+			callback: () => {
+				_render_product_tax_category_html(frm);
+				frappe.show_alert({ message: __('Product tax categories fetched and updated.'), indicator: 'green' }, 5);
 			},
 		});
 	},

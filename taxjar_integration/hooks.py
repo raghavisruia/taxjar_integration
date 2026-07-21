@@ -152,6 +152,9 @@ scheduler_events = {
 		"taxjar_integration.taxjar_integration.tasks.purge_old_api_logs",
 		"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
 	],
+	"weekly": [
+		"taxjar_integration.taxjar_integration.tasks.sync_product_tax_categories",
+	],
 	"cron": {
 		"*/15 * * * *": [
 			"taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_syncs",

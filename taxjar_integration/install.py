@@ -3,10 +3,13 @@ import frappe
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
 	add_permissions,
 	add_product_tax_categories,
+	hide_legacy_exempt_from_sales_tax,
 	make_custom_fields,
-	toggle_tax_category_fields,
+	set_taxes_field_description,
 )
-from taxjar_integration.taxjar_integration.taxjar_integration import _is_taxjar_enabled
+from taxjar_integration.taxjar_integration.regional.united_states import (
+	sync_all_company_tax_templates,
+)
 
 WORKSPACE = "TaxJar Integration"
 
@@ -17,6 +20,64 @@ SIDEBAR_CARD_ICONS = {
 	"Manage": "layers",
 	"Sync": "refresh-cw",
 }
+
+GUIDED_SETUP_ALERT_BLOCK = "TaxJar Guided Setup Alert"
+
+# Blue/subtle styling mirrors the Frappe UI Alert component's look
+# (https://ui.frappe.io/docs/components/alert) - that component itself belongs to a
+# different (Vue-based) UI stack the classic Desk workspace editor can't embed, so
+# this hand-builds the same visual language via a Custom HTML Block instead, which is
+# the supported extension point for custom workspace content. "Subtle" = a soft
+# tinted fill rather than the "outline" variant's bordered-only look.
+#
+# Custom HTML Block content is rendered inside a Shadow DOM
+# (CustomBlockWidget -> frappe.create_shadow_element(), dom.js), which is its own
+# tree scope - an <svg><use href="#icon-info"> referencing the global lucide sprite
+# in the main document silently resolves to nothing in there, so the icon's path
+# data is inlined directly below instead of referenced by id. `width: 100%;
+# box-sizing: border-box;` on the outer div is likewise explicit rather than
+# assumed, since the shadow host custom element's own default display/sizing
+# behavior isn't something this app controls.
+GUIDED_SETUP_ALERT_HTML = """
+<div style="
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 14px 16px;
+	background: var(--blue-50);
+	border-radius: 8px;
+">
+	<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue-500)"
+		stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+		style="flex-shrink: 0; margin-top: 1px;">
+		<circle cx="12" cy="12" r="10" />
+		<path d="M12 16v-4" />
+		<path d="M12 8h.01" />
+	</svg>
+	<div>
+		<div style="font-weight: 600; font-size: 13px; color: var(--heading-color);">
+			New to TaxJar Integration?
+		</div>
+		<div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">
+			<a href="/app/taxjar-setup" style="color: var(--blue-600); font-weight: 500;">
+				Try the guided setup experience &rarr;
+			</a>
+		</div>
+	</div>
+</div>
+""".strip()
+
+# Mirrors _set_setup_intro()'s own logic (taxjar_settings.js) for retiring its
+# banner on the Settings form: once guided setup is done, stop nagging.
+GUIDED_SETUP_ALERT_SCRIPT = """
+frappe.db.get_single_value("TaxJar Settings", "setup_complete").then((complete) => {
+	if (complete) {
+		root_element.style.display = "none";
+	}
+});
+""".strip()
 
 
 def after_install():
@@ -37,8 +98,15 @@ def setup_taxjar():
 	  front so the desk pages never query columns that don't exist (MySQLdb 1054);
 	* the Product Tax Category master (~800 rows from the bundled fixture) and the
 	  permissions that let the accounting/stock roles manage it;
-	* visibility of the product tax category fields, hidden until a TaxJar feature is
-	  enabled (kept in sync with the current feature state on migrate).
+	* the guided-setup alert banner at the top of the workspace;
+	* standard-CoA ledger backfill and TaxJar Sales Tax template sync for every
+	  already-configured company (regional/united_states.py) — this is also what
+	  reconciles an existing site upgrading into this feature for the first time;
+	* hiding ERPNext's own regional "exempt from sales tax" checkbox in favour of
+	  TaxJar-native exemption (Customer.taxjar_exemption_type and, per-transaction,
+	  taxjar_transaction_exempt);
+	* a hint on the native "taxes" table field explaining the $0 placeholder row
+	  is populated by TaxJar on save, not on load.
 	"""
 	make_custom_fields()
 
@@ -47,11 +115,92 @@ def setup_taxjar():
 
 	add_permissions()
 
-	# Item Product Tax Category fields are not company-scoped, so they follow the
-	# "any company has a feature enabled" gate.
-	toggle_tax_category_fields(hidden=not _is_taxjar_enabled())
+	sync_all_company_tax_templates()
+
+	hide_legacy_exempt_from_sales_tax()
+
+	set_taxes_field_description()
+
+	add_guided_setup_alert()
 
 	sync_taxjar_workspace_sidebar()
+
+
+def add_guided_setup_alert():
+	"""Blue/subtle banner at the top of the workspace nudging first-time users
+	toward the guided setup wizard, spanning the full row width (col: 12) above the
+	Setup/Manage/Sync cards below it. Idempotent and self-healing: creates the
+	Custom HTML Block if missing, otherwise keeps its html/script in sync with the
+	constants above, and re-normalizes its position/width in the workspace content
+	on every call (the app is the source of truth here, same convention as
+	create_custom_fields(update=True) - a copy/style/layout edit in this file
+	should reach already-migrated sites, not just fresh installs).
+	"""
+	if frappe.db.exists("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK):
+		block = frappe.get_doc("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK)
+		if block.html != GUIDED_SETUP_ALERT_HTML or block.script != GUIDED_SETUP_ALERT_SCRIPT:
+			block.html = GUIDED_SETUP_ALERT_HTML
+			block.script = GUIDED_SETUP_ALERT_SCRIPT
+			block.save(ignore_permissions=True)
+	else:
+		frappe.get_doc({
+			"doctype": "Custom HTML Block",
+			"name": GUIDED_SETUP_ALERT_BLOCK,
+			"html": GUIDED_SETUP_ALERT_HTML,
+			"script": GUIDED_SETUP_ALERT_SCRIPT,
+			"private": 0,
+		}).insert(ignore_permissions=True)
+
+	if not frappe.db.exists("Workspace", WORKSPACE):
+		return
+
+	ws = frappe.get_doc("Workspace", WORKSPACE)
+	dirty = False
+
+	# The `custom_blocks` child table is what the block editor actually looks up by
+	# label to resolve a "custom_block" content entry into a live widget
+	# (Block.make() in block.js -> page_data.custom_blocks.items, matched by label).
+	# The content block below only controls position/width - without a matching row
+	# here, the editor has nothing to render and the block just doesn't show up.
+	has_custom_block_row = any(
+		row.custom_block_name == GUIDED_SETUP_ALERT_BLOCK for row in ws.custom_blocks or []
+	)
+	if not has_custom_block_row:
+		ws.append("custom_blocks", {
+			"custom_block_name": GUIDED_SETUP_ALERT_BLOCK,
+			"label": GUIDED_SETUP_ALERT_BLOCK,
+		})
+		dirty = True
+
+	# Full width (col: 12) - the Setup/Manage/Sync cards below now sit in one row
+	# (4 + 4 + 4) rather than one-per-row, so the banner spans the same row width
+	# rather than being paired with a spacer. Strip any previous version of this
+	# block (and the spacer it used to be paired with) before re-inserting fresh,
+	# so a layout change here also self-heals already-migrated sites, not just
+	# fresh installs.
+	original_content = frappe.parse_json(ws.content or "[]")
+	content = [
+		b for b in original_content
+		if b.get("id") != "taxjar_guided_setup_alert_spacer"
+		and not (
+			b.get("type") == "custom_block"
+			and b.get("data", {}).get("custom_block_name") == GUIDED_SETUP_ALERT_BLOCK
+		)
+	]
+	content = [
+		{
+			"id": "taxjar_guided_setup_alert",
+			"type": "custom_block",
+			"data": {"custom_block_name": GUIDED_SETUP_ALERT_BLOCK, "col": 12},
+		},
+		*content,
+	]
+	if content != original_content:
+		ws.content = frappe.as_json(content)
+		dirty = True
+
+	if dirty:
+		ws.save(ignore_permissions=True)
 
 
 def sync_taxjar_workspace_sidebar():
@@ -99,7 +248,7 @@ def sync_taxjar_workspace_sidebar():
 		"label": "Home",
 		"link_to": WORKSPACE,
 		"link_type": "Workspace",
-		"icon": "home",
+		"icon": "house",
 	}]
 	for card in ordered_cards:
 		links = grouped.get(card)

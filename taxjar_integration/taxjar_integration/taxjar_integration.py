@@ -615,9 +615,13 @@ def get_tax_data(doc):
 		"line_items": line_items,
 	}
 
-	customer_name = _get_customer_name(doc)
-	if customer_name:
-		tax_dict["customer_id"] = customer_name
+	taxjar_customer_id = _get_taxjar_customer_id(doc)
+	if taxjar_customer_id:
+		tax_dict["customer_id"] = taxjar_customer_id
+
+	exemption_type, _exemption_source = _get_effective_exemption(doc)
+	if exemption_type:
+		tax_dict["exemption_type"] = _map_exemption_type(exemption_type)
 
 	return tax_dict
 
@@ -773,13 +777,22 @@ def set_sales_tax(doc, method):
 
 		product_status, product_reason = _compute_product_taxable(doc)
 		to_state = tax_dict.get("to_state", "")
+		exemption_type, exemption_source = _get_effective_exemption(doc)
+		customer_taxable = not exemption_type
+		if exemption_source == "transaction":
+			customer_reason = f"Overridden ({exemption_type})"
+		elif exemption_type:
+			customer_reason = f"Customer is exempt ({exemption_type})"
+		else:
+			customer_reason = "Taxable"
 		_set_tax_status_fields(doc,
 			has_nexus=True,
 			nexus_reason=f"Nexus in {to_state}" if to_state else "Nexus in destination state",
-			customer_taxable=True, customer_reason="Taxable",
+			customer_taxable=customer_taxable, customer_reason=customer_reason,
 			product_taxable=product_status, product_reason=product_reason,
 			ship_from=_format_address_short(tax_dict, "from"),
 			ship_to=_format_address_short(tax_dict, "to"),
+			freight_taxable=bool(tax_data.freight_taxable),
 		)
 
 		doc.run_method("calculate_taxes_and_totals")
@@ -816,6 +829,8 @@ def _remove_taxjar_rows(doc, company_config):
 def _clear_breakdown_data(doc):
 	if hasattr(doc, "taxjar_breakdown_json"):
 		doc.taxjar_breakdown_json = None
+	if hasattr(doc, "taxjar_freight_taxable"):
+		doc.taxjar_freight_taxable = 0
 	for item in (doc.get("items") or []):
 		if hasattr(item, "taxjar_item_breakdown_json"):
 			item.taxjar_item_breakdown_json = None
@@ -824,7 +839,7 @@ def _clear_breakdown_data(doc):
 def _set_tax_status_fields(doc, *, has_nexus=None, nexus_reason=None,
                            customer_taxable=None, customer_reason=None,
                            product_taxable=None, product_reason=None,
-                           ship_from=None, ship_to=None):
+                           ship_from=None, ship_to=None, freight_taxable=None):
 	"""Populate persistent TaxJar status fields on a transaction document."""
 	_pairs = [
 		("taxjar_has_nexus", 1 if has_nexus else 0 if has_nexus is not None else None),
@@ -835,6 +850,7 @@ def _set_tax_status_fields(doc, *, has_nexus=None, nexus_reason=None,
 		("taxjar_product_taxable_reason", product_reason),
 		("taxjar_ship_from", ship_from),
 		("taxjar_ship_to", ship_to),
+		("taxjar_freight_taxable", 1 if freight_taxable else 0 if freight_taxable is not None else None),
 	]
 	for field, value in _pairs:
 		if value is not None and hasattr(doc, field):
@@ -946,8 +962,12 @@ def _extract_breakdown_data(tax_data, doc):
 	transaction_rows = _extract_breakdown_from_obj(breakdown)
 	jurisdictions = tax_data.jurisdictions
 	if jurisdictions and transaction_rows:
+		# TaxJar's jurisdictions object carries no equivalent "special" field -
+		# special districts (transit, tourism, Mello-Roos, etc.) often overlap
+		# without one clean place name, so there's nothing authentic to show here.
+		# A static label beats a blank cell that reads like missing data.
 		name_map = {"State": jurisdictions.state, "County": jurisdictions.county,
-		            "City": jurisdictions.city}
+		            "City": jurisdictions.city, "Special": "SPECIAL DISTRICT"}
 		for row in transaction_rows:
 			row["name"] = name_map.get(row["jurisdiction"], "")
 
@@ -1126,6 +1146,55 @@ def check_sales_tax_exemption(doc, company_config):
 		return True, reason
 
 	return False, None
+
+
+def _get_customer_exemption_type(doc):
+	"""Return the customer's taxjar_exemption_type if it marks them as exempt
+	(anything other than blank or "Non Exempt"), else None.
+
+	Used only to populate the "Is the customer taxable?" status display in
+	set_sales_tax() - the tax amount itself always stays TaxJar's own
+	computation. Region-scoped exemption (via exempt_regions) is TaxJar's job
+	based on customer_id, not replicated here - see check_sales_tax_exemption()'s
+	own docstring. A customer can have an exemption_type set without the blunt
+	exempt_from_sales_tax checkbox being ticked (that's the whole point of the
+	TaxJar-native exemption fields), so this still runs for documents that
+	reach the API call - it just corrects what the status matrix says about it.
+	"""
+	customer_name = _get_customer_name(doc)
+	if not customer_name or not frappe.db.has_column("Customer", "taxjar_exemption_type"):
+		return None
+	exemption_type = frappe.db.get_value("Customer", customer_name, "taxjar_exemption_type", cache=True)
+	if not exemption_type or exemption_type == "Non Exempt":
+		return None
+	return exemption_type
+
+
+def _get_effective_exemption(doc):
+	"""Return (exemption_type, source) describing which exemption applies to
+	this document, or (None, None) if neither does.
+
+	The customer's own master-level exemption_type always takes precedence
+	when set - this mirrors TaxJar's own documented precedence rule for its
+	tax_for_order/transaction endpoints (a matched customer's exemption_type
+	overrides whatever order-level exemption_type is sent, unless the
+	customer's own type is "non_exempt"). The transaction-level override
+	(taxjar_transaction_exempt/taxjar_transaction_exemption_type) only matters
+	when the customer has no active exemption on file - exactly the case
+	where TaxJar would otherwise have nothing to base an exemption on, e.g. a
+	customer never synced to TaxJar's Customer API, or one whose master
+	record is explicitly "Non Exempt" but needs a one-off exempt transaction.
+	"""
+	customer_exemption_type = _get_customer_exemption_type(doc)
+	if customer_exemption_type:
+		return customer_exemption_type, "customer"
+
+	if getattr(doc, "taxjar_transaction_exempt", None):
+		transaction_exemption_type = getattr(doc, "taxjar_transaction_exemption_type", None)
+		if transaction_exemption_type:
+			return transaction_exemption_type, "transaction"
+
+	return None, None
 
 
 def validate_tax_request(tax_dict):
@@ -1418,6 +1487,24 @@ def _get_customer_name(doc):
 			return doc.party_name
 		return None
 	return getattr(doc, "customer", None)
+
+
+def _get_taxjar_customer_id(doc):
+	"""Return the customer_id to send TaxJar for this document's customer.
+
+	Must match whatever sync_customer_to_taxjar() actually stored on TaxJar
+	(Customer.taxjar_customer_id, normalized via _make_safe_customer_id) - not
+	the raw ERPNext customer name. TaxJar matches a transaction against its
+	stored customer record (and that customer's exempt_regions) by exact
+	customer_id, so sending the unnormalized name (e.g. "Alan Houk" instead of
+	the synced "Alan-Houk") silently misses the match and the customer's
+	exemption is never applied - tax gets calculated as if they had none.
+	"""
+	customer_name = _get_customer_name(doc)
+	if not customer_name:
+		return None
+	taxjar_customer_id = frappe.db.get_value("Customer", customer_name, "taxjar_customer_id")
+	return taxjar_customer_id or _make_safe_customer_id(customer_name)
 
 
 def sanitize_error_response(response):

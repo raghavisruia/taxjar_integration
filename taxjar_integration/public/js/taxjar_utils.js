@@ -208,33 +208,36 @@ taxjar_integration.render_status_cards = function (frm) {
 
 	const has_nexus = frm.doc.taxjar_has_nexus;
 	const customer_taxable = frm.doc.taxjar_customer_taxable;
+	// Only the transaction-level override (see taxjar_transaction_exempt) gets
+	// a second pill - a master-level customer exemption or the plain taxable
+	// case say nothing extra here, matching "rest don't show reasons at all".
+	const overridden = (frm.doc.taxjar_customer_taxable_reason || "").startsWith("Overridden");
 
 	const card1 = {
 		question: __("Do you have a nexus here?"),
 		answer: has_nexus ? __("Yes") : __("No"),
-		reason: frm.doc.taxjar_nexus_reason || "",
 		color: has_nexus ? "green" : "orange",
 	};
 
 	let card2, card3;
 
 	if (!has_nexus && frm.doc.taxjar_nexus_reason) {
-		card2 = { question: __("Is the customer taxable?"), answer: __("N/A"), reason: __("Not evaluated — no nexus"), color: "grey" };
-		card3 = { question: __("Is the product taxable?"), answer: __("N/A"), reason: __("Not evaluated — no nexus"), color: "grey" };
+		card2 = { question: __("Is the customer taxable?"), answer: __("Skipped"), color: "grey" };
+		card3 = { question: __("Is the product taxable?"), answer: __("Skipped"), color: "grey" };
 	} else if (!customer_taxable && frm.doc.taxjar_customer_taxable_reason) {
-		card2 = { question: __("Is the customer taxable?"), answer: __("No"), reason: frm.doc.taxjar_customer_taxable_reason || "", color: "orange" };
-		card3 = { question: __("Is the product taxable?"), answer: __("N/A"), reason: __("Not evaluated — customer exempt"), color: "grey" };
+		card2 = { question: __("Is the customer taxable?"), answer: __("No"), color: "orange", overridden };
+		card3 = { question: __("Is the product taxable?"), answer: __("Skipped"), color: "grey" };
 	} else {
 		card2 = {
 			question: __("Is the customer taxable?"),
 			answer: customer_taxable ? __("Yes") : __("No"),
-			reason: frm.doc.taxjar_customer_taxable_reason || "",
 			color: customer_taxable ? "green" : "orange",
+			overridden,
 		};
 
 		const prod = frm.doc.taxjar_product_taxable;
 		let prod_color = "grey";
-		let prod_answer = __("N/A");
+		let prod_answer = __("Skipped");
 		if (prod === "Yes") { prod_color = "green"; prod_answer = __("Yes"); }
 		else if (prod === "No") { prod_color = "orange"; prod_answer = __("No"); }
 		else if (prod === "Partially") { prod_color = "blue"; prod_answer = __("Partially"); }
@@ -242,7 +245,6 @@ taxjar_integration.render_status_cards = function (frm) {
 		card3 = {
 			question: __("Is the product taxable?"),
 			answer: prod_answer,
-			reason: frm.doc.taxjar_product_taxable_reason || "",
 			color: prod_color,
 		};
 	}
@@ -258,6 +260,7 @@ taxjar_integration.render_status_cards = function (frm) {
 				<div class="taxjar-status-card-a">
 					<span class="indicator-pill ${card.color}">${card.answer}</span>
 				</div>
+				${card.overridden ? `<div class="taxjar-status-card-override"><span class="indicator-pill grey">${__("Overridden")}</span></div>` : ""}
 			</div>
 			${i < 2 ? '<div class="taxjar-status-arrow">→</div>' : ""}`;
 	});
@@ -295,6 +298,9 @@ taxjar_integration._inject_status_card_styles = function () {
 		.taxjar-status-card-a {
 			font-size: var(--text-lg);
 			font-weight: 600;
+		}
+		.taxjar-status-card-override {
+			margin-top: 6px;
 		}
 		.taxjar-status-arrow {
 			display: flex;
@@ -343,8 +349,26 @@ taxjar_integration.render_addresses = function (frm) {
 // These render the jurisdiction-level tax breakdown stored on taxjar_breakdown_json
 // (transaction) and taxjar_item_breakdown_json (per line item).
 
-taxjar_integration._no_breakdown_msg = function () {
-	return `<p class="text-muted">${__("No TaxJar tax breakdown available for this transaction.")}</p>`;
+taxjar_integration._no_breakdown_msg = function (is_new) {
+	const text = is_new
+		? __("Please save to see tax breakdown.")
+		: __("No TaxJar tax breakdown available for this transaction.");
+	return `<p class="text-muted">${text}</p>`;
+};
+
+// Rendered inside render_tax_breakdown(), directly above the Tax Breakup
+// table, in the "TaxJar Tax Breakdown" section.
+taxjar_integration._shipping_taxability_html = function (frm) {
+	if (frm.doc.taxjar_freight_taxable === undefined || frm.doc.taxjar_freight_taxable === null) return "";
+	const taxable = cint(frm.doc.taxjar_freight_taxable);
+	const color = taxable ? "green" : "grey";
+	const label = taxable ? __("Yes") : __("No");
+	return `
+		<div style="margin-bottom: 10px; font-size: var(--text-md);">
+			<span class="text-muted">${__("Is shipping charges taxable?")}</span>
+			<span class="indicator-pill ${color}" style="margin-left: 6px; font-size: var(--text-md);">${label}</span>
+		</div>
+	`;
 };
 
 taxjar_integration._multi_currency_note = function (data) {
@@ -421,7 +445,7 @@ taxjar_integration.render_tax_breakdown = function (frm) {
 	const wrapper = frm.fields_dict.taxjar_breakdown_html.$wrapper;
 
 	if (!frm.doc.taxjar_breakdown_json) {
-		wrapper.html(taxjar_integration._no_breakdown_msg());
+		wrapper.html(taxjar_integration._no_breakdown_msg(frm.is_new()));
 		return;
 	}
 
@@ -429,7 +453,7 @@ taxjar_integration.render_tax_breakdown = function (frm) {
 	try {
 		data = JSON.parse(frm.doc.taxjar_breakdown_json);
 	} catch (e) {
-		wrapper.html(taxjar_integration._no_breakdown_msg());
+		wrapper.html(taxjar_integration._no_breakdown_msg(frm.is_new()));
 		return;
 	}
 
@@ -445,6 +469,9 @@ taxjar_integration.render_tax_breakdown = function (frm) {
 		}</strong></p>`;
 	}
 
+	// Right above the actual Tax Breakup table (the transaction-currency one,
+	// not the USD sub-table above it when this is a multi-currency doc).
+	html += taxjar_integration._shipping_taxability_html(frm);
 	html += taxjar_integration.build_transaction_table(data.transaction || [], data.totals || {}, currency);
 	wrapper.html(html);
 };

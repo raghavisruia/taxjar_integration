@@ -12,6 +12,8 @@ from taxjar_integration.taxjar_integration.pagination import (
 # never created, so reads would hit MySQLdb (1054) Unknown column.
 _TAXJAR_INVOICE_COLUMN = "taxjar_sync_status"
 
+_DOC_STATUS_LABELS = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
+
 
 def _taxjar_invoice_fields_ready():
 	return frappe.db.has_column("Sales Invoice", _TAXJAR_INVOICE_COLUMN)
@@ -34,7 +36,7 @@ def get_transactions(filters=None, page=1):
 		"Sales Invoice",
 		filters=conditions,
 		fields=[
-			"name", "posting_date", "customer_name", "grand_total",
+			"name", "posting_date", "customer_name", "grand_total", "docstatus",
 			"is_return", "is_debit_note",
 			"taxjar_sync_status", "taxjar_last_synced", "taxjar_sync_error",
 		],
@@ -50,6 +52,8 @@ def get_transactions(filters=None, page=1):
 			row["transaction_type"] = "Debit Note"
 		else:
 			row["transaction_type"] = "Invoice"
+
+		row["doc_status"] = _DOC_STATUS_LABELS.get(row.docstatus, "")
 
 		if row.taxjar_sync_error and len(row.taxjar_sync_error) > 100:
 			row["taxjar_sync_error"] = row.taxjar_sync_error[:100] + "..."

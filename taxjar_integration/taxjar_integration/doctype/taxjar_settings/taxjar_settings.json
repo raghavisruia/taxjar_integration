@@ -9,8 +9,6 @@
   "section_break_rixa",
   "taxjar_enabled",
   "setup_complete",
-  "configuration",
-  "company_config",
   "section_general",
   "api_mode",
   "column_break_jlec",
@@ -18,9 +16,14 @@
   "log_retention_days",
   "section_break_mhnl",
   "table_hvjw",
+  "configuration",
+  "company_config",
   "nexus_tab",
   "update_nexus_list_btn",
   "nexus_html",
+  "product_tax_category_section",
+  "update_product_tax_category_btn",
+  "product_tax_category_html",
   "section_nexus_raw",
   "nexus"
  ],
@@ -53,14 +56,14 @@
    "label": "API Config"
   },
   {
-   "default": "0",
+   "default": "1",
    "description": "Records API requests, responses, and errors in <a href=\"/desk/taxjar-api-log\" rel=\"noopener noreferrer\">TaxJar API Log</a>. ",
    "fieldname": "enable_taxjar_logging",
    "fieldtype": "Check",
    "label": "Enable API Logs"
   },
   {
-   "default": "90",
+   "default": "15",
    "depends_on": "eval: doc.enable_taxjar_logging",
    "description": "Automatically delete API Logs older than specified days.<br> (Set 0 to retain logs)",
    "fieldname": "log_retention_days",
@@ -79,6 +82,7 @@
    "options": "TaxJar Company Config"
   },
   {
+   "default": "Live",
    "fieldname": "api_mode",
    "fieldtype": "Select",
    "label": "API Mode",
@@ -93,7 +97,7 @@
   {
    "fieldname": "nexus_tab",
    "fieldtype": "Tab Break",
-   "label": "Nexus"
+   "label": "Nexus & Product Category"
   },
   {
    "fieldname": "update_nexus_list_btn",
@@ -106,9 +110,25 @@
    "label": "Nexus Regions"
   },
   {
+   "fieldname": "product_tax_category_section",
+   "fieldtype": "Section Break",
+   "label": "Product Tax Category"
+  },
+  {
+   "fieldname": "update_product_tax_category_btn",
+   "fieldtype": "Button",
+   "label": "Update Product Tax Category List"
+  },
+  {
+   "fieldname": "product_tax_category_html",
+   "fieldtype": "HTML",
+   "label": "Product Tax Category Summary"
+  },
+  {
    "collapsible": 1,
    "fieldname": "section_nexus_raw",
    "fieldtype": "Section Break",
+   "hidden": 1,
    "label": "Raw Data"
   },
   {
@@ -130,7 +150,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-07-13 20:40:03.574455",
+ "modified": "2026-07-20 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "TaxJar Integration",
  "name": "TaxJar Settings",

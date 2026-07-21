@@ -60,7 +60,17 @@ def get_setup_state():
 	frappe.has_permission(SETTINGS, "read", throw=True)
 
 	settings = frappe.get_single(SETTINGS)
-	mode = settings.api_mode or "Sandbox"
+
+	# A DocType JSON "default" only ever applies the very first time a Single
+	# doctype field is saved - it never retroactively re-applies to a field
+	# that already holds a value, even an old default from before this one
+	# changed. Nothing configured yet (no credentials, no company config) is
+	# this wizard's own signal for "treat this as a fresh start" - showing the
+	# current recommended defaults regardless of whatever stale value sits
+	# underneath, without touching a site that's actually mid-configuration.
+	is_unconfigured = not settings.table_hvjw and not settings.company_config
+
+	mode = "Live" if is_unconfigured else (settings.api_mode or "Live")
 	token_field = "sandbox_token" if mode == "Sandbox" else "live_token"
 
 	credentials = [
@@ -85,8 +95,8 @@ def get_setup_state():
 
 	return {
 		"api_mode": mode,
-		"enable_taxjar_logging": bool(settings.enable_taxjar_logging),
-		"log_retention_days": settings.log_retention_days,
+		"enable_taxjar_logging": True if is_unconfigured else bool(settings.enable_taxjar_logging),
+		"log_retention_days": 15 if is_unconfigured else settings.log_retention_days,
 		"setup_complete": bool(settings.setup_complete),
 		"credentials": credentials,
 		"companies": companies,
@@ -106,7 +116,7 @@ def test_connection(company, token=None, mode=None):
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
 	settings = frappe.get_single(SETTINGS)
-	mode = mode or settings.api_mode or "Sandbox"
+	mode = mode or settings.api_mode or "Live"
 	is_sandbox = mode == "Sandbox"
 	token_field = "sandbox_token" if is_sandbox else "live_token"
 
@@ -174,6 +184,20 @@ def save_connection(mode, credentials=None, enable_taxjar_logging=None, log_rete
 
 	settings.save()
 	return {"ok": True}
+
+
+@frappe.whitelist()
+def get_default_ledgers(company):
+	"""Preview the standard-CoA ledger lookup for a company, without persisting
+	anything - lets the Accounts step pre-fill blank fields before the admin sees
+	them. Read-only counterpart to save_company_accounts()."""
+	frappe.has_permission(SETTINGS, "read", throw=True)
+
+	from taxjar_integration.taxjar_integration.regional.united_states import (
+		resolve_default_ledgers,
+	)
+
+	return resolve_default_ledgers(company)
 
 
 @frappe.whitelist()
