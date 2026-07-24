@@ -1665,9 +1665,9 @@ class TestUpdateNexusListAuthError(UnitTestCase):
 		self.assertIn("_Test Company", message)
 		self.assertIn("401", message)
 		# Both remedies the user actually has, named explicitly - matching
-		# the bug report's own wording ("put correct API key or remove the
+		# the bug report's own wording ("put correct API Token or remove the
 		# company").
-		self.assertIn("API key", message)
+		self.assertIn("API Token", message)
 		self.assertIn("remove", message)
 
 	def test_non_auth_taxjar_error_still_propagates_unchanged(self):
@@ -5987,20 +5987,36 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn('Queued: "blue"', colors)
 		self.assertIn('"Not Applicable": "grey"', colors)
 
+	def test_bold_status_label_shown(self):
+		fn = self._render_fn()
+		self.assertIn("TaxJar Status", fn)
+		self.assertIn("font-weight: 600", fn)
+
 	def test_draft_shows_submit_to_sync_label(self):
 		fn = self._render_fn()
 		self.assertIn("docstatus === 0", fn)
-		self.assertIn("TaxJar: Submit to sync", fn)
+		self.assertIn('__("Submit to Sync")', fn)
+		self.assertIn('color = "yellow"', fn)
 
-	def test_submitted_label_is_prefixed(self):
+	def test_not_applicable_links_to_guided_setup(self):
+		"""No TaxJar client configured for the company - enqueue_taxjar_sync
+		and enqueue_taxjar_delete both skip without touching
+		taxjar_sync_status, so this can only mean "never attempted"."""
 		fn = self._render_fn()
-		self.assertIn('__("TaxJar: {0}"', fn)
+		not_applicable_branch = fn.split('status === "Not Applicable"')[1].split("} else if")[0]
+		self.assertIn("TaxJar not enabled", not_applicable_branch)
+		self.assertIn('href = "/app/taxjar-setup"', not_applicable_branch)
 
 	def test_synced_info_text_shows_last_synced(self):
 		fn = self._render_fn()
-		synced_branch = fn.split('status === "Synced"')[1].split("} else if")[0]
+		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
 		self.assertIn("Last synced:", synced_branch)
 		self.assertIn("taxjar_last_synced", synced_branch)
+
+	def test_synced_label_depends_on_cancelled(self):
+		fn = self._render_fn()
+		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
+		self.assertIn('cancelled ? __("Cancelled") : __("Synced")', synced_branch)
 
 	def test_queued_info_text(self):
 		fn = self._render_fn()
@@ -6010,6 +6026,11 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		fn = self._render_fn()
 		failed_branch = fn.split('status === "Failed"')[1]
 		self.assertIn("taxjar_sync_error", failed_branch)
+
+	def test_failed_label_depends_on_cancelled(self):
+		fn = self._render_fn()
+		failed_branch = fn.split('status === "Failed"')[1]
+		self.assertIn('cancelled ? __("Failed to Cancel") : __("Failed")', failed_branch)
 
 	def test_inserted_below_doc_id_above_assign(self):
 		"""Sits below the doc id (after .sidebar-meta-details, the

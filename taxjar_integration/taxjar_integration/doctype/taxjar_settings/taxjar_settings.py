@@ -138,7 +138,7 @@ class TaxJarSettings(Document):
 					frappe.throw(
 						frappe._(
 							"TaxJar rejected the API credential for {0} (401 Unauthorized). "
-							"Enter a correct API key for {0} on the Connect step, or remove {0} "
+							"Enter a correct API Token for {0} on the Connect step, or remove {0} "
 							"from API Credentials, to continue."
 						).format(config.company)
 					)
