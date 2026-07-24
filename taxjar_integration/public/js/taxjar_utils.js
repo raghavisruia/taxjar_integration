@@ -464,6 +464,101 @@ taxjar_integration.render_single_item_breakdown = function (frm, cdn, item_docty
 	field.$wrapper.html(html);
 };
 
+// ── TaxJar Sync Status: sidebar pill (Sales Invoice) ──
+// Inserted right after .sidebar-meta-details (the title/doc-id block), so it
+// sits below the doc id and above the Assign/Attachments/Tags/Share list -
+// its own border-bottom draws the line separating it from Assign below,
+// same as .sidebar-meta-details already does above it.
+// Same color mapping and hover-popover interaction as the Sync Status column
+// on the TaxJar Transaction Sync page (taxjar_transactions.js) - kept as its
+// own small copy here rather than shared, since that page's version is bound
+// to its own table/class instance and not meant to be called standalone.
+
+taxjar_integration.SYNC_STATUS_COLORS = {
+	Synced: "green",
+	Failed: "red",
+	Queued: "blue",
+	"Not Applicable": "grey",
+};
+
+taxjar_integration._hide_sync_sidebar_pop = function () {
+	if (taxjar_integration._sync_sidebar_pop) {
+		taxjar_integration._sync_sidebar_pop.remove();
+		taxjar_integration._sync_sidebar_pop = null;
+	}
+	$(document).off("click.taxjarSyncSidebarPop");
+};
+
+taxjar_integration._show_sync_sidebar_pop = function ($trigger) {
+	taxjar_integration._hide_sync_sidebar_pop();
+	const text = $trigger.attr("data-info") || "";
+	if (!text) return;
+
+	const $pop = $(`
+		<div class="taxjar-sidebar-sync-pop" style="position: fixed; z-index: 1000; max-width: 280px; padding: 8px 12px; border-radius: var(--border-radius-md); background: var(--fg-color); border: 1px solid var(--border-color); box-shadow: var(--shadow-md); font-size: var(--text-sm); color: var(--text-color);">
+			${frappe.utils.escape_html(text)}
+		</div>
+	`).appendTo("body");
+
+	// position: fixed + getBoundingClientRect() are both viewport-relative,
+	// so no scroll-offset math is needed - same approach as the Transactions
+	// page's popover, clamped back on-screen for a pill near the sidebar edge.
+	const rect = $trigger[0].getBoundingClientRect();
+	const pop_width = $pop.outerWidth();
+	const left = Math.min(rect.left, window.innerWidth - pop_width - 12);
+	$pop.css({ top: rect.bottom + 6, left: Math.max(12, left) });
+
+	taxjar_integration._sync_sidebar_pop = $pop;
+	$(document).on("click.taxjarSyncSidebarPop", () => taxjar_integration._hide_sync_sidebar_pop());
+};
+
+taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
+	$(document).find(".form-sidebar .taxjar-sync-sidebar-pill-section").remove();
+	taxjar_integration._hide_sync_sidebar_pop();
+
+	if (!frm.fields_dict.taxjar_sync_status) return;
+
+	let label, color, info_text;
+
+	if (frm.doc.docstatus === 0) {
+		label = __("TaxJar: Submit to sync");
+		color = "grey";
+	} else {
+		const status = frm.doc.taxjar_sync_status || "Not Applicable";
+		color = taxjar_integration.SYNC_STATUS_COLORS[status] || "grey";
+		label = __("TaxJar: {0}", [__(status)]);
+
+		if (status === "Synced" && frm.doc.taxjar_last_synced) {
+			info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(frm.doc.taxjar_last_synced)]);
+		} else if (status === "Queued") {
+			info_text = __("Queued for sync");
+		} else if (status === "Failed") {
+			info_text = frm.doc.taxjar_sync_error || __("Unknown error");
+		}
+	}
+
+	const $pill = $(`
+		<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
+			<span
+				class="indicator-pill no-indicator-dot ${color}"
+				${info_text ? `data-info="${frappe.utils.escape_html(info_text)}" style="cursor:pointer;"` : ""}
+			>${label}</span>
+		</div>
+	`);
+
+	$(document).find(".form-sidebar .sidebar-meta-details").after($pill);
+
+	if (info_text) {
+		const $trigger = $pill.find(".indicator-pill");
+		$trigger.on("mouseenter", (e) => taxjar_integration._show_sync_sidebar_pop($(e.currentTarget)));
+		$trigger.on("mouseleave", () => taxjar_integration._hide_sync_sidebar_pop());
+		$trigger.on("click", (e) => {
+			e.stopPropagation();
+			taxjar_integration._show_sync_sidebar_pop($(e.currentTarget));
+		});
+	}
+};
+
 // ── "TaxJar not set up" panel ──
 // Rendered by the Customers / Transactions pages when their read methods report
 // not_configured (the TaxJar custom fields do not exist yet). Replaces the table

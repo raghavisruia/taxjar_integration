@@ -100,9 +100,10 @@ SUPPORTED_STATE_CODES = [
 	"WY",
 ]
 
-# Description used to identify TaxJar-managed rows in the taxes table.
-# Any row with this description is owned by TaxJar and will be replaced on recalculation.
-TAXJAR_ROW_DESCRIPTION = "TaxJar Sales Tax"
+# Display label for the tax row TaxJar adds to the taxes table. Cosmetic only -
+# TaxJar-owned rows are identified by account_head (see _remove_taxjar_rows),
+# not by this text, so retitling it here is safe.
+TAXJAR_ROW_DESCRIPTION = "Sales Tax"
 
 # Provider identifier sent to TaxJar so transactions/refunds created via ERPNext
 # are addressable (show/delete) under the ERPNext provider namespace.
@@ -286,8 +287,13 @@ def sync_transaction_to_taxjar(invoice_name):
 		_set_sync_status(invoice_name, "Failed", error="TaxJar client is not configured")
 		return
 
+	# Matched by account_head, not description - the row's description is
+	# free text a user can retitle before submit, same reason
+	# _remove_taxjar_rows() matches on account_head rather than text.
+	company_config = get_company_config(doc.company)
 	sales_tax = sum(
-		tax.tax_amount for tax in doc.taxes if tax.description == TAXJAR_ROW_DESCRIPTION
+		tax.tax_amount for tax in doc.taxes
+		if company_config and tax.account_head == company_config.tax_account_head
 	)
 
 	tax_dict = get_tax_data(doc)
@@ -366,7 +372,13 @@ def delete_transaction_from_taxjar(invoice_name):
 
 
 def _set_sync_status(invoice_name, status, error=None):
-	"""Update TaxJar sync status fields on a Sales Invoice via db_set."""
+	"""Update TaxJar sync status fields on a Sales Invoice via db_set, then
+	notify any open form via realtime so it doesn't sit showing a stale
+	status until manually reloaded. This is reached only from async contexts
+	(the background sync job, the 15-min cron retry, bulk retry from the
+	Transactions page) - the synchronous button-click path already reloads
+	via its own frappe.call callback and doesn't need this.
+	"""
 	frappe.db.set_value(
 		"Sales Invoice", invoice_name,
 		{
@@ -375,6 +387,13 @@ def _set_sync_status(invoice_name, status, error=None):
 			"taxjar_last_synced": frappe.utils.now() if status == "Synced" else None,
 		},
 		update_modified=False,
+	)
+	frappe.publish_realtime(
+		"taxjar_invoice_sync_update",
+		{"taxjar_sync_status": status},
+		doctype="Sales Invoice",
+		docname=invoice_name,
+		after_commit=True,
 	)
 
 
@@ -1613,7 +1632,12 @@ def _map_exemption_type(label):
 
 
 def _set_customer_sync_status(customer_name, status, error=None):
-	"""Update TaxJar sync status fields on a Customer."""
+	"""Update TaxJar sync status fields on a Customer, then notify any open
+	form via realtime - same reasoning as _set_sync_status's docstring.
+	Reached from on_customer_update (fires on ordinary Customer saves, not
+	just a submit/cancel event), the 15-min cron retry, and the Customers
+	page's bulk sync.
+	"""
 	frappe.db.set_value(
 		"Customer", customer_name,
 		{
@@ -1621,6 +1645,13 @@ def _set_customer_sync_status(customer_name, status, error=None):
 			"taxjar_customer_sync_error": error or "",
 		},
 		update_modified=False,
+	)
+	frappe.publish_realtime(
+		"taxjar_customer_sync_update",
+		{"taxjar_customer_sync_status": status},
+		doctype="Customer",
+		docname=customer_name,
+		after_commit=True,
 	)
 
 

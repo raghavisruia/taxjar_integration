@@ -30,6 +30,14 @@ function _apply_state_filter(frm, cdn) {
 }
 
 frappe.ui.form.on("Customer", {
+	// Registered once per form load, not refresh - see sales_invoice.js's
+	// identical setup(frm) listener for the full reasoning. on_customer_update
+	// (not just a rare submit/cancel event) and the 15-min cron retry both
+	// funnel through _set_customer_sync_status, which publishes this event.
+	setup(frm) {
+		frappe.realtime.on("taxjar_customer_sync_update", () => frm.reload_doc());
+	},
+
 	refresh(frm) {
 		if (
 			!frm.is_new() &&

@@ -1,8 +1,20 @@
 frappe.ui.form.on("Sales Invoice", {
+	// Registered once per form load (not refresh, which reruns repeatedly
+	// and would stack duplicate listeners). The background sync job/cron
+	// retry/bulk retry all funnel through _set_sync_status, which publishes
+	// this event once the DB write is committed - frappe already scopes
+	// delivery to clients viewing this exact document (doc:{doctype}/{name}
+	// room, joined automatically on form load), so no docname check is
+	// needed here.
+	setup(frm) {
+		frappe.realtime.on("taxjar_invoice_sync_update", () => frm.reload_doc());
+	},
+
 	refresh(frm) {
 		_render_taxjar_response(frm);
 		taxjar_integration.render_shipping_taxability(frm);
 		taxjar_integration.render_tax_breakdown(frm);
+		taxjar_integration.render_sync_status_sidebar_pill(frm);
 		_add_taxjar_buttons(frm);
 		taxjar_integration.render_status_cards(frm);
 		taxjar_integration.render_addresses(frm);

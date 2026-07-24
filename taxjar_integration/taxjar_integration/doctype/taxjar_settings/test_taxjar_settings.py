@@ -782,7 +782,7 @@ class TestGetLineItemDict(UnitTestCase):
 class TestSyncTransactionRowDetection(UnitTestCase):
 
 	def test_taxjar_row_description_constant_value(self):
-		self.assertEqual(TAXJAR_ROW_DESCRIPTION, "TaxJar Sales Tax")
+		self.assertEqual(TAXJAR_ROW_DESCRIPTION, "Sales Tax")
 
 	def test_sets_failed_when_no_tax_data(self):
 		"""When get_tax_data returns None, sync should mark as Failed."""
@@ -801,14 +801,17 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_client.create_order.assert_not_called()
 
 	def test_uses_taxjar_row_amount_for_transaction(self):
-		"""Sales tax amount is taken from the TAXJAR_ROW_DESCRIPTION row."""
+		"""Sales tax amount is taken from the row matching company_config.tax_account_head -
+		not by matching the row's (user-editable) description text."""
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 95.0)])
 		doc.docstatus = 1
 		mock_client = MagicMock()
 		mock_client.create_order.return_value = MagicMock()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
@@ -816,6 +819,63 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 
 		mock_client.create_order.assert_called_once()
 		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+	def test_row_description_does_not_affect_sales_tax_match(self):
+		"""A user retitling the row's description before submit must not
+		change what gets reported to TaxJar - only account_head matters."""
+		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Whatever the user renamed it to", 95.0)])
+		doc.docstatus = 1
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+	def test_other_account_rows_excluded_even_with_matching_description(self):
+		"""A non-TaxJar row that happens to share the description text must
+		not be counted - account_head is the only thing that matters."""
+		doc = _make_doc(taxes=[
+			_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 95.0),
+			_make_tax_row("Other Account - TC", TAXJAR_ROW_DESCRIPTION, 1000.0),
+		])
+		doc.docstatus = 1
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+	def test_no_company_config_yields_zero_sales_tax_not_a_crash(self):
+		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 95.0)])
+		doc.docstatus = 1
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 0)
 
 
 # ── Phase 1: taxjar_state_code custom field on Address ───────────────────────
@@ -2470,6 +2530,111 @@ class TestTaxJarCustomerExemptRegion(UnitTestCase):
 		self.assertEqual(field.fieldtype, "Select")
 
 
+# ── Realtime notification: _set_sync_status / _set_customer_sync_status ────
+# Fixes stale sync status on an open form: the async paths (on_submit/
+# on_cancel hooks, the 15-min cron retry, bulk retry from the Transactions/
+# Customers pages) update the DB via a bare frappe.db.set_value with no
+# notification, so an already-open form kept showing "Queued" until manually
+# reloaded. Same fix india_compliance already uses elsewhere in this bench
+# (GSTR-3B report generation, e-Waybill PDF generation): publish_realtime
+# scoped to the document's own room via doctype/docname, after_commit=True
+# so the event can't race ahead of the write becoming visible.
+
+class TestSetSyncStatusRealtime(UnitTestCase):
+
+	def test_publishes_realtime_event_scoped_to_document(self):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
+			_set_sync_status("SINV-TEST-001", "Synced")
+
+		mock_publish.assert_called_once_with(
+			"taxjar_invoice_sync_update",
+			{"taxjar_sync_status": "Synced"},
+			doctype="Sales Invoice",
+			docname="SINV-TEST-001",
+			after_commit=True,
+		)
+
+	def test_publishes_after_the_db_write(self):
+		"""Must not race ahead of the db.set_value it's meant to notify
+		about - a client that reload_doc()s in response to the event needs
+		the write to have actually happened first."""
+		calls = []
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value",
+		           side_effect=lambda *a, **k: calls.append("db_write")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime",
+		           side_effect=lambda *a, **k: calls.append("publish")):
+			_set_sync_status("SINV-TEST-001", "Failed", error="timeout")
+
+		self.assertEqual(calls, ["db_write", "publish"])
+
+	def test_message_reflects_status_for_each_state(self):
+		for status in ("Synced", "Failed", "Queued", "Not Applicable"):
+			with self.subTest(status=status):
+				with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
+					_set_sync_status("SINV-TEST-001", status)
+				self.assertEqual(mock_publish.call_args[0][1], {"taxjar_sync_status": status})
+
+
+class TestSetCustomerSyncStatusRealtime(UnitTestCase):
+
+	def test_publishes_realtime_event_scoped_to_document(self):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
+			_set_customer_sync_status("CUST-TEST-001", "Synced")
+
+		mock_publish.assert_called_once_with(
+			"taxjar_customer_sync_update",
+			{"taxjar_customer_sync_status": "Synced"},
+			doctype="Customer",
+			docname="CUST-TEST-001",
+			after_commit=True,
+		)
+
+	def test_publishes_after_the_db_write(self):
+		calls = []
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value",
+		           side_effect=lambda *a, **k: calls.append("db_write")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime",
+		           side_effect=lambda *a, **k: calls.append("publish")):
+			_set_customer_sync_status("CUST-TEST-001", "Failed", error="timeout")
+
+		self.assertEqual(calls, ["db_write", "publish"])
+
+
+class TestSyncStatusRealtimeJS(UnitTestCase):
+
+	def _js_dir(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "public", "js"))
+
+	def _read_js(self, filename):
+		import os
+		with open(os.path.join(self._js_dir(), filename)) as f:
+			return f.read()
+
+	def test_sales_invoice_registers_listener_in_setup_not_refresh(self):
+		"""setup(frm) runs once per form load; refresh(frm) reruns
+		repeatedly (every save, tab switch back) and would stack duplicate
+		frappe.realtime.on() listeners if used instead."""
+		js = self._read_js("sales_invoice.js")
+		setup_fn = js.split("setup(frm) {")[1].split("\n\t},")[0]
+		self.assertIn('frappe.realtime.on("taxjar_invoice_sync_update"', setup_fn)
+		self.assertIn("frm.reload_doc()", setup_fn)
+
+	def test_customer_registers_listener_in_setup_not_refresh(self):
+		js = self._read_js("customer.js")
+		setup_fn = js.split("setup(frm) {")[1].split("\n\t},")[0]
+		self.assertIn('frappe.realtime.on("taxjar_customer_sync_update"', setup_fn)
+		self.assertIn("frm.reload_doc()", setup_fn)
+
+	def test_setup_appears_before_refresh_in_sales_invoice(self):
+		js = self._read_js("sales_invoice.js")
+		self.assertLess(js.index("setup(frm) {"), js.index("refresh(frm) {"))
+
+	def test_setup_appears_before_refresh_in_customer(self):
+		js = self._read_js("customer.js")
+		self.assertLess(js.index("setup(frm) {"), js.index("refresh(frm) {"))
+
+
 # ── Transaction Compliance — async sync_transaction_to_taxjar ─────────────────
 
 
@@ -2878,12 +3043,35 @@ class TestSalesInvoiceCustomFields(UnitTestCase):
 		self.assertTrue(f.get("allow_on_submit"))
 		self.assertTrue(f.get("read_only"))
 
+	def test_sync_status_hidden_while_draft(self):
+		"""Replaced by taxjar_sync_draft_message_html while a draft - showing
+		the "Not Applicable" default there read as "TaxJar doesn't apply"
+		rather than "not submitted yet"."""
+		fields = self._get_si_field_defs()
+		self.assertEqual(fields["taxjar_sync_status"]["depends_on"], "eval: doc.docstatus === 1")
+		self.assertEqual(fields["taxjar_last_synced"]["depends_on"], "eval: doc.docstatus === 1")
+
+	def test_sync_draft_message_field(self):
+		fields = self._get_si_field_defs()
+		f = fields["taxjar_sync_draft_message_html"]
+		self.assertEqual(f["fieldtype"], "HTML")
+		self.assertEqual(f["depends_on"], "eval: doc.docstatus === 0")
+		self.assertIn("TaxJar: Submit to sync", f["options"])
+		self.assertEqual(f["insert_after"], "taxjar_sync_section")
+		self.assertEqual(fields["taxjar_sync_status"]["insert_after"], "taxjar_sync_draft_message_html")
+
 	def test_sync_error_field(self):
 		fields = self._get_si_field_defs()
 		f = fields["taxjar_sync_error"]
 		self.assertEqual(f["fieldtype"], "Small Text")
 		self.assertTrue(f.get("read_only"))
 		self.assertTrue(f.get("allow_on_submit"))
+
+	def test_sync_error_depends_on_submitted_and_failed(self):
+		fields = self._get_si_field_defs()
+		depends_on = fields["taxjar_sync_error"]["depends_on"]
+		self.assertIn("doc.docstatus === 1", depends_on)
+		self.assertIn("doc.taxjar_sync_status == 'Failed'", depends_on)
 
 	def test_last_synced_field(self):
 		fields = self._get_si_field_defs()
@@ -5770,6 +5958,100 @@ class TestTaxBreakdownJS(UnitTestCase):
 		self.assertIn("tax-break-up", fn)
 		self.assertIn("overflow-x: auto", fn)
 		self.assertNotIn("table-sm", fn)
+
+
+# ── TaxJar Sync Status: sidebar pill ────────────────────────────────────────
+
+class TestSyncStatusSidebarPill(UnitTestCase):
+
+	def _js_dir(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "public", "js"))
+
+	def _read_js(self, filename):
+		import os
+		with open(os.path.join(self._js_dir(), filename)) as f:
+			return f.read()
+
+	def _render_fn(self):
+		js = self._read_js("taxjar_utils.js")
+		return js.split("render_sync_status_sidebar_pill = function (frm) {")[1].split("\n};")[0]
+
+	def test_status_colors_match_transactions_page(self):
+		"""Same mapping as STATUS_COLORS in taxjar_transactions.js, kept as
+		its own copy since that page's version is bound to its own class."""
+		js = self._read_js("taxjar_utils.js")
+		colors = js.split("SYNC_STATUS_COLORS = {")[1].split("};")[0]
+		self.assertIn('Synced: "green"', colors)
+		self.assertIn('Failed: "red"', colors)
+		self.assertIn('Queued: "blue"', colors)
+		self.assertIn('"Not Applicable": "grey"', colors)
+
+	def test_draft_shows_submit_to_sync_label(self):
+		fn = self._render_fn()
+		self.assertIn("docstatus === 0", fn)
+		self.assertIn("TaxJar: Submit to sync", fn)
+
+	def test_submitted_label_is_prefixed(self):
+		fn = self._render_fn()
+		self.assertIn('__("TaxJar: {0}"', fn)
+
+	def test_synced_info_text_shows_last_synced(self):
+		fn = self._render_fn()
+		synced_branch = fn.split('status === "Synced"')[1].split("} else if")[0]
+		self.assertIn("Last synced:", synced_branch)
+		self.assertIn("taxjar_last_synced", synced_branch)
+
+	def test_queued_info_text(self):
+		fn = self._render_fn()
+		self.assertIn("Queued for sync", fn)
+
+	def test_failed_info_text_uses_sync_error(self):
+		fn = self._render_fn()
+		failed_branch = fn.split('status === "Failed"')[1]
+		self.assertIn("taxjar_sync_error", failed_branch)
+
+	def test_inserted_below_doc_id_above_assign(self):
+		"""Sits below the doc id (after .sidebar-meta-details, the
+		title/doc-id block) and above Assign/Attachments/Tags/Share, with its
+		own border-bottom separating it from Assign below - matching
+		.sidebar-meta-details' own border-bottom above it."""
+		fn = self._render_fn()
+		self.assertIn('.find(".form-sidebar .sidebar-meta-details")', fn)
+		self.assertIn(".after($pill)", fn)
+		self.assertIn("border-bottom", fn)
+
+	def test_removes_stale_pill_before_rendering(self):
+		"""Idempotent re-render, same pattern as india_compliance's own
+		.remove()-then-readd, so repeated refresh() calls on the same
+		document don't stack duplicate pills."""
+		fn = self._render_fn()
+		self.assertIn('.taxjar-sync-sidebar-pill-section").remove()', fn)
+
+	def test_no_field_no_pill(self):
+		"""Guards doctypes without the sync fields (Quotation, Sales Order) -
+		the pill is Sales Invoice only."""
+		fn = self._render_fn()
+		self.assertIn("!frm.fields_dict.taxjar_sync_status", fn)
+
+	def test_uses_indicator_pill_no_dot_class(self):
+		"""Same classes india_compliance's sandbox pill uses."""
+		fn = self._render_fn()
+		self.assertIn("indicator-pill no-indicator-dot", fn)
+
+	def test_hover_and_click_wired_not_native_title(self):
+		"""Same interaction pattern as the Transactions page's sync icon -
+		shows immediately on hover/click, not the native title attribute
+		(which enforces its own delay and never responds to a click)."""
+		fn = self._render_fn()
+		self.assertIn('.on("mouseenter"', fn)
+		self.assertIn('.on("mouseleave"', fn)
+		self.assertIn('.on("click"', fn)
+		self.assertNotIn("title=", fn)
+
+	def test_wired_into_sales_invoice_refresh(self):
+		js = self._read_js("sales_invoice.js")
+		self.assertIn("taxjar_integration.render_sync_status_sidebar_pill(frm)", js)
 
 
 # ── Tax Breakdown: Multi-currency tests ─────────────────────────────────────

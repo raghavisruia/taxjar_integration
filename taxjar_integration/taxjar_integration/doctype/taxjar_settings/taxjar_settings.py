@@ -531,15 +531,29 @@ def make_custom_fields(update=True):
 				allow_on_submit=1,
 			),
 			dict(
+				# Draft docs never reach set_sales_tax's sync path (see
+				# enqueue_taxjar_sync's on_submit hook) - showing the Sync Status
+				# Select at its "Not Applicable" default there reads as "TaxJar
+				# doesn't apply to this invoice" rather than "not submitted yet",
+				# so this replaces the Select/Last Synced fields entirely while
+				# a draft, same message the sidebar pill shows for consistency.
+				fieldname="taxjar_sync_draft_message_html",
+				fieldtype="HTML",
+				insert_after="taxjar_sync_section",
+				options='<p class="text-muted">TaxJar: Submit to sync</p>',
+				depends_on="eval: doc.docstatus === 0",
+			),
+			dict(
 				fieldname="taxjar_sync_status",
 				fieldtype="Select",
-				insert_after="taxjar_sync_section",
+				insert_after="taxjar_sync_draft_message_html",
 				label="Sync Status",
 				options="Not Applicable\nQueued\nSynced\nFailed",
 				default="Not Applicable",
 				allow_on_submit=1,
 				in_list_view=1,
 				read_only=1,
+				depends_on="eval: doc.docstatus === 1",
 			),
 			dict(
 				fieldname="taxjar_sync_error",
@@ -548,7 +562,7 @@ def make_custom_fields(update=True):
 				label="Sync Error",
 				read_only=1,
 				allow_on_submit=1,
-				depends_on="eval: doc.taxjar_sync_status == 'Failed'",
+				depends_on="eval: doc.docstatus === 1 && doc.taxjar_sync_status == 'Failed'",
 			),
 			dict(
 				fieldname="taxjar_last_synced",
@@ -557,6 +571,7 @@ def make_custom_fields(update=True):
 				label="Last Synced",
 				read_only=1,
 				allow_on_submit=1,
+				depends_on="eval: doc.docstatus === 1",
 			),
 			dict(
 				fieldname="taxjar_response_section",
