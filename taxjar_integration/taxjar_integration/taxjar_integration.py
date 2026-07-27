@@ -1502,8 +1502,30 @@ def company_creates_transactions(company, config=None):
 	return bool(config and config.taxjar_create_transactions)
 
 
+@frappe.whitelist()
+def is_taxjar_enabled_for_company(company):
+	"""Live read for the sidebar sync-status pill (see render_sync_status_sidebar_pill
+	in taxjar_utils.js) - checked on every form refresh rather than cached on the
+	transaction doc, since a stored flag would go stale for a Draft left unsaved
+	or a Cancelled doc (which is never saved again) after the company's TaxJar
+	config changes.
+	"""
+	frappe.has_permission("Sales Invoice", "read", throw=True)
+	return company_creates_transactions(company)
+
+
 def _validate_address_with_taxjar(doc):
-	"""Call TaxJar's address validation endpoint for US addresses."""
+	"""Call TaxJar's address validation endpoint for US addresses.
+
+	A found address (or a normalized/standardized suggestion of one) is a
+	silent pass - no dialog. An address TaxJar can't resolve blocks the save:
+	confirmed via the local taxjar package and taxjar-ruby's own SDK fixtures
+	that a 2xx with an empty "addresses" array is how "no match" is reported
+	(not an HTTP error), but a literal 404 is handled the same way too since
+	that isn't documented publicly and either is plausible. Any other error
+	(401/422/5xx, connection issues) is not this address's fault, so it
+	doesn't block the save - same tolerant handling as before.
+	"""
 	client = get_client()
 	if not client:
 		return
@@ -1526,35 +1548,26 @@ def _validate_address_with_taxjar(doc):
 		log_taxjar_call(action="validate_address", status="error", error="TaxJar API is unreachable", context=ctx)
 		return
 	except taxjar.exceptions.TaxJarResponseError as err:
+		full = getattr(err, "full_response", {}) or {}
+		status_code = full.get("status_code") if isinstance(full, dict) else None
 		log_taxjar_call(action="validate_address", status="error", error=getattr(err, "full_response", str(err)), context=ctx)
-		frappe.msgprint(
-			_("TaxJar could not validate this address: {0}").format(sanitize_error_response(err)),
-			indicator="orange",
-		)
+		if status_code == 404:
+			_throw_invalid_address()
 		return
 	except Exception:
 		log_taxjar_call(action="validate_address", status="error", error=traceback.format_exc(), context=ctx)
 		return
 
-	if hasattr(result, "__iter__"):
-		for match in result:
-			suggested = _format_address_suggestion(match)
-			if suggested:
-				frappe.msgprint(
-					_("TaxJar suggests: {0}").format(suggested),
-					indicator="blue",
-					title=_("Address Verification"),
-				)
-				break
+	matches = list(result) if hasattr(result, "__iter__") else []
+	if not matches:
+		_throw_invalid_address()
 
 
-def _format_address_suggestion(match):
-	parts = []
-	for field in ("street", "city", "state", "zip", "country"):
-		val = getattr(match, field, None)
-		if val:
-			parts.append(str(val))
-	return ", ".join(parts) if parts else None
+def _throw_invalid_address():
+	frappe.throw(
+		_("This is not a valid address. Please enter a valid address."),
+		title=_("Invalid Address"),
+	)
 
 
 def _get_customer_name(doc):

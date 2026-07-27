@@ -79,8 +79,8 @@
 .taxjar-setup .ts-check { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 /* The card's border/radius stays on the <li>; the <a> owns the padding so the
    whole card is the click target, not just the heading text or the icon.
-   `>` matters here — .ts-check-sub's own <li>s (Sales Tax Ledger, Shipping
-   Charges Ledger) are nested two levels inside a top-level card's <li> too,
+   `>` matters here — .ts-check-sub's own <li>s (Sales Tax Payable, Shipping
+   and Freight Income) are nested two levels inside a top-level card's <li> too,
    so a plain descendant selector would wrongly card-ify them as well. */
 .taxjar-setup .ts-check > li {
 	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);

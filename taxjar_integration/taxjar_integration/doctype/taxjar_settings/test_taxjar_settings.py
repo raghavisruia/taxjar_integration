@@ -15,7 +15,6 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_extract_breakdown_data,
 	_extract_breakdown_from_obj,
 	_format_address_short,
-	_format_address_suggestion,
 	_get_customer_exemption_type,
 	_get_customer_name,
 	_get_effective_exemption,
@@ -42,6 +41,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	get_line_item_dict,
 	get_taxjar_breakdown_html,
 	get_taxjar_response_html,
+	is_taxjar_enabled_for_company,
 	on_customer_delete,
 	on_customer_update,
 	on_customer_validate,
@@ -2964,16 +2964,33 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 		return doc
 
 	def test_us_address_calls_validation_api(self):
+		"""A match found means TaxJar resolved the address - silent pass, no
+		exception, no dialog."""
 		mock_client = MagicMock()
-		mock_client.validate_address.return_value = []
+		mock_client.validate_address.return_value = [
+			MagicMock(street="123 Main St", city="Austin", state="TX", zip="78701", country="US")
+		]
 		doc = self._make_address_doc()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			_validate_address_with_taxjar(doc)
+			_validate_address_with_taxjar(doc)  # should not raise
 
 		mock_client.validate_address.assert_called_once()
+
+	def test_address_not_found_blocks_save(self):
+		"""An empty "addresses" result is how TaxJar reports no match (confirmed
+		against the taxjar package and taxjar-ruby's own SDK fixtures) - block
+		the save rather than silently letting an unresolvable address through."""
+		mock_client = MagicMock()
+		mock_client.validate_address.return_value = []
+		doc = self._make_address_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			with self.assertRaises(frappe.exceptions.ValidationError):
+				_validate_address_with_taxjar(doc)
 
 	def test_connection_error_does_not_block_save(self):
 		import taxjar.exceptions
@@ -2986,11 +3003,31 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
 			_validate_address_with_taxjar(doc)  # should not raise
 
-	def test_validation_error_shows_warning(self):
+	def test_response_error_404_blocks_save(self):
+		"""In case the live API does surface a literal 404 for "not found"
+		(undocumented either way), it's handled the same as an empty result."""
 		import taxjar.exceptions
 
 		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
-		err.full_response = {"detail": "Invalid address"}
+		err.full_response = {"status_code": 404, "detail": "Address not found"}
+
+		mock_client = MagicMock()
+		mock_client.validate_address.side_effect = err
+		doc = self._make_address_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			with self.assertRaises(frappe.exceptions.ValidationError):
+				_validate_address_with_taxjar(doc)
+
+	def test_response_error_non_404_does_not_block(self):
+		"""A non-404 API error (auth, rate limit, server error) isn't a
+		statement about whether the address is valid - don't block the save
+		or show a dialog for it."""
+		import taxjar.exceptions
+
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 401, "detail": "Unauthorized"}
 
 		mock_client = MagicMock()
 		mock_client.validate_address.side_effect = err
@@ -2998,21 +3035,12 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msg:
-			_validate_address_with_taxjar(doc)
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msg, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.throw") as mock_throw:
+			_validate_address_with_taxjar(doc)  # should not raise
 
-		mock_msg.assert_called_once()
-
-	def test_format_address_suggestion(self):
-		match = MagicMock(street="123 Main St", city="Austin", state="TX", zip="78701", country="US")
-		result = _format_address_suggestion(match)
-		self.assertIn("Austin", result)
-		self.assertIn("TX", result)
-
-	def test_format_address_suggestion_empty(self):
-		match = MagicMock(spec=[])
-		result = _format_address_suggestion(match)
-		self.assertIsNone(result)
+		mock_msg.assert_not_called()
+		mock_throw.assert_not_called()
 
 
 # ── Phase 1: Sales Invoice Custom Fields ─────────────────────────────────────
@@ -3197,6 +3225,36 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc.db_set.assert_called_once_with("taxjar_sync_status", "Queued", update_modified=False)
 		mock_enqueue.assert_called_once()
 		self.assertIn("delete", mock_enqueue.call_args[1]["job_id"])
+
+
+class TestIsTaxjarEnabledForCompany(UnitTestCase):
+	"""Live read backing the sidebar's not-enabled link (see
+	render_sync_status_sidebar_pill in taxjar_utils.js) - mirrors
+	enqueue_taxjar_sync/enqueue_taxjar_delete's own company_creates_transactions
+	check so the sidebar never disagrees with what submit/cancel actually do."""
+
+	def test_requires_sales_invoice_read_permission(self):
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				is_taxjar_enabled_for_company("_Test Company")
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_delegates_to_company_creates_transactions(self):
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions",
+			return_value=True,
+		) as mock_check:
+			self.assertTrue(is_taxjar_enabled_for_company("_Test Company"))
+		mock_check.assert_called_once_with("_Test Company")
+
+	def test_false_when_company_creates_transactions_is_false(self):
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions",
+			return_value=False,
+		):
+			self.assertFalse(is_taxjar_enabled_for_company("_Test Company"))
 
 
 # ── Phase 3: sync_transaction_to_taxjar — cancelled invoice routing ──────────
@@ -5973,9 +6031,23 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		with open(os.path.join(self._js_dir(), filename)) as f:
 			return f.read()
 
-	def _render_fn(self):
+	def _dispatcher_fn(self):
+		"""render_sync_status_sidebar_pill: the entry point wired into
+		refresh(). Decides live, via is_taxjar_enabled_for_company, whether
+		to render the pill or the not-enabled link."""
 		js = self._read_js("taxjar_utils.js")
 		return js.split("render_sync_status_sidebar_pill = function (frm) {")[1].split("\n};")[0]
+
+	def _not_enabled_fn(self):
+		js = self._read_js("taxjar_utils.js")
+		return js.split("_render_taxjar_not_enabled_link = function (frm) {")[1].split("\n};")[0]
+
+	def _render_fn(self):
+		"""_render_taxjar_sync_status_pill: only reached once
+		is_taxjar_enabled_for_company has confirmed TaxJar applies to this
+		company, so it no longer needs its own "not enabled" branch."""
+		js = self._read_js("taxjar_utils.js")
+		return js.split("_render_taxjar_sync_status_pill = function (frm) {")[1].split("\n};")[0]
 
 	def test_status_colors_match_transactions_page(self):
 		"""Same mapping as STATUS_COLORS in taxjar_transactions.js, kept as
@@ -5987,25 +6059,58 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn('Queued: "blue"', colors)
 		self.assertIn('"Not Applicable": "grey"', colors)
 
-	def test_bold_status_label_shown(self):
-		fn = self._render_fn()
-		self.assertIn("TaxJar Status", fn)
-		self.assertIn("font-weight: 600", fn)
+	def test_dispatcher_checks_live_not_cached(self):
+		"""Company enable/create-transactions state is read fresh on every
+		refresh via a whitelisted call, not cached on the transaction doc -
+		a stored flag would go stale for an unsaved Draft, or worse for a
+		Cancelled doc, which is never saved again."""
+		fn = self._dispatcher_fn()
+		self.assertIn(
+			'method: "taxjar_integration.taxjar_integration.taxjar_integration.is_taxjar_enabled_for_company"',
+			fn,
+		)
+		self.assertIn("args: { company: frm.doc.company }", fn)
+
+	def test_dispatcher_requires_company(self):
+		fn = self._dispatcher_fn()
+		self.assertIn("!frm.doc.company", fn)
+
+	def test_dispatcher_dispatches_on_response(self):
+		fn = self._dispatcher_fn()
+		self.assertIn("_render_taxjar_not_enabled_link(frm)", fn)
+		self.assertIn("_render_taxjar_sync_status_pill(frm)", fn)
+
+	def test_not_enabled_link_has_no_status_label(self):
+		"""No bold "TaxJar Status" heading and no indicator-pill background -
+		just a plain link, since there's no sync state to report when TaxJar
+		isn't configured for the company at all."""
+		fn = self._not_enabled_fn()
+		self.assertNotIn("TaxJar Status", fn)
+		self.assertNotIn("indicator-pill", fn)
+
+	def test_not_enabled_link_text_and_href(self):
+		fn = self._not_enabled_fn()
+		self.assertIn("TaxJar not enabled", fn)
+		self.assertIn('href="/app/taxjar-setup"', fn)
+
+	def test_not_enabled_link_has_dotted_underline_and_icon(self):
+		fn = self._not_enabled_fn()
+		self.assertIn("underline dotted", fn)
+		self.assertIn('frappe.utils.icon("external-link"', fn)
+
+	def test_not_enabled_link_icon_is_inside_the_anchor(self):
+		"""Text and icon both sit inside the single <a> so the whole thing -
+		icon included - is one clickable target, not just the text."""
+		fn = self._not_enabled_fn()
+		anchor = fn.split("<a")[1].split("</a>")[0]
+		self.assertIn("TaxJar not enabled", anchor)
+		self.assertIn("icon", anchor)
 
 	def test_draft_shows_submit_to_sync_label(self):
 		fn = self._render_fn()
 		self.assertIn("docstatus === 0", fn)
 		self.assertIn('__("Submit to Sync")', fn)
 		self.assertIn('color = "yellow"', fn)
-
-	def test_not_applicable_links_to_guided_setup(self):
-		"""No TaxJar client configured for the company - enqueue_taxjar_sync
-		and enqueue_taxjar_delete both skip without touching
-		taxjar_sync_status, so this can only mean "never attempted"."""
-		fn = self._render_fn()
-		not_applicable_branch = fn.split('status === "Not Applicable"')[1].split("} else if")[0]
-		self.assertIn("TaxJar not enabled", not_applicable_branch)
-		self.assertIn('href = "/app/taxjar-setup"', not_applicable_branch)
 
 	def test_synced_info_text_shows_last_synced(self):
 		fn = self._render_fn()
@@ -6017,6 +6122,14 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		fn = self._render_fn()
 		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
 		self.assertIn('cancelled ? __("Cancelled") : __("Synced")', synced_branch)
+
+	def test_cancelled_pill_is_grey_not_green(self):
+		"""Cancelled reuses the "Synced" status value (see _set_sync_status's
+		shared write for both the on_submit and on_cancel paths), but should
+		read as a neutral grey pill, not the green used for an active sync."""
+		fn = self._render_fn()
+		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
+		self.assertIn('cancelled ? "grey" : taxjar_integration.SYNC_STATUS_COLORS[status]', synced_branch)
 
 	def test_queued_info_text(self):
 		fn = self._render_fn()
@@ -6038,22 +6151,32 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		own border-bottom separating it from Assign below - matching
 		.sidebar-meta-details' own border-bottom above it."""
 		fn = self._render_fn()
-		self.assertIn('.find(".form-sidebar .sidebar-meta-details")', fn)
 		self.assertIn(".after($pill)", fn)
 		self.assertIn("border-bottom", fn)
+		not_enabled_fn = self._not_enabled_fn()
+		self.assertIn('.find(".form-sidebar .sidebar-meta-details")', not_enabled_fn)
+		self.assertIn("border-bottom", not_enabled_fn)
 
 	def test_removes_stale_pill_before_rendering(self):
 		"""Idempotent re-render, same pattern as india_compliance's own
 		.remove()-then-readd, so repeated refresh() calls on the same
-		document don't stack duplicate pills."""
-		fn = self._render_fn()
+		document don't stack duplicate pills. Lives in the dispatcher, since
+		either render path below it needs the slate wiped first."""
+		fn = self._dispatcher_fn()
 		self.assertIn('.taxjar-sync-sidebar-pill-section").remove()', fn)
 
 	def test_no_field_no_pill(self):
 		"""Guards doctypes without the sync fields (Quotation, Sales Order) -
 		the pill is Sales Invoice only."""
-		fn = self._render_fn()
+		fn = self._dispatcher_fn()
 		self.assertIn("!frm.fields_dict.taxjar_sync_status", fn)
+
+	def test_bold_status_label_shown(self):
+		"""Only shown once TaxJar is confirmed enabled for the company - the
+		not-enabled link (above) deliberately has no such label."""
+		fn = self._render_fn()
+		self.assertIn("TaxJar Status", fn)
+		self.assertIn("font-weight: 600", fn)
 
 	def test_uses_indicator_pill_no_dot_class(self):
 		"""Same classes india_compliance's sandbox pill uses."""
@@ -7620,7 +7743,7 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 	def test_check_sub_items_are_not_card_scoped_to_top_level_li(self):
 		"""Regression guard: .ts-check li (no `>`) is a descendant selector, so
 		it would also match .ts-check-sub's own <li>s two levels down and wrongly
-		card-ify "Sales Tax Ledger" / "Shipping Charges Ledger" as bordered boxes instead of
+		card-ify "Sales Tax Payable" / "Shipping and Freight Income" as bordered boxes instead of
 		plain indented bullets."""
 		import os
 		path = os.path.normpath(os.path.join(

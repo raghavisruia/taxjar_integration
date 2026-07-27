@@ -229,25 +229,31 @@ class TaxJarSetup {
 			<p class="ts-lede">${__("Before proceeding,")}</p>
 			<ul class="ts-check">
 				<li>
-					<a class="ts-check-link" href="https://app.taxjar.com/account#api-access" target="_blank" rel="noopener noreferrer">
+					<a class="ts-check-link" href="https://app.taxjar.com/api_sign_up" target="_blank" rel="noopener noreferrer">
 						<span class="ts-check-num">1</span>
-						<span class="ts-check-text"><b>${__("Get TaxJar API Token")}</b>${icon}</span>
+						<span class="ts-check-text"><b>${__("Sign Up for TaxJar")}</b>${icon}</span>
+					</a>
+				</li>
+				<li>
+					<a class="ts-check-link" href="https://app.taxjar.com/account#api-access" target="_blank" rel="noopener noreferrer">
+						<span class="ts-check-num">2</span>
+						<span class="ts-check-text"><b>${__("Get API Token from TaxJar")}</b>${icon}</span>
 					</a>
 				</li>
 				<li>
 					<a class="ts-check-link" href="https://app.taxjar.com/account#states" target="_blank" rel="noopener noreferrer">
-						<span class="ts-check-num">2</span>
+						<span class="ts-check-num">3</span>
 						<span class="ts-check-text"><b>${__("Configure Nexus in TaxJar")}</b>${icon}</span>
 					</a>
 				</li>
 				<li>
 					<a class="ts-check-link" href="${chartOfAccountsUrl}" target="_blank" rel="noopener noreferrer">
-						<span class="ts-check-num">3</span>
+						<span class="ts-check-num">4</span>
 						<span class="ts-check-text">
-							<b>${__("Create Ledger Accounts")}</b>${icon}
+							<b>${__("Review Ledger Accounts")}</b>${icon}
 							<ul class="ts-check-sub">
-								<li>${__("Sales Tax Ledger")}</li>
-								<li>${__("Shipping Charges Ledger")}</li>
+								<li>${__("Sales Tax Payable")}</li>
+								<li>${__("Shipping and Freight Income")}</li>
 							</ul>
 						</span>
 					</a>

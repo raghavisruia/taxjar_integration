@@ -516,34 +516,65 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 	$(document).find(".form-sidebar .taxjar-sync-sidebar-pill-section").remove();
 	taxjar_integration._hide_sync_sidebar_pop();
 
-	if (!frm.fields_dict.taxjar_sync_status) return;
+	if (!frm.fields_dict.taxjar_sync_status || !frm.doc.company) return;
 
+	const docname = frm.doc.name;
+
+	// Checked live on every refresh rather than cached on the transaction doc -
+	// a stored flag would go stale for a Draft left unsaved, or worse for a
+	// Cancelled doc (which is never saved again), once the company's TaxJar
+	// config changes after the doc was last written.
+	frappe.call({
+		method: "taxjar_integration.taxjar_integration.taxjar_integration.is_taxjar_enabled_for_company",
+		args: { company: frm.doc.company },
+		callback: (r) => {
+			if (frm.doc.name !== docname) return;
+
+			if (!r.message) {
+				taxjar_integration._render_taxjar_not_enabled_link(frm);
+			} else {
+				taxjar_integration._render_taxjar_sync_status_pill(frm);
+			}
+		},
+	});
+};
+
+// TaxJar isn't configured for this company at all - there's no sync state to
+// report, so no "TaxJar Status" label and no pill, just a plain link to go
+// fix it. Distinct from the "Not Applicable" pill (below), which covers a
+// company that IS enabled but hasn't reached _set_sync_status yet.
+taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
+	const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
+	const $section = $(`
+		<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
+			<a
+				href="/app/taxjar-setup"
+				class="taxjar-not-enabled-link"
+				style="display: inline-flex; align-items: center; gap: 4px; text-decoration: underline dotted; text-underline-offset: 3px;"
+			>${__("TaxJar not enabled")}${icon}</a>
+		</div>
+	`);
+	$(document).find(".form-sidebar .sidebar-meta-details").after($section);
+};
+
+taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	// "Synced"/"Failed" are written by both the on_submit sync path and the
 	// on_cancel delete path (see _set_sync_status), so docstatus === 2 is
 	// what turns those two into the cancel-flow wording below.
 	const cancelled = frm.doc.docstatus === 2;
 	const status = frm.doc.taxjar_sync_status || "Not Applicable";
-	let label, color, info_text, href;
+	let label, color, info_text;
 
 	if (frm.doc.docstatus === 0) {
 		label = __("Submit to Sync");
 		color = "yellow";
-	} else if (status === "Not Applicable") {
-		// enqueue_taxjar_sync/enqueue_taxjar_delete both return early without
-		// touching taxjar_sync_status when the company has no TaxJar client
-		// configured, so this status can only mean "never attempted because
-		// TaxJar isn't set up" - link straight to Guided Setup.
-		label = __("TaxJar not enabled");
-		color = taxjar_integration.SYNC_STATUS_COLORS[status];
-		info_text = __("TaxJar is not enabled for this company. Click to open Guided Setup.");
-		href = "/app/taxjar-setup";
 	} else if (status === "Queued") {
 		label = __("Queued");
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 		info_text = __("Queued for sync");
 	} else if (status === "Synced") {
 		label = cancelled ? __("Cancelled") : __("Synced");
-		color = taxjar_integration.SYNC_STATUS_COLORS[status];
+		color = cancelled ? "grey" : taxjar_integration.SYNC_STATUS_COLORS[status];
 		if (frm.doc.taxjar_last_synced) {
 			info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(frm.doc.taxjar_last_synced)]);
 		}
@@ -551,6 +582,12 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 		label = cancelled ? __("Failed to Cancel") : __("Failed");
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 		info_text = frm.doc.taxjar_sync_error || __("Unknown error");
+	} else {
+		// TaxJar is enabled for the company but enqueue_taxjar_sync/
+		// enqueue_taxjar_delete hasn't reached _set_sync_status for this doc
+		// yet (e.g. no API credential even though "create transactions" is on).
+		label = __(status);
+		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 	}
 
 	const $badge = $(`
@@ -565,24 +602,17 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 			<div class="text-muted" style="font-weight: 600; margin-bottom: 6px;">${__("TaxJar Status")}</div>
 		</div>
 	`);
-
-	// Not-applicable links straight to Guided Setup - plain <a href> to match
-	// every other TaxJar-not-set-up link in this app (render_not_configured_panel,
-	// taxjar_settings.js), rather than a JS-driven frappe.set_route.
-	const $badge_target = href ? $(`<a href="${href}"></a>`).appendTo($pill) : $pill;
-	$badge_target.append($badge);
+	$pill.append($badge);
 
 	$(document).find(".form-sidebar .sidebar-meta-details").after($pill);
 
 	if (info_text) {
 		$badge.on("mouseenter", (e) => taxjar_integration._show_sync_sidebar_pop($(e.currentTarget)));
 		$badge.on("mouseleave", () => taxjar_integration._hide_sync_sidebar_pop());
-		if (!href) {
-			$badge.on("click", (e) => {
-				e.stopPropagation();
-				taxjar_integration._show_sync_sidebar_pop($(e.currentTarget));
-			});
-		}
+		$badge.on("click", (e) => {
+			e.stopPropagation();
+			taxjar_integration._show_sync_sidebar_pop($(e.currentTarget));
+		});
 	}
 };
 
