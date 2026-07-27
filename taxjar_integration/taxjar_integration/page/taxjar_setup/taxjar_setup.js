@@ -497,6 +497,15 @@ class TaxJarSetup {
 		}
 		entry.controls.company = companyControl;
 
+		// ControlLink builds its own <input> and (unlike ControlData) never sets
+		// autocomplete="off" on it - harmless on its own, but this field sits
+		// right above the Password field below, which is exactly the "text input
+		// immediately before a password input" shape Chrome's login-manager
+		// heuristic looks for. Left alone, Chrome offers to autofill the site's
+		// saved login here, dropping "Administrator" into Company and the saved
+		// password into the token field, which then fails Link validation.
+		companyControl.$input.attr("autocomplete", "off");
+
 		const tokenControl = frappe.ui.form.make_control({
 			parent: $card.find(".ts-field-token"),
 			df: {
@@ -507,6 +516,11 @@ class TaxJarSetup {
 			},
 			render_input: true,
 		});
+		// Chrome tends to ignore autocomplete="off" (set by ControlData) on
+		// password inputs specifically, but does respect "new-password" - the
+		// standard way to tell it this isn't a login field to offer saved
+		// credentials for.
+		tokenControl.$input.attr("autocomplete", "new-password");
 		// A TaxJar token isn't a password being created — the strength meter (and
 		// the request it fires on every keystroke) makes no sense here and was the
 		// source of a 500 in this environment; this control never needed it.

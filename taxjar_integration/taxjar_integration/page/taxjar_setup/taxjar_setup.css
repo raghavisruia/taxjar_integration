@@ -214,6 +214,17 @@
 .taxjar-setup .ts-mode-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 24px; }
 .taxjar-setup .ts-reqd { color: var(--text-danger, #d1242f); }
 
+/* API Mode / Enable API logs / Retention read as section-level settings, not
+   ordinary field labels (Company, Live token) - bolded to stand apart from
+   those. Enable API logs has no .control-label of its own (ControlSwitch
+   puts its text in .label-area instead, see check.js), so it's targeted by
+   its container rather than the shared label.control-label rule above. */
+.taxjar-setup .ts-mode-row > div > label.control-label,
+.taxjar-setup .ts-retention-row > div > label.control-label,
+.taxjar-setup .ts-field-logging .label-area {
+	font-weight: 600;
+}
+
 /* Sandbox/Live as a two-button pill toggle rather than a closed dropdown -
    it's a binary choice, worth showing both sides of at once. */
 .taxjar-setup .ts-segmented {
