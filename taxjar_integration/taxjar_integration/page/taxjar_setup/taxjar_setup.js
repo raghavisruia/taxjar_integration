@@ -317,10 +317,11 @@ class TaxJarSetup {
 				<div class="ts-card-h ts-cred-heading">
 					<span class="ts-acc-chevron">${frappe.utils.icon("chevron-right", "sm")}</span>
 					<b>${__("API Credentials")}</b>
-					<span class="ts-grow"></span>
-					<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
 				</div>
 				<div class="ts-card-b ts-cred-rows"></div>
+				<div class="ts-card-b ts-cred-add-row">
+					<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
+				</div>
 			</div>
 
 			<div class="ts-card ts-logtoggle" style="margin-top:20px">
@@ -364,10 +365,12 @@ class TaxJarSetup {
 		this._set_creds_expanded(this._credsExpanded);
 
 		this.$body.find(".ts-cred-heading").on("click", () => this._set_creds_expanded(!this._credsExpanded));
-		this.$body.find(".ts-add-cred").on("click", (e) => {
-			e.stopPropagation(); // don't also toggle the heading's own collapse
+		// Lives below the rows now (inside .ts-cred-add-row), not in the
+		// clickable heading, so it's only ever visible/reachable while already
+		// expanded - no need to force-expand or guard against also toggling
+		// the heading's own collapse.
+		this.$body.find(".ts-add-cred").on("click", () => {
 			this._add_credential_card({ company: null, token_last4: null });
-			this._set_creds_expanded(true);
 		});
 
 		// fieldtype "Switch" (frappe.ui.form.ControlSwitch, controls/switch.js)
@@ -433,7 +436,7 @@ class TaxJarSetup {
 
 	_set_creds_expanded(expanded) {
 		this._credsExpanded = expanded;
-		this.$body.find(".ts-cred-rows").css("display", expanded ? "flex" : "none");
+		this.$body.find(".ts-cred-rows, .ts-cred-add-row").css("display", expanded ? "flex" : "none");
 		this.$body.find(".ts-cred-heading .ts-acc-chevron").toggleClass("ts-acc-chevron-open", expanded);
 	}
 
@@ -541,6 +544,17 @@ class TaxJarSetup {
 
 		this._render_cred_action(entry);
 		$card.find(".ts-card-remove").on("click", () => this._remove_credential_card(entry, cred));
+		this._sync_remove_buttons();
+	}
+
+	// At least one company/token row must always remain - the Connect step
+	// can't be left with zero credentials to carry into the rest of the
+	// wizard. Disabling the sole row's remove button (rather than hiding it,
+	// which would shift the row's own layout) is cheaper than re-deriving
+	// this from _connectCards.length at every call site that can change it.
+	_sync_remove_buttons() {
+		const onlyRow = this._connectCards.length <= 1;
+		this.$body.find(".ts-card-remove").prop("disabled", onlyRow);
 	}
 
 	// The action slot cycles through three states: an idle "Connect" button,
@@ -575,6 +589,7 @@ class TaxJarSetup {
 			this._connectCards = this._connectCards.filter((c) => c !== entry);
 			entry.$card.remove();
 			this._sync_connect_gate();
+			this._sync_remove_buttons();
 		};
 
 		if (!cred.company) {

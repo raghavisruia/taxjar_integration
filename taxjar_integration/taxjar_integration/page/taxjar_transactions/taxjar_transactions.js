@@ -127,8 +127,8 @@ class TaxJarTransactionSync {
 						<tr>
 							<th style="width: 30px;"></th>
 							<th style="width: 110px;">${__("Posting Date")}</th>
+							<th>${__("Transaction ID")}</th>
 							<th style="width: 180px;">${__("Customer")}</th>
-							<th>${__("Sales Invoice")}</th>
 							<th style="width: 110px;">${__("Type")}</th>
 							<th style="width: 120px;">${__("Grand Total")}</th>
 							<th style="width: 100px;">${__("Doc Status")}</th>
@@ -152,11 +152,11 @@ class TaxJarTransactionSync {
 		// call) so it keeps working across re-renders without re-wiring.
 		// Shows immediately on hover - no native-tooltip delay - and also
 		// toggles on click, since hover never fires on touch devices.
-		this.tbody.on("mouseenter", ".taxjar-sync-icon", (e) => {
+		this.tbody.on("mouseenter", ".taxjar-sync-trigger", (e) => {
 			this._show_sync_popover($(e.currentTarget));
 		});
-		this.tbody.on("mouseleave", ".taxjar-sync-icon", () => this._hide_sync_popover());
-		this.tbody.on("click", ".taxjar-sync-icon", (e) => {
+		this.tbody.on("mouseleave", ".taxjar-sync-trigger", () => this._hide_sync_popover());
+		this.tbody.on("click", ".taxjar-sync-trigger", (e) => {
 			e.stopPropagation();
 			this._show_sync_popover($(e.currentTarget));
 		});
@@ -292,8 +292,8 @@ class TaxJarTransactionSync {
 				<tr data-invoice="${frappe.utils.escape_html(inv.name)}">
 					<td><input type="checkbox" class="taxjar-row-check" ${checked}></td>
 					<td>${frappe.utils.escape_html(inv.posting_date)}</td>
-					<td>${frappe.utils.escape_html(inv.customer_name || "")}</td>
 					<td><a href="/app/sales-invoice/${encodeURIComponent(inv.name)}">${frappe.utils.escape_html(inv.name)}</a></td>
+					<td>${frappe.utils.escape_html(inv.customer_name || "")}</td>
 					<td>${frappe.utils.escape_html(inv.transaction_type || "")}</td>
 					<td style="text-align: right;">${frappe.format(inv.grand_total, { fieldtype: "Currency" })}</td>
 					<td>${frappe.utils.escape_html(inv.doc_status || "")}</td>
@@ -314,32 +314,40 @@ class TaxJarTransactionSync {
 		});
 	}
 
-	// One consistent shape for every status: a pill, and - whenever there's
-	// something worth surfacing beyond the pill's own text - a separate info
-	// icon to its right (never nested inside the pill) whose popover carries
-	// the detail: last-synced time for Synced, a queued note for Queued, the
-	// actual error for Failed. Retrying a failed row goes through the
-	// checkbox + "Retry Selected" bulk action rather than a dedicated button
-	// here, so Failed reads the same as every other status.
+	// Synced rows carry their detail (last-synced time) as a hover/click
+	// popover on the pill itself - no separate info icon needed since the
+	// pill's own text already says everything else. Queued and Failed still
+	// pair the pill with a separate info icon (never nested inside the pill)
+	// for their popover, since the pill text alone doesn't carry the detail.
+	// Retrying a failed row goes through the checkbox + "Retry Selected" bulk
+	// action rather than a dedicated button here, so Failed reads the same as
+	// every other status.
 	render_sync_status_cell(inv) {
 		const status = inv.taxjar_sync_status;
 		if (!status) return "";
 
 		const color = STATUS_COLORS[status] || "grey";
 		const label = status === "Not Applicable" ? __("NA") : __(status);
+
+		if (status === "Synced") {
+			if (!inv.taxjar_last_synced) {
+				return `<span class="indicator-pill ${color}">${label}</span>`;
+			}
+			const info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(inv.taxjar_last_synced)]);
+			return `<span class="indicator-pill ${color} taxjar-sync-trigger" data-info="${frappe.utils.escape_html(info_text)}">${label}</span>`;
+		}
+
 		const pill = `<span class="indicator-pill ${color}">${label}</span>`;
 
 		let info_text = "";
-		if (status === "Synced" && inv.taxjar_last_synced) {
-			info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(inv.taxjar_last_synced)]);
-		} else if (status === "Queued") {
+		if (status === "Queued") {
 			info_text = __("Queued for sync");
 		} else if (status === "Failed") {
 			info_text = inv.taxjar_sync_error || __("Unknown error");
 		}
 		if (!info_text) return pill;
 
-		const icon = `<button type="button" class="taxjar-sync-icon" data-info="${frappe.utils.escape_html(info_text)}">${frappe.utils.icon("info", "sm")}</button>`;
+		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(info_text)}">${frappe.utils.icon("info", "sm")}</button>`;
 		return `${pill}${icon}`;
 	}
 

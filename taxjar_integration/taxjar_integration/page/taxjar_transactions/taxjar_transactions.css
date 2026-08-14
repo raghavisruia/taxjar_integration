@@ -12,12 +12,17 @@
 	border-left: 1px solid var(--border-color);
 }
 
-/* Sync Status column - a status pill plus a separate small info icon (never
-   nested inside the pill) whose click-or-hover popover carries the detail:
-   last-synced time, a queued note, or the failure reason. cursor: pointer,
-   not help - "help" makes the browser draw its own question-mark cursor
-   glyph next to the pointer, which reads as a stray "?" floating over the
-   icon. */
+/* Sync Status column popover trigger. Queued/Failed pair the pill with a
+   separate small info icon (never nested inside the pill); Synced has no
+   icon and the pill itself is the trigger, since its own text already
+   covers the status and the popover only adds the last-synced time.
+   cursor: pointer, not help - "help" makes the browser draw its own
+   question-mark cursor glyph next to the pointer, which reads as a stray
+   "?" floating over the trigger. */
+.taxjar-sync-trigger {
+	cursor: pointer;
+}
+
 .taxjar-sync-icon {
 	display: inline-flex;
 	align-items: center;
@@ -27,7 +32,6 @@
 	border: none;
 	background: none;
 	color: var(--text-muted);
-	cursor: pointer;
 	vertical-align: middle;
 }
 
