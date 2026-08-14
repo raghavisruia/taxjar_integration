@@ -23,8 +23,8 @@ class TaxJarTransactionSync {
 		this.selected = new Set();
 
 		this.make_filters();
-		this.make_bulk_actions();
 		this.make_summary();
+		this.make_bulk_actions();
 		this.make_table();
 		this.refresh();
 	}
@@ -127,8 +127,8 @@ class TaxJarTransactionSync {
 						<tr>
 							<th style="width: 30px;"></th>
 							<th style="width: 110px;">${__("Posting Date")}</th>
-							<th>${__("Transaction ID")}</th>
-							<th style="width: 180px;">${__("Customer")}</th>
+							<th style="width: 160px; white-space: nowrap;">${__("Transaction ID")}</th>
+							<th>${__("Customer")}</th>
 							<th style="width: 110px;">${__("Type")}</th>
 							<th style="width: 120px;">${__("Grand Total")}</th>
 							<th style="width: 100px;">${__("Doc Status")}</th>
@@ -292,7 +292,7 @@ class TaxJarTransactionSync {
 				<tr data-invoice="${frappe.utils.escape_html(inv.name)}">
 					<td><input type="checkbox" class="taxjar-row-check" ${checked}></td>
 					<td>${frappe.utils.escape_html(inv.posting_date)}</td>
-					<td><a href="/app/sales-invoice/${encodeURIComponent(inv.name)}">${frappe.utils.escape_html(inv.name)}</a></td>
+					<td style="white-space: nowrap;"><a href="/app/sales-invoice/${encodeURIComponent(inv.name)}">${frappe.utils.escape_html(inv.name)}</a></td>
 					<td>${frappe.utils.escape_html(inv.customer_name || "")}</td>
 					<td>${frappe.utils.escape_html(inv.transaction_type || "")}</td>
 					<td style="text-align: right;">${frappe.format(inv.grand_total, { fieldtype: "Currency" })}</td>
