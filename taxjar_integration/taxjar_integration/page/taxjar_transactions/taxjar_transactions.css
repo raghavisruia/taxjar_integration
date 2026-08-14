@@ -12,6 +12,18 @@
 	border-left: 1px solid var(--border-color);
 }
 
+.taxjar-filters {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 12px;
+	padding: 15px 15px 0;
+}
+
+.taxjar-filters .frappe-control {
+	width: 180px;
+}
+
 /* Sync Status column popover trigger. Queued/Failed pair the pill with a
    separate small info icon (never nested inside the pill); Synced has no
    icon and the pill itself is the trigger, since its own text already

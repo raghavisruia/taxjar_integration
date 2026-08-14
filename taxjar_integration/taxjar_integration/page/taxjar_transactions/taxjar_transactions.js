@@ -32,31 +32,28 @@ class TaxJarTransactionSync {
 	make_filters() {
 		this.filter_area = $('<div class="taxjar-filters"></div>').appendTo(this.page.main);
 
-		this.filter_company = this.page.add_field({
+		this.filter_company = this.add_filter({
 			fieldname: "company",
 			label: __("Company"),
 			fieldtype: "Link",
 			options: "Company",
-			change: () => { this.current_page = 1; this.refresh(); },
 		});
 
-		this.filter_from_date = this.page.add_field({
+		this.filter_from_date = this.add_filter({
 			fieldname: "from_date",
 			label: __("From Date"),
 			fieldtype: "Date",
 			default: frappe.datetime.add_months(frappe.datetime.get_today(), -1),
-			change: () => { this.current_page = 1; this.refresh(); },
 		});
 
-		this.filter_to_date = this.page.add_field({
+		this.filter_to_date = this.add_filter({
 			fieldname: "to_date",
 			label: __("To Date"),
 			fieldtype: "Date",
 			default: frappe.datetime.get_today(),
-			change: () => { this.current_page = 1; this.refresh(); },
 		});
 
-		this.filter_sync_status = this.page.add_field({
+		this.filter_sync_status = this.add_filter({
 			fieldname: "sync_status",
 			label: __("Sync Status"),
 			fieldtype: "Select",
@@ -67,10 +64,9 @@ class TaxJarTransactionSync {
 				{ label: __("Synced"), value: "Synced" },
 				{ label: __("Failed"), value: "Failed" },
 			],
-			change: () => { this.current_page = 1; this.refresh(); },
 		});
 
-		this.filter_transaction_type = this.page.add_field({
+		this.filter_transaction_type = this.add_filter({
 			fieldname: "transaction_type",
 			label: __("Transaction Type"),
 			fieldtype: "Select",
@@ -80,8 +76,23 @@ class TaxJarTransactionSync {
 				{ label: __("Credit Note"), value: "Credit Note" },
 				{ label: __("Debit Note"), value: "Debit Note" },
 			],
-			change: () => { this.current_page = 1; this.refresh(); },
 		});
+	}
+
+	// frappe.ui.form.make_control() directly, rather than page.add_field(),
+	// since add_field() hardcodes only_input: true and drops the label,
+	// leaving just a placeholder - fine for the standard page toolbar, not
+	// for a filter row that needs visible labels.
+	add_filter(df) {
+		df.change = () => { this.current_page = 1; this.refresh(); };
+		const control = frappe.ui.form.make_control({
+			df,
+			parent: this.filter_area,
+			only_input: false,
+		});
+		control.refresh();
+		if (df.default) control.set_input(df.default);
+		return control;
 	}
 
 	make_bulk_actions() {
