@@ -16,13 +16,22 @@
 
 const SETUP_MODULE = "taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup";
 
+// State load lives in on_page_show, not the constructor - desk pages are cached
+// in frappe.pages[name], so revisiting the route only un-hides the existing DOM
+// and the wizard would keep showing whatever it read on first load. Safe for a
+// multi-step wizard because _load_state() re-renders the *current* step and
+// never touches this.cur/this.reached, so the user's position is preserved.
 frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
 		title: __("TaxJar Setup"),
 		single_column: true,
 	});
-	new TaxJarSetup(page);
+	wrapper.taxjar_setup = new TaxJarSetup(page);
+};
+
+frappe.pages["taxjar-setup"].on_page_show = function (wrapper) {
+	wrapper.taxjar_setup._load_state();
 };
 
 const SETUP_STEPS = [
@@ -47,7 +56,6 @@ class TaxJarSetup {
 		// by default would just cost an extra click every single time.
 		this._credsExpanded = true;
 		this._build_shell();
-		this._load_state();
 	}
 
 	_build_shell() {

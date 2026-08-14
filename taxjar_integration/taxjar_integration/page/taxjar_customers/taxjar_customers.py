@@ -7,6 +7,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	paginated_response,
 	parse_filters,
 )
+from taxjar_integration.taxjar_integration.taxjar_integration import _publish_customer_update
 
 # A representative TaxJar custom field; if this column is absent the fields were
 # never created, so reads would hit MySQLdb (1054) Unknown column.
@@ -162,6 +163,7 @@ def bulk_sync_to_taxjar(customers):
 			continue
 
 		frappe.db.set_value("Customer", name, "taxjar_customer_sync_status", "Queued", update_modified=False)
+		_publish_customer_update(name, "Queued")
 		taxjar_settings = frappe.get_single("TaxJar Settings")
 		for config in taxjar_settings.company_config or []:
 			frappe.enqueue(

@@ -7,6 +7,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	paginated_response,
 	parse_filters,
 )
+from taxjar_integration.taxjar_integration.taxjar_integration import _publish_transaction_update
 
 # A representative TaxJar custom field; if this column is absent the fields were
 # never created, so reads would hit MySQLdb (1054) Unknown column.
@@ -106,9 +107,13 @@ def bulk_retry(invoices):
 		if status != "Failed":
 			continue
 
+		# Not routed through _set_sync_status: that also nulls
+		# taxjar_last_synced, which would discard the real last-sync time on a
+		# doc that synced fine and only later failed its cancel-delete.
 		frappe.db.set_value(
 			"Sales Invoice", name, "taxjar_sync_status", "Queued", update_modified=False
 		)
+		_publish_transaction_update(name, "Queued")
 		frappe.enqueue(
 			"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
 			invoice_name=name,

@@ -2546,13 +2546,16 @@ class TestSetSyncStatusRealtime(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
 			_set_sync_status("SINV-TEST-001", "Synced")
 
-		mock_publish.assert_called_once_with(
+		mock_publish.assert_any_call(
 			"taxjar_invoice_sync_update",
 			{"taxjar_sync_status": "Synced"},
 			doctype="Sales Invoice",
 			docname="SINV-TEST-001",
 			after_commit=True,
 		)
+		# Exactly two: the doc-room event above for the open form, and the
+		# doctype-room event below for the Transaction Sync page.
+		self.assertEqual(mock_publish.call_count, 2)
 
 	def test_publishes_after_the_db_write(self):
 		"""Must not race ahead of the db.set_value it's meant to notify
@@ -2565,14 +2568,19 @@ class TestSetSyncStatusRealtime(UnitTestCase):
 		           side_effect=lambda *a, **k: calls.append("publish")):
 			_set_sync_status("SINV-TEST-001", "Failed", error="timeout")
 
-		self.assertEqual(calls, ["db_write", "publish"])
+		self.assertEqual(calls, ["db_write", "publish", "publish"])
 
 	def test_message_reflects_status_for_each_state(self):
 		for status in ("Synced", "Failed", "Queued", "Not Applicable"):
 			with self.subTest(status=status):
 				with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
 					_set_sync_status("SINV-TEST-001", status)
-				self.assertEqual(mock_publish.call_args[0][1], {"taxjar_sync_status": status})
+				# call_args_list[0] is the doc-room event; [1] is the page's.
+				self.assertEqual(mock_publish.call_args_list[0][0][1], {"taxjar_sync_status": status})
+				self.assertEqual(
+					mock_publish.call_args_list[1][0][1],
+					{"name": "SINV-TEST-001", "taxjar_sync_status": status},
+				)
 
 
 class TestSetCustomerSyncStatusRealtime(UnitTestCase):
@@ -2581,13 +2589,14 @@ class TestSetCustomerSyncStatusRealtime(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
 			_set_customer_sync_status("CUST-TEST-001", "Synced")
 
-		mock_publish.assert_called_once_with(
+		mock_publish.assert_any_call(
 			"taxjar_customer_sync_update",
 			{"taxjar_customer_sync_status": "Synced"},
 			doctype="Customer",
 			docname="CUST-TEST-001",
 			after_commit=True,
 		)
+		self.assertEqual(mock_publish.call_count, 2)
 
 	def test_publishes_after_the_db_write(self):
 		calls = []
@@ -2597,7 +2606,166 @@ class TestSetCustomerSyncStatusRealtime(UnitTestCase):
 		           side_effect=lambda *a, **k: calls.append("publish")):
 			_set_customer_sync_status("CUST-TEST-001", "Failed", error="timeout")
 
-		self.assertEqual(calls, ["db_write", "publish"])
+		self.assertEqual(calls, ["db_write", "publish", "publish"])
+
+
+# ── Realtime notification: the Transactions / Customers desk pages ─────────
+# A desk Page never joins a doc room (only a form does, via doc_subscribe on
+# form-load), so the doc-scoped events above are unreachable from the pages and
+# their status pills sat stale until a browser reload. These publish to the
+# doctype room instead - narrow enough that only sockets which opted in receive
+# it, and permission-checked server-side at join time, unlike the site room
+# every System User is auto-joined to.
+
+class TestTransactionsPageRealtime(UnitTestCase):
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_publishes_doctype_room_event_with_name_and_status(self):
+		with patch(f"{self.MOD}.frappe.db.set_value"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			_set_sync_status("SINV-TEST-001", "Failed", error="boom")
+
+		mock_publish.assert_any_call(
+			"taxjar_transactions_update",
+			{"name": "SINV-TEST-001", "taxjar_sync_status": "Failed"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
+
+	def test_uses_doctype_room_not_site_room(self):
+		"""The site room would wake every logged-in desk user - every System
+		User is auto-joined to it on connect."""
+		with patch(f"{self.MOD}.frappe.db.set_value"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			_set_sync_status("SINV-TEST-001", "Synced")
+
+		room = mock_publish.call_args_list[1][1]["room"]
+		self.assertEqual(room, "doctype:Sales Invoice")
+		self.assertNotEqual(room, "all")
+
+	def test_queued_on_submit_is_published(self):
+		"""Without this the pill can't show Queued - enqueue_taxjar_sync writes
+		it directly, bypassing _set_sync_status."""
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		     patch(f"{self.MOD}.get_client", return_value=MagicMock()), \
+		     patch(f"{self.MOD}.frappe.enqueue"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			enqueue_taxjar_sync(doc, None)
+
+		mock_publish.assert_called_once_with(
+			"taxjar_transactions_update",
+			{"name": doc.name, "taxjar_sync_status": "Queued"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
+
+	def test_queued_on_cancel_is_published(self):
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		     patch(f"{self.MOD}.get_client", return_value=MagicMock()), \
+		     patch(f"{self.MOD}.frappe.enqueue"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			enqueue_taxjar_delete(doc, None)
+
+		mock_publish.assert_called_once_with(
+			"taxjar_transactions_update",
+			{"name": doc.name, "taxjar_sync_status": "Queued"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
+
+	def test_nothing_published_when_sync_is_skipped(self):
+		doc = _make_doc()
+		with patch(f"{self.MOD}.company_creates_transactions", return_value=False), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			enqueue_taxjar_sync(doc, None)
+		mock_publish.assert_not_called()
+
+	def test_bulk_retry_publishes_queued(self):
+		"""bulk_retry writes Queued with a targeted set_value rather than
+		_set_sync_status (which would null taxjar_last_synced), so it needs its
+		own publish."""
+		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			bulk_retry,
+		)
+
+		with patch(f"{page_mod}.frappe.has_permission"), \
+		     patch(f"{page_mod}.frappe.db.has_column", return_value=True), \
+		     patch(f"{page_mod}.frappe.db.get_value", return_value="Failed"), \
+		     patch(f"{page_mod}.frappe.db.set_value"), \
+		     patch(f"{page_mod}.frappe.enqueue"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			result = bulk_retry(["SINV-0001"])
+
+		self.assertEqual(result, {"queued": 1})
+		mock_publish.assert_called_once_with(
+			"taxjar_transactions_update",
+			{"name": "SINV-0001", "taxjar_sync_status": "Queued"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
+
+	def test_bulk_retry_skips_rows_that_are_not_failed(self):
+		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			bulk_retry,
+		)
+
+		with patch(f"{page_mod}.frappe.has_permission"), \
+		     patch(f"{page_mod}.frappe.db.has_column", return_value=True), \
+		     patch(f"{page_mod}.frappe.db.get_value", return_value="Synced"), \
+		     patch(f"{page_mod}.frappe.enqueue"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			bulk_retry(["SINV-0001"])
+
+		mock_publish.assert_not_called()
+
+
+class TestCustomersPageRealtime(UnitTestCase):
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_publishes_doctype_room_event_with_name_and_status(self):
+		with patch(f"{self.MOD}.frappe.db.set_value"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			_set_customer_sync_status("CUST-TEST-001", "Synced")
+
+		mock_publish.assert_any_call(
+			"taxjar_customers_update",
+			{"name": "CUST-TEST-001", "taxjar_customer_sync_status": "Synced"},
+			room="doctype:Customer",
+			after_commit=True,
+		)
+
+	def test_bulk_sync_publishes_queued(self):
+		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			bulk_sync_to_taxjar,
+		)
+		settings = MagicMock()
+		settings.company_config = []
+
+		with patch(f"{page_mod}.frappe.has_permission"), \
+		     patch(f"{page_mod}._ensure_taxjar_customer_fields"), \
+		     patch(f"{page_mod}.frappe.db.get_value", return_value="cust_1"), \
+		     patch(f"{page_mod}.frappe.db.set_value"), \
+		     patch(f"{page_mod}.frappe.get_single", return_value=settings), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			bulk_sync_to_taxjar(["CUST-0001"])
+
+		mock_publish.assert_called_once_with(
+			"taxjar_customers_update",
+			{"name": "CUST-0001", "taxjar_customer_sync_status": "Queued"},
+			room="doctype:Customer",
+			after_commit=True,
+		)
 
 
 class TestSyncStatusRealtimeJS(UnitTestCase):
@@ -2633,6 +2801,90 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 	def test_setup_appears_before_refresh_in_customer(self):
 		js = self._read_js("customer.js")
 		self.assertLess(js.index("setup(frm) {"), js.index("refresh(frm) {"))
+
+
+# ── Desk page lifecycle: on_page_show + realtime binding ───────────────────
+# Desk pages are constructed once and cached in frappe.pages[name]; revisiting
+# the route only un-hides the existing DOM and fires on_page_show, so a page
+# that fetches solely in on_page_load shows stale data until a browser reload.
+# The constructor must NOT fetch: the "show" handler is bound before
+# container.change_to() runs, so on_page_show already fires immediately after
+# on_page_load and doing both would double-fetch on every load.
+
+class TestDeskPageLifecycleJS(UnitTestCase):
+
+	PAGES = ("taxjar_transactions", "taxjar_customers", "taxjar_setup")
+	# The two data pages that also carry a realtime subscription.
+	REALTIME_PAGES = {
+		"taxjar_transactions": ("Sales Invoice", "taxjar_transactions_update"),
+		"taxjar_customers": ("Customer", "taxjar_customers_update"),
+	}
+
+	def _read_page_js(self, page):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", page, f"{page}.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def test_every_page_defines_on_page_show(self):
+		for page in self.PAGES:
+			with self.subTest(page=page):
+				js = self._read_page_js(page)
+				self.assertIn(f'frappe.pages["{page.replace("_", "-")}"].on_page_show', js)
+
+	def test_constructor_does_not_fetch(self):
+		"""Would double-fetch on first load, since on_page_show fires right
+		after on_page_load."""
+		for page, fetch_call in (
+			("taxjar_transactions", "this.refresh();"),
+			("taxjar_customers", "this.refresh();"),
+			("taxjar_setup", "this._load_state();"),
+		):
+			with self.subTest(page=page):
+				js = self._read_page_js(page)
+				constructor = js.split("\tconstructor(page) {")[1].split("\n\t}")[0]
+				self.assertNotIn(fetch_call, constructor)
+
+	def test_realtime_pages_subscribe_and_refresh_on_show(self):
+		for page, (doctype, event) in self.REALTIME_PAGES.items():
+			with self.subTest(page=page):
+				js = self._read_page_js(page)
+				on_show = js.split("\ton_show() {")[1].split("\n\t}")[0]
+				self.assertIn(f'frappe.realtime.doctype_subscribe("{doctype}")', on_show)
+				self.assertIn("frappe.realtime.on(SYNC_UPDATE_EVENT", on_show)
+				self.assertIn("this.refresh();", on_show)
+				self.assertIn(f'SYNC_UPDATE_EVENT = "{event}"', js)
+
+	def test_realtime_pages_detach_handler_on_hide(self):
+		"""Same handler reference passed to on() and off(), or the listener
+		stays live and keeps refreshing a page the user has navigated away
+		from. Deliberately no doctype_unsubscribe - the Sales Invoice list
+		view shares the room and only sets itself up once."""
+		for page in self.REALTIME_PAGES:
+			with self.subTest(page=page):
+				js = self._read_page_js(page)
+				on_hide = js.split("\ton_hide() {")[1].split("\n\t}")[0]
+				self.assertIn("frappe.realtime.off(SYNC_UPDATE_EVENT, this._on_sync_update)", on_hide)
+				self.assertIn("this._on_sync_update.cancel()", on_hide)
+				self.assertNotIn("doctype_unsubscribe", on_hide)
+
+	def test_realtime_handler_is_debounced_and_stored_once(self):
+		"""A bulk retry publishes one event per row; without a debounce each
+		would cost a full two-call refresh."""
+		for page in self.REALTIME_PAGES:
+			with self.subTest(page=page):
+				js = self._read_page_js(page)
+				self.assertIn(
+					"this._on_sync_update = frappe.utils.debounce(() => this.refresh(), 500);", js
+				)
+
+	def test_pages_bind_hide_to_release_the_listener(self):
+		for page in self.REALTIME_PAGES:
+			with self.subTest(page=page):
+				js = self._read_page_js(page)
+				self.assertIn('$(wrapper).on("hide"', js)
 
 
 # ── Transaction Compliance — async sync_transaction_to_taxjar ─────────────────

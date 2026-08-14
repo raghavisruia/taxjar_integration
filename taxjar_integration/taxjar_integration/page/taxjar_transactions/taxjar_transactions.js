@@ -1,3 +1,10 @@
+// Desk pages are built once and cached in frappe.pages[name]; revisiting the
+// route only un-hides the existing DOM and fires on_page_show. So the data
+// fetch lives in on_page_show, not the constructor - otherwise the page keeps
+// showing whatever it loaded the first time until a browser reload. The
+// constructor deliberately does NOT fetch: on first visit the "show" handler is
+// bound before container.change_to() runs, so on_page_show already fires right
+// after on_page_load and doing both would double-fetch every load.
 frappe.pages["taxjar-transactions"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
@@ -5,7 +12,15 @@ frappe.pages["taxjar-transactions"].on_page_load = function (wrapper) {
 		single_column: true,
 	});
 
-	new TaxJarTransactionSync(page);
+	wrapper.taxjar_transactions = new TaxJarTransactionSync(page);
+
+	// Frappe has no on_page_hide page event; container.js triggers a plain
+	// "hide" on the outgoing container div, which is this wrapper.
+	$(wrapper).on("hide", () => wrapper.taxjar_transactions.on_hide());
+};
+
+frappe.pages["taxjar-transactions"].on_page_show = function (wrapper) {
+	wrapper.taxjar_transactions.on_show();
 };
 
 const STATUS_COLORS = {
@@ -15,6 +30,8 @@ const STATUS_COLORS = {
 	"Not Applicable": "grey",
 };
 
+const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
+
 class TaxJarTransactionSync {
 	constructor(page) {
 		this.page = page;
@@ -22,11 +39,35 @@ class TaxJarTransactionSync {
 		this.current_page = 1;
 		this.selected = new Set();
 
+		// Built once so on_hide() has the same reference to pass to
+		// frappe.realtime.off(). Debounced because a bulk retry of N invoices
+		// publishes N events and each refresh() is two server calls - without
+		// this, retrying 500 rows would fire 500 refreshes.
+		this._on_sync_update = frappe.utils.debounce(() => this.refresh(), 500);
+
 		this.make_filters();
 		this.make_summary();
 		this.make_bulk_actions();
 		this.make_table();
+	}
+
+	on_show() {
+		// Joining is idempotent, and the server permission-checks the join.
+		frappe.realtime.doctype_subscribe("Sales Invoice");
+		// off() first so a stray double-show can't stack the same handler.
+		frappe.realtime.off(SYNC_UPDATE_EVENT, this._on_sync_update);
+		frappe.realtime.on(SYNC_UPDATE_EVENT, this._on_sync_update);
 		this.refresh();
+	}
+
+	// Detaches our handler but deliberately does NOT doctype_unsubscribe: the
+	// Sales Invoice list view subscribes to the same room and only sets itself
+	// up once (guarded by its realtime_events_setup flag), so leaving the room
+	// on our behalf could silently kill its auto-refresh.
+	on_hide() {
+		frappe.realtime.off(SYNC_UPDATE_EVENT, this._on_sync_update);
+		this._on_sync_update.cancel();
+		this._hide_sync_popover();
 	}
 
 	make_filters() {
@@ -258,7 +299,6 @@ class TaxJarTransactionSync {
 			this.render_table();
 			this.render_pagination(data);
 			this.update_bulk_state();
-			this.bulk_area.find(".taxjar-select-all").prop("checked", false);
 		});
 	}
 
@@ -405,6 +445,15 @@ class TaxJarTransactionSync {
 		this.bulk_area.find(".taxjar-bulk-retry").prop("disabled", disabled);
 		this.bulk_area.find(".taxjar-selection-count").text(
 			count ? __("{0} selected", [count]) : ""
+		);
+
+		// Derived from what's actually selected rather than blanket-cleared on
+		// refresh, so a refresh landing mid-selection (realtime update,
+		// pagination) can't desync the header checkbox from the rows, which
+		// keep their state via this.selected across re-renders.
+		const rows = this.invoices || [];
+		this.bulk_area.find(".taxjar-select-all").prop(
+			"checked", rows.length > 0 && rows.every((inv) => this.selected.has(inv.name))
 		);
 	}
 

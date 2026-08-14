@@ -7,6 +7,7 @@ import frappe
 import taxjar
 from frappe import _
 from frappe.contacts.doctype.address.address import get_company_address
+from frappe.realtime import get_doctype_room
 from frappe.utils import cint, flt
 from frappe.utils.password import get_decrypted_password
 
@@ -240,6 +241,7 @@ def enqueue_taxjar_sync(doc, method):
 		return
 
 	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
+	_publish_transaction_update(doc.name, "Queued")
 
 	frappe.enqueue(
 		"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
@@ -260,6 +262,7 @@ def enqueue_taxjar_delete(doc, method):
 		return
 
 	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
+	_publish_transaction_update(doc.name, "Queued")
 
 	frappe.enqueue(
 		"taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction_from_taxjar",
@@ -371,13 +374,35 @@ def delete_transaction_from_taxjar(invoice_name):
 		_get_taxjar_logger().error(traceback.format_exc())
 
 
+def _publish_transaction_update(invoice_name, status):
+	"""Notify the TaxJar Transaction Sync page that an invoice's sync status moved.
+
+	Deliberately a second, separately-named event rather than a wider room on
+	the doc-scoped taxjar_invoice_sync_update below: that one is consumed by the
+	Sales Invoice form, whose listener calls frm.reload_doc() unconditionally
+	and relies purely on room scoping to know the event concerns the doc it has
+	open. Widening it would reload every open invoice on any invoice's sync.
+
+	The doctype room (not the site room) keeps the fanout to sockets that opted
+	in - every System User auto-joins the site room on connect, so a site-room
+	broadcast would wake every logged-in desk user. Joining a doctype room runs
+	a server-side permission check first.
+	"""
+	frappe.publish_realtime(
+		"taxjar_transactions_update",
+		{"name": invoice_name, "taxjar_sync_status": status},
+		room=get_doctype_room("Sales Invoice"),
+		after_commit=True,
+	)
+
+
 def _set_sync_status(invoice_name, status, error=None):
 	"""Update TaxJar sync status fields on a Sales Invoice via db_set, then
-	notify any open form via realtime so it doesn't sit showing a stale
-	status until manually reloaded. This is reached only from async contexts
-	(the background sync job, the 15-min cron retry, bulk retry from the
-	Transactions page) - the synchronous button-click path already reloads
-	via its own frappe.call callback and doesn't need this.
+	notify any open form and the Transaction Sync page via realtime so neither
+	sits showing a stale status until manually reloaded. This is reached only
+	from async contexts (the background sync job, the 15-min cron retry, bulk
+	retry from the Transactions page) - the synchronous button-click path
+	already reloads via its own frappe.call callback and doesn't need this.
 	"""
 	frappe.db.set_value(
 		"Sales Invoice", invoice_name,
@@ -395,6 +420,7 @@ def _set_sync_status(invoice_name, status, error=None):
 		docname=invoice_name,
 		after_commit=True,
 	)
+	_publish_transaction_update(invoice_name, status)
 
 
 @frappe.whitelist()
@@ -1644,6 +1670,17 @@ def _map_exemption_type(label):
 	return _EXEMPTION_TYPE_MAP.get(label, "non_exempt")
 
 
+def _publish_customer_update(customer_name, status):
+	"""Notify the TaxJar Customer Configuration page - same reasoning as
+	_publish_transaction_update's docstring, for the Customer doctype room."""
+	frappe.publish_realtime(
+		"taxjar_customers_update",
+		{"name": customer_name, "taxjar_customer_sync_status": status},
+		room=get_doctype_room("Customer"),
+		after_commit=True,
+	)
+
+
 def _set_customer_sync_status(customer_name, status, error=None):
 	"""Update TaxJar sync status fields on a Customer, then notify any open
 	form via realtime - same reasoning as _set_sync_status's docstring.
@@ -1666,6 +1703,7 @@ def _set_customer_sync_status(customer_name, status, error=None):
 		docname=customer_name,
 		after_commit=True,
 	)
+	_publish_customer_update(customer_name, status)
 
 
 @frappe.whitelist()
@@ -1840,6 +1878,7 @@ def on_customer_update(doc, method):
 		return
 
 	doc.db_set("taxjar_customer_sync_status", "Queued", update_modified=False)
+	_publish_customer_update(doc.name, "Queued")
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:

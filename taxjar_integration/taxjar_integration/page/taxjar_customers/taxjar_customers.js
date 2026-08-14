@@ -1,3 +1,6 @@
+// Data fetch lives in on_page_show, not the constructor - see the comment at
+// the top of taxjar_transactions.js for why (cached desk pages, and the first
+// on_page_show firing straight after on_page_load).
 frappe.pages["taxjar-customers"].on_page_load = function (wrapper) {
 	const page = frappe.ui.make_app_page({
 		parent: wrapper,
@@ -5,7 +8,12 @@ frappe.pages["taxjar-customers"].on_page_load = function (wrapper) {
 		single_column: true,
 	});
 
-	new TaxJarCustomerConfig(page);
+	wrapper.taxjar_customers = new TaxJarCustomerConfig(page);
+	$(wrapper).on("hide", () => wrapper.taxjar_customers.on_hide());
+};
+
+frappe.pages["taxjar-customers"].on_page_show = function (wrapper) {
+	wrapper.taxjar_customers.on_show();
 };
 
 const EXEMPTION_OPTIONS = ["", "Wholesale", "Government", "Non Exempt", "Other"];
@@ -22,6 +30,8 @@ const STATUS_COLORS = {
 	Queued: "blue",
 };
 
+const SYNC_UPDATE_EVENT = "taxjar_customers_update";
+
 class TaxJarCustomerConfig {
 	constructor(page) {
 		this.page = page;
@@ -29,10 +39,28 @@ class TaxJarCustomerConfig {
 		this.current_page = 1;
 		this.selected = new Set();
 
+		// Same reasoning as taxjar_transactions.js: one stable reference so
+		// off() can detach it, debounced so a bulk sync of N customers doesn't
+		// fire N refreshes.
+		this._on_sync_update = frappe.utils.debounce(() => this.refresh(), 500);
+
 		this.make_filters();
 		this.make_bulk_actions();
 		this.make_table();
+	}
+
+	on_show() {
+		frappe.realtime.doctype_subscribe("Customer");
+		frappe.realtime.off(SYNC_UPDATE_EVENT, this._on_sync_update);
+		frappe.realtime.on(SYNC_UPDATE_EVENT, this._on_sync_update);
 		this.refresh();
+	}
+
+	// Detaches the handler without doctype_unsubscribe - see on_hide() in
+	// taxjar_transactions.js for why leaving the room would be unsafe.
+	on_hide() {
+		frappe.realtime.off(SYNC_UPDATE_EVENT, this._on_sync_update);
+		this._on_sync_update.cancel();
 	}
 
 	make_filters() {
@@ -196,7 +224,6 @@ class TaxJarCustomerConfig {
 			this.render_table();
 			this.render_pagination(data);
 			this.update_bulk_state();
-			this.bulk_area.find(".taxjar-select-all").prop("checked", false);
 		});
 	}
 
@@ -307,6 +334,13 @@ class TaxJarCustomerConfig {
 		this.bulk_area.find(".taxjar-bulk-sync").prop("disabled", disabled);
 		this.bulk_area.find(".taxjar-selection-count").text(
 			count ? __("{0} selected", [count]) : ""
+		);
+
+		// Derived rather than blanket-cleared on refresh, so a refresh landing
+		// mid-selection can't desync the header checkbox from the rows.
+		const rows = this.customers || [];
+		this.bulk_area.find(".taxjar-select-all").prop(
+			"checked", rows.length > 0 && rows.every((c) => this.selected.has(c.name))
 		);
 	}
 
