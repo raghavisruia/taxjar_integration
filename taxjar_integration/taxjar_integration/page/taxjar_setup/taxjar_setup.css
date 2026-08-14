@@ -149,8 +149,11 @@
    the solid "Save & continue" CTA). Explicit padding/line-height rather than
    relying on .btn-sm (too short) or plain .btn (its padding alone still
    doesn't match a frappe-control input's height) — sitting inline next to
-   Company/Live token in the same row, it needs to visually match them. */
+   Company/Live token in the same row, it needs to visually match them.
+   inline-flex (not the default inline-block) so the in-flight state's spinner
+   sits on the label's centre line without vertical-align fudging. */
 .taxjar-setup .ts-test {
+	display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 	border: 1.5px solid var(--text-color); color: var(--text-color); font-weight: 600;
 	background: var(--card-bg); padding: 6px 16px; line-height: 1.4;
 }
@@ -329,8 +332,28 @@
 .taxjar-setup .ts-cred-row .ts-field-company,
 .taxjar-setup .ts-cred-row .ts-field-token { flex: 1; min-width: 0; }
 /* flex here too: the Failed state puts a warning icon and the Retry pill
-   side by side as two separate elements (not one nested inside the other). */
-.taxjar-setup .ts-cred-row .ts-cred-action { flex: none; display: flex; align-items: center; gap: 6px; align-self: flex-end; }
+   side by side as two separate elements (not one nested inside the other).
+   Fixed basis, NOT flex: none - the slot's contents change per state (Connect
+   button / Connecting… / Success / warning icon + Retry), and a content-sized
+   slot hands a different width to the two flex: 1 fields in every state. That
+   made Company/Live token columns not line up between rows sitting in
+   different states, and made a row's own inputs resize mid-request on
+   Connect. A reserved column keeps both stable; the width is sized for the
+   longest steady-state label with headroom for translations. */
+.taxjar-setup .ts-cred-row .ts-cred-action {
+	flex: 0 0 140px; display: flex; align-items: center; gap: 6px; align-self: flex-end;
+}
+/* The button/pill fills whatever the icon doesn't, so every state's control
+   spans the same reserved column rather than floating at its left edge. */
+.taxjar-setup .ts-cred-action > .ts-chip,
+.taxjar-setup .ts-cred-action > .ts-test { flex: 1; min-width: 0; }
+.taxjar-setup .ts-cred-action > .ts-info-btn { flex: none; }
+/* Overrides .ts-chip's wrapping (which exists for long error text elsewhere) -
+   inside a fixed-width column a wrapped label would grow the row's height
+   instead of its width, which is the same jump in the other axis. */
+.taxjar-setup .ts-cred-action > .ts-chip,
+.taxjar-setup .ts-cred-action > .ts-test { white-space: nowrap; overflow: hidden; }
+.taxjar-setup .ts-cred-action > .ts-chip { justify-content: center; }
 .taxjar-setup .ts-cred-row .ts-card-remove { align-self: flex-end; }
 /* .ts-card-b's default align-items: stretch would otherwise stretch this
    button to the card's full width, since it's the row's only child. */

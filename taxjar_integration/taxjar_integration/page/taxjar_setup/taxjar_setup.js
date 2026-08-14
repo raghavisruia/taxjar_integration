@@ -637,9 +637,14 @@ class TaxJarSetup {
 		}
 		// Transient state, not routed through _render_cred_action - nothing
 		// about entry.tested/lastError has changed yet, this is just what the
-		// action slot looks like while the request is in flight.
+		// action slot looks like while the request is in flight. Deliberately
+		// still the same disabled .ts-test button rather than a chip: the
+		// action column is a fixed width (see the CSS), and a chip carrying
+		// "Contacting TaxJar…" is far wider than any steady state, so it would
+		// need the column sized around a string only ever shown mid-request.
 		entry.$card.find(".ts-cred-action").html(
-			`<span class="ts-chip warn"><span class="ts-spin"></span> ${__("Contacting TaxJar…")}</span>`
+			`<button type="button" class="btn btn-default ts-test" disabled>
+				<span class="ts-spin"></span> ${__("Connecting…")}</button>`
 		);
 
 		this._call("test_connection", {
