@@ -21,8 +21,7 @@
 		</tbody>
 		<tfoot>
 			<tr style="font-weight:bold">
-				<td>{{ _("Total") }}</td>
-				<td></td>
+				<td colspan="2" class="text-right">{{ _("Total") }}</td>
 				<td class="text-right">{{ "%.3f"|format((totals.rate or 0) * 100) }}%</td>
 				<td class="text-right">{{ frappe.utils.fmt_money(totals.amount_to_collect or 0, None, table_currency) }}</td>
 			</tr>
