@@ -101,6 +101,7 @@ def get_setup_state():
 		"credentials": credentials,
 		"companies": companies,
 		"nexus_by_company": _nexus_by_company(settings),
+		"nexus_last_synced": settings.nexus_last_synced,
 	}
 
 
@@ -302,7 +303,11 @@ def fetch_nexus():
 
 	settings.update_nexus_list()
 
-	return {"ok": True, "nexus_by_company": _nexus_by_company(settings)}
+	return {
+		"ok": True,
+		"nexus_by_company": _nexus_by_company(settings),
+		"nexus_last_synced": settings.nexus_last_synced,
+	}
 
 
 @frappe.whitelist()

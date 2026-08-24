@@ -3,7 +3,7 @@
 // Layout: a single-step panel that swaps its entire content on Save & continue —
 // only one step is ever shown at a time, rendered as plain page flow (no card/box
 // around it) rather than a widget embedded in the desk. Each step's own header
-// carries the progress rail directly below its heading — frappe-ui's
+// opens with the progress rail, the step's heading sitting below it — frappe-ui's
 // <Progress :intervals="true"> internals, one segment per step, each with a
 // clickable trailing caption that doubles as navigation.
 //
@@ -34,15 +34,18 @@ frappe.pages["taxjar-setup"].on_page_show = function (wrapper) {
 	wrapper.taxjar_setup._load_state();
 };
 
+const AUTOFILE_DOC_URL = "https://support.taxjar.com/article/908-how-does-autofile-work";
+const TAXJAR_NEXUS_URL = "https://app.taxjar.com/account#states";
+
 const SETUP_STEPS = [
 	// Nothing is actually saved on this step (no form fields), so its button
 	// just says "Continue" rather than the misleading "Save & continue".
-	{ key: "welcome", label: __("Pre-requisites"), title: __("Let’s connect TaxJar"), skip: false, nextLabel: __("Continue") },
-	{ key: "connect", label: __("Connect API"), title: __("Connect your TaxJar account"), skip: false },
-	{ key: "accounts", label: __("Company accounts"), title: __("Where should tax be posted?"), skip: false },
-	{ key: "features", label: __("Features"), title: __("What should TaxJar do?"), skip: true },
-	{ key: "nexus", label: __("Nexus"), title: __("Where do you collect tax?"), skip: true },
-	{ key: "review", label: __("Review"), title: __("Review & activate"), skip: false },
+	{ key: "welcome", label: __("Pre-requisites"), title: __("Integrate TaxJar with ERPNext"), nextLabel: __("Continue") },
+	{ key: "connect", label: __("Connect"), title: __("Connect your TaxJar account") },
+	{ key: "accounts", label: __("Map Ledgers"), title: __("Map your accounting ledgers") },
+	{ key: "features", label: __("Features"), title: __("Choose features to activate") },
+	{ key: "nexus", label: __("Sync Nexus"), title: __("Sync your nexus regions") },
+	{ key: "review", label: __("Review"), title: __("Review & activate") },
 ];
 
 class TaxJarSetup {
@@ -63,14 +66,13 @@ class TaxJarSetup {
 			<div class="taxjar-setup">
 				<section class="ts-panel">
 					<header class="ts-head">
-						<h2 class="ts-title"></h2>
 						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
 					</header>
+					<h2 class="ts-title"></h2>
 					<div class="ts-body"></div>
 					<footer class="ts-foot">
 						<button class="btn btn-default ts-back">${__("Back")}</button>
 						<span class="ts-grow"></span>
-						<button class="btn btn-default ts-skip hide">${__("Skip for now")}</button>
 						<button class="btn btn-dark ts-next"></button>
 					</footer>
 				</section>
@@ -80,7 +82,6 @@ class TaxJarSetup {
 		this.$intervals = this.$root.find(".ts-intervals");
 		this.$body = this.$root.find(".ts-body");
 		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
-		this.$root.find(".ts-skip").on("click", () => this._advance());
 		this.$root.find(".ts-next").on("click", () => this._on_next());
 
 		// The progress rail is the only navigation element — frappe-ui's <Progress
@@ -108,9 +109,9 @@ class TaxJarSetup {
 	}
 
 	// Click-to-show popover for the Retry pill's failure reason - no backing
-	// form field to hang frappe's native InfoCard off of here (API Mode and
-	// Enable API logs use the real thing instead - see their
-	// df.show_description_on_click), so this one spot stays hand-rolled.
+	// form field to hang frappe's native InfoCard off of here (Enable API logs
+	// is a real control and uses df.show_description_on_click instead), so this
+	// one spot stays hand-rolled.
 	_info_btn_html(text) {
 		return `<button type="button" class="ts-info-btn" data-info="${frappe.utils.escape_html(text)}">${frappe.utils.icon("triangle-alert", "md")}</button>`;
 	}
@@ -208,9 +209,8 @@ class TaxJarSetup {
 		// Panel shows exactly one step's content, swapped in full on navigate.
 		this.$root.find(".ts-title").text(step.title);
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
-		this.$root.find(".ts-skip").toggleClass("hide", !step.skip);
 		const nextLabel = this.cur === SETUP_STEPS.length - 1
-			? __("Finish & activate")
+			? __("Activate")
 			: (step.nextLabel || __("Save & continue"));
 		this.$root.find(".ts-next").text(nextLabel).prop("disabled", false);
 		this._set_next_gated(false);
@@ -305,7 +305,7 @@ class TaxJarSetup {
 		};
 	}
 
-	// ── Step 2: Connect API ─────────────────────────────────────────
+	// ── Step 2: Connect ─────────────────────────────────────────
 	_render_connect() {
 		const s = this.state || {};
 		const creds = (s.credentials && s.credentials.length) ? s.credentials : [{ company: null, token_last4: null }];
@@ -314,8 +314,7 @@ class TaxJarSetup {
 			<div class="ts-card">
 				<div class="ts-card-b ts-mode-row">
 					<div>
-						<label class="control-label" style="margin:0">${__("API Mode")} <span class="ts-reqd">*</span></label>
-						<p class="ts-fieldnote" style="margin:2px 0 0">${__("Live requests affect real filings.")}</p>
+						<label class="control-label">${__("API Mode")} <span class="ts-reqd">*</span></label>
 					</div>
 					<div class="ts-field-mode"></div>
 				</div>
@@ -338,8 +337,8 @@ class TaxJarSetup {
 				</div>
 				<div class="ts-card-b ts-retention-row">
 					<div>
-						<label class="control-label" style="margin:0">${__("Retention")}</label>
-						<p class="ts-fieldnote" style="margin:2px 0 0">${__("Older logs are deleted automatically.")}</p>
+						<label class="control-label">${__("Retention")}</label>
+						<p class="ts-fieldnote ts-retention-note"></p>
 					</div>
 					<div class="ts-retention-wrap">
 						<div class="ts-field-retention"></div>
@@ -394,8 +393,8 @@ class TaxJarSetup {
 			parent: this.$body.find(".ts-field-logging"),
 			df: {
 				fieldtype: "Switch", fieldname: "enable_taxjar_logging",
-				label: __("Enable API logs"),
-				description: __("Records API requests, responses, and errors in TaxJar API Log."),
+				label: __("Enable API Logs"),
+				description: __("Records API requests, responses, and errors."),
 			},
 			render_input: true,
 		});
@@ -412,23 +411,38 @@ class TaxJarSetup {
 		this.controls.logRetention.set_value(s.log_retention_days != null ? s.log_retention_days : 15);
 
 		const $retentionUnit = this.$body.find(".ts-retention-unit");
-		const syncRetentionUnit = () => {
-			$retentionUnit.text(cint(this.controls.logRetention.get_value()) === 1 ? __("day") : __("days"));
+		const $retentionNote = this.$body.find(".ts-retention-note");
+		// The unit beside the input and the description under the label turn on
+		// the same singular/plural test, so one function writes both - two
+		// listeners on the same input is how they end up disagreeing.
+		//
+		// Two whole sentences rather than one with the word interpolated in:
+		// the languages frappe ships translations for don't all pluralise by
+		// swapping a single word, and a translator handed "day"/"days" on its
+		// own has no sentence to agree it with. The description lives here
+		// rather than in the template for the same reason it changes at all -
+		// it has no correct static form.
+		const syncRetentionCopy = (days) => {
+			const one = cint(days) === 1;
+			$retentionUnit.text(one ? __("day") : __("days"));
+			$retentionNote.text(one
+				? __("Logs older than specified day are auto-purged.")
+				: __("Logs older than specified days are auto-purged."));
 		};
 		// set_value() above resolves through frappe.run_serially, so reading
 		// get_value() back synchronously right here would still see the
 		// pre-set value on first render (same class of bug as _modeIsLive) -
-		// derive the initial unit word from the already-known state/default
-		// instead, and only trust get_value() from here on for the change event.
-		$retentionUnit.text(
-			(s.log_retention_days != null ? s.log_retention_days : 15) === 1 ? __("day") : __("days")
-		);
-		this.controls.logRetention.$input.on("input", syncRetentionUnit);
+		// seed from the already-known state/default instead, and only trust
+		// get_value() from here on for the change event.
+		syncRetentionCopy(s.log_retention_days != null ? s.log_retention_days : 15);
+		this.controls.logRetention.$input.on("input", () => {
+			syncRetentionCopy(this.controls.logRetention.get_value());
+		});
 
 		// Log Retention only means anything once logging is on — mirrors the
 		// doctype field's own depends_on: eval: doc.enable_taxjar_logging.
 		// Hides the whole row (label + description + input), not just the
-		// input - "Retention / Older logs are deleted automatically" with no
+		// input - "Retention / Logs older than specified days..." with no
 		// way to see or edit the day count would read as broken, not off.
 		const $retentionField = this.$body.find(".ts-retention-row");
 		const syncRetentionVisibility = () => {
@@ -461,8 +475,10 @@ class TaxJarSetup {
 			<div class="ts-cred-row">
 				<div class="ts-field-company"></div>
 				<div class="ts-field-token"></div>
-				<div class="ts-cred-action"></div>
-				<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
+				<div class="ts-cred-tail">
+					<div class="ts-cred-action"></div>
+					<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
+				</div>
 			</div>
 		`).appendTo(this.$body.find(".ts-cred-rows"));
 
@@ -724,7 +740,7 @@ class TaxJarSetup {
 			.finally(() => $next.prop("disabled", false));
 	}
 
-	// ── Step 3: Company accounts ────────────────────────────────────
+	// ── Step 3: Map Ledgers ────────────────────────────────────
 	_render_accounts() {
 		const s = this.state || {};
 		const creds = s.credentials || [];
@@ -736,7 +752,7 @@ class TaxJarSetup {
 		}
 
 		this.$body.html(`
-			<p class="ts-fieldnote">${__("TaxJar posts calculated tax and shipping to these accounts on each Sales Invoice.")}</p>
+			<p class="ts-fieldnote">${__("Sales Taxes & Charges Template is configured based on the ledgers selected below.")}</p>
 			<div class="ts-cardgrid ts-account-cards"></div>
 		`);
 
@@ -760,7 +776,9 @@ class TaxJarSetup {
 				parent: $card.find(".ts-field-tax"),
 				df: {
 					fieldtype: "Link", fieldname: "tax_account_head", options: "Account",
-					label: __("Tax account head"), reqd: 1,
+					label: __("Sales Tax Ledger Account"), reqd: 1,
+					show_description_on_click: 1,
+					description: __("Sales Tax Liability towards government."),
 					get_query: () => ({ filters: { company: cred.company, is_group: 0 } }),
 				},
 				render_input: true,
@@ -771,7 +789,9 @@ class TaxJarSetup {
 				parent: $card.find(".ts-field-ship"),
 				df: {
 					fieldtype: "Link", fieldname: "shipping_account_head", options: "Account",
-					label: __("Shipping account head"), reqd: 1,
+					label: __("Shipping Ledger Account"), reqd: 1,
+					show_description_on_click: 1,
+					description: __("Shipping & Handling fees charged to your customer. (Tax applicability as per state rules in TaxJar)"),
 					get_query: () => ({ filters: { company: cred.company, is_group: 0 } }),
 				},
 				render_input: true,
@@ -826,7 +846,6 @@ class TaxJarSetup {
 		const companies = s.companies || [];
 
 		this.$body.html(`
-			<label class="control-label">${__("Per company")}</label>
 			<div class="ts-cardgrid ts-feature-cards"></div>
 		`);
 
@@ -847,11 +866,11 @@ class TaxJarSetup {
 				<div class="ts-card-b ts-cotog">
 					<div class="ts-togrow">
 						<div class="ts-field-calc"></div>
-						<div class="ts-togtext"><b>${__("Calculate sales tax")}</b><p>${__("Tax on invoices + Product Tax Category on Items.")}</p></div>
+						<div class="ts-togtext"><b>${__("Compute Taxes on Sales")}</b><p>${__("Nexus based accurate tax calculation")}</p></div>
 					</div>
 					<div class="ts-togrow">
 						<div class="ts-field-file"></div>
-						<div class="ts-togtext"><b>${__("File transactions")}</b><p>${__("Push submitted invoices to TaxJar.")}</p></div>
+						<div class="ts-togtext"><b>${__("Sync Transactions to TaxJar")}</b><p>${__("File your sales tax return with {0}", [`<a href="${AUTOFILE_DOC_URL}" target="_blank" rel="noopener noreferrer">${__("TaxJar AutoFile")}</a>`])}</p></div>
 					</div>
 				</div>
 			</div>
@@ -889,24 +908,28 @@ class TaxJarSetup {
 			.finally(() => $next.prop("disabled", false));
 	}
 
-	// ── Step 5: Nexus ───────────────────────────────────────────────
+	// ── Step 5: Sync Nexus ───────────────────────────────────────────────
 	_render_nexus() {
 		const s = this.state || {};
 		const nexusByCompany = s.nexus_by_company || {};
 
 		this.$body.html(`
-			<div class="ts-nexusaction">
-				<button class="btn btn-default ts-fetch">${__("Fetch from TaxJar")}</button>
-				<span class="ts-chip idle ts-fetchstatus">${__("Not fetched yet")}</span>
-			</div>
-			<div class="ts-nexusresult"></div>
 			<div class="alert alert-warning ts-nexusnote" role="alert">
 				${frappe.utils.icon("info", "sm")}
-				<span>${__("Manage nexus in TaxJar — fetch on demand here for changes made there, or let it update automatically every night at midnight.")}</span>
+				<span>${__("Nexus regions are fetched from TaxJar, and are updated automatically everyday at midnight. {0}", [`<a href="${TAXJAR_NEXUS_URL}" target="_blank" rel="noopener noreferrer">${__("Manage Nexus")}</a>`])}</span>
 			</div>
+			<div class="ts-nexusaction">
+				<button class="btn btn-default ts-fetch">${
+					frappe.utils.icon("refresh-cw", "sm")
+				}<span>${__("Fetch from TaxJar")}</span></button>
+				<span class="ts-chip idle ts-fetchstatus">${__("Not fetched yet")}</span>
+				<span class="ts-lastsync"></span>
+			</div>
+			<div class="ts-nexusresult"></div>
 		`);
 
 		this._render_nexus_groups(nexusByCompany);
+		this._render_last_sync(s.nexus_last_synced);
 		this.$body.find(".ts-fetch").on("click", () => this._fetch_nexus());
 
 		// Opening this step always pulls the latest — no need to remember to
@@ -929,11 +952,21 @@ class TaxJarSetup {
 			return `
 				<div class="ts-card">
 					<div class="ts-card-h"><b>${frappe.utils.escape_html(company)}</b>
-						<span class="ts-chip idle">${regions.length} ${__("regions")}</span></div>
+						<span class="ts-cardcount">${regions.length} ${
+							regions.length === 1 ? __("region") : __("regions")
+						}</span></div>
 					<div class="ts-card-b"><div class="ts-pills">${pills}</div></div>
 				</div>
 			`;
 		}).join(""));
+	}
+
+	// Blank until a sync has actually happened - "Last synced never" is noise on
+	// a first run, and the status chip beside it already says "Not fetched yet".
+	_render_last_sync(when) {
+		this.$body.find(".ts-lastsync").html(
+			when ? __("Last synced {0}", [frappe.datetime.comment_when(when)]) : ""
+		);
 	}
 
 	_fetch_nexus() {
@@ -950,6 +983,8 @@ class TaxJarSetup {
 			$status.attr("class", "ts-chip ok ts-fetchstatus")
 				.html(`<span class="ts-chip-dot"></span> ${__("Fetched {0} {1} across {2} {3}", [total, regionWord, companiesN, companyWord])}`);
 			this._render_nexus_groups(res.nexus_by_company);
+			this.state.nexus_last_synced = res.nexus_last_synced;
+			this._render_last_sync(res.nexus_last_synced);
 		}).catch(() => {
 			$status.attr("class", "ts-chip err ts-fetchstatus").text(__("Could not fetch nexus."));
 		}).finally(() => $btn.prop("disabled", false));
@@ -977,8 +1012,8 @@ class TaxJarSetup {
 		`).join("") || `<div class="text-muted small">${__("No accounts configured yet.")}</div>`;
 
 		const featureRows = companies.map((c) => `
-			<div class="ts-kv"><span>${frappe.utils.escape_html(c.company)}</span>
-				<span>${c.calculate && c.file ? __("Calculate tax · File") : c.calculate ? __("Calculate tax") : c.file ? __("File") : __("Off")}</span></div>
+			<div class="ts-kv ts-kv-company"><span>${frappe.utils.escape_html(c.company)}</span>
+				<span>${c.calculate && c.file ? __("Compute Sales Tax · Sync Transactions") : c.calculate ? __("Compute Sales Tax") : c.file ? __("Sync Transactions") : __("Off")}</span></div>
 		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;
 
 		const mode = s.api_mode || "—";
