@@ -20,6 +20,7 @@
   "company_config",
   "nexus_tab",
   "update_nexus_list_btn",
+  "nexus_last_synced",
   "nexus_html",
   "product_tax_category_section",
   "update_product_tax_category_btn",
@@ -103,6 +104,13 @@
    "fieldname": "update_nexus_list_btn",
    "fieldtype": "Button",
    "label": "Update Nexus List"
+  },
+  {
+   "fieldname": "nexus_last_synced",
+   "fieldtype": "Datetime",
+   "label": "Nexus Last Synced",
+   "read_only": 1,
+   "hidden": 1
   },
   {
    "fieldname": "nexus_html",

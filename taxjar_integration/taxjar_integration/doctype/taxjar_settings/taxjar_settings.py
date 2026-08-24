@@ -47,6 +47,7 @@ class TaxJarSettings(Document):
 		enable_taxjar_logging: DF.Check
 		log_retention_days: DF.Int
 		nexus: DF.Table[TaxJarNexus]
+		nexus_last_synced: DF.Datetime | None
 		setup_complete: DF.Check
 		table_hvjw: DF.Table[TaxJarAPICredential]
 		taxjar_enabled: DF.Check
@@ -160,6 +161,7 @@ class TaxJarSettings(Document):
 					"country_code": country_code,
 				})
 
+		self.nexus_last_synced = frappe.utils.now()
 		self.save()
 
 	@frappe.whitelist()
@@ -309,6 +311,12 @@ def _make_status_fields(insert_after_tab, allow_on_submit=False):
 		("taxjar_product_taxable_reason", "Small Text", None, None),
 		("taxjar_ship_from", "Small Text", None, None),
 		("taxjar_ship_to", "Small Text", None, None),
+		# TaxJar's own tax_source off the /v2/taxes response: "origin" or
+		# "destination", null where there is no nexus to source anything from.
+		# Per transaction, not per company - a handful of states are
+		# origin-sourced for intrastate sales only, so the same customer can be
+		# sourced either way depending on where the goods ship.
+		("taxjar_tax_source", "Data", None, None),
 		("taxjar_addresses_section", "Section Break", "Addresses", None),
 		("taxjar_addresses_html", "HTML", None, None),
 		("taxjar_status_section", "Section Break", "Tax Applicability Matrix", None),
@@ -318,7 +326,7 @@ def _make_status_fields(insert_after_tab, allow_on_submit=False):
 	prev = insert_after_tab
 	for fieldname, fieldtype, label, default in _fields:
 		d = dict(fieldname=fieldname, fieldtype=fieldtype, insert_after=prev)
-		is_data = fieldtype in ("Check", "Small Text", "Select")
+		is_data = fieldtype in ("Check", "Data", "Small Text", "Select")
 		if is_data:
 			d["hidden"] = 1
 			d["read_only"] = 1
@@ -376,43 +384,26 @@ _TRANSACTION_BREAKDOWN_FIELDS = [
 	),
 ]
 
-_ITEM_BREAKDOWN_FIELDS = [
-	dict(
-		fieldname="taxjar_item_tax_section",
-		fieldtype="Section Break",
-		insert_after="taxable_amount",
-		label="TaxJar Tax Detail",
-		collapsible=1,
-		depends_on="eval: doc.taxjar_item_breakdown_json",
-	),
-	dict(
-		fieldname="taxjar_item_breakdown_json",
-		fieldtype="Long Text",
-		insert_after="taxjar_item_tax_section",
-		hidden=1,
-		read_only=1,
-	),
-	dict(
-		fieldname="taxjar_item_breakdown_html",
-		fieldtype="HTML",
-		insert_after="taxjar_item_breakdown_json",
-		read_only=1,
-	),
-]
-
-
-def _item_tax_fields(*, allow_breakdown_on_submit=False):
+def _item_tax_fields():
 	"""Custom fields shared by the Sales Invoice / Quotation / Sales Order Item tables.
 
-	Sales Invoice needs allow_on_submit on the breakdown JSON (it is written when the
-	invoice is recalculated after submission); the other two item tables do not.
+	Only fields the tax engine actually reads live here. Both are inputs to the
+	TaxJar payload, not decoration:
+
+	- product_tax_category feeds product_tax_code on every tax_for_order and
+	  create_order call. It is read_only and fetched from the Item master: the
+	  stored copy is what makes a retried sync (retry_failed_taxjar_syncs, days
+	  after submit) send the category the tax was actually calculated with,
+	  rather than whatever the Item says by then.
+	- tax_collectable is read back as the per-line sales_tax on create_order
+	  once the invoice is submitted (get_line_item_dict).
+
+	Both are print_hide: a child field without it becomes a column in the item
+	table of every printed document, which is how core ERPNext treats its own
+	net_amount and item_tax_template. tax_collectable is also no_copy so a
+	quotation's tax cannot ride into a sales order, invoice, or credit note as
+	a stale figure the user cannot edit.
 	"""
-	breakdown = _ITEM_BREAKDOWN_FIELDS
-	if allow_breakdown_on_submit:
-		breakdown = [
-			{**f, "allow_on_submit": 1} if f["fieldname"] == "taxjar_item_breakdown_json" else f
-			for f in _ITEM_BREAKDOWN_FIELDS
-		]
 	return [
 		dict(
 			fieldname="product_tax_category",
@@ -421,6 +412,8 @@ def _item_tax_fields(*, allow_breakdown_on_submit=False):
 			options="Product Tax Category",
 			label="Product Tax Category",
 			fetch_from="item_code.product_tax_category",
+			read_only=1,
+			print_hide=1,
 		),
 		dict(
 			fieldname="tax_collectable",
@@ -428,24 +421,18 @@ def _item_tax_fields(*, allow_breakdown_on_submit=False):
 			insert_after="net_amount",
 			label="Tax Collectable",
 			read_only=1,
+			no_copy=1,
+			print_hide=1,
 			options="currency",
 		),
-		dict(
-			fieldname="taxable_amount",
-			fieldtype="Currency",
-			insert_after="tax_collectable",
-			label="Taxable Amount",
-			read_only=1,
-			options="currency",
-		),
-		*breakdown,
 	]
 
 
 def _transaction_exemption_fields():
-	"""Per-transaction TaxJar exemption override, in the Details tab's Taxes and
-	Charges section - the checkbox after Shipping Rule, the reason Select after
-	Incoterm (their respective columns' own last field).
+	"""Per-transaction TaxJar exemption override, in its own Details-tab section
+	below Net Total. Previously the two fields were scattered - the checkbox
+	after Shipping Rule, the reason Select after Incoterm - which put a question
+	and its answer in different columns of an unrelated section.
 
 	Unlike ERPNext's own regional exempt_from_sales_tax checkbox this replaces
 	(see hide_legacy_exempt_from_sales_tax()), ticking this one does NOT skip
@@ -455,26 +442,95 @@ def _transaction_exemption_fields():
 	"""
 	return [
 		dict(
+			fieldname="taxjar_exemption_section",
+			fieldtype="Section Break",
+			insert_after="net_total",
+			label="TaxJar Exemptions",
+		),
+		dict(
 			fieldname="taxjar_transaction_exempt",
 			fieldtype="Check",
-			insert_after="shipping_rule",
-			label="Is transaction exempt from sales taxes?",
+			insert_after="taxjar_exemption_section",
+			label="Is transaction exempt from sales tax?",
 		),
 		dict(
 			fieldname="taxjar_transaction_exemption_type",
 			fieldtype="Select",
-			insert_after="incoterm",
-			label="Reason for Exemption",
+			insert_after="taxjar_transaction_exempt",
+			label="Reason for exemption?",
 			options="\nWholesale\nGovernment\nOther",
-			depends_on="eval: doc.taxjar_transaction_exempt",
-			mandatory_depends_on="eval: doc.taxjar_transaction_exempt",
+			# Explicit == 1 rather than a bare truthiness check: an unset Check
+			# reads back as undefined on a new doc, and "== 1" is unambiguous
+			# about which value shows the field and makes it mandatory.
+			depends_on="eval: doc.taxjar_transaction_exempt == 1",
+			mandatory_depends_on="eval: doc.taxjar_transaction_exempt == 1",
+		),
+	]
+
+
+def _marketplace_fields():
+	"""Sales Invoice only: an invoice a marketplace already raised and priced,
+	sent to ERPNext purely for the books.
+
+	The two skip flags exist because such an invoice must not be re-priced or
+	re-filed - the marketplace is the seller of record and has already collected
+	and remitted the tax. Both are gated on the marketplace checkbox rather than
+	standing alone, so they cannot be set on an ordinary invoice.
+
+	Fields only, no behaviour: nothing reads these yet.
+	"""
+	is_marketplace = "eval: doc.taxjar_is_marketplace_invoice == 1"
+
+	return [
+		dict(
+			fieldname="taxjar_marketplace_section",
+			fieldtype="Section Break",
+			insert_after="taxjar_status_html",
+			label="Marketplace",
+			description=(
+				"Invoices which are already generated on marketplace & are sent "
+				"to ERPNext for accounting"
+			),
+		),
+		dict(
+			fieldname="taxjar_is_marketplace_invoice",
+			fieldtype="Check",
+			insert_after="taxjar_marketplace_section",
+			label="Is marketplace generated invoice?",
+		),
+		dict(
+			fieldname="taxjar_marketplace_platform",
+			fieldtype="Data",
+			insert_after="taxjar_is_marketplace_invoice",
+			label="Marketplace Platform Name",
+			depends_on=is_marketplace,
+			mandatory_depends_on=is_marketplace,
+		),
+		dict(
+			fieldname="taxjar_marketplace_cb",
+			fieldtype="Column Break",
+			insert_after="taxjar_marketplace_platform",
+		),
+		dict(
+			fieldname="taxjar_skip_tax_calculation",
+			fieldtype="Check",
+			insert_after="taxjar_marketplace_cb",
+			label="Skip sales tax calculation?",
+			depends_on=is_marketplace,
+		),
+		dict(
+			fieldname="taxjar_skip_transaction_sync",
+			fieldtype="Check",
+			insert_after="taxjar_skip_tax_calculation",
+			label="Skip sending transaction to TaxJar?",
+			depends_on=is_marketplace,
 		),
 	]
 
 
 def make_custom_fields(update=True):
 	custom_fields = {
-		"Sales Invoice Item": _item_tax_fields(allow_breakdown_on_submit=True),
+		"Sales Invoice Item": _item_tax_fields(),
 		"Quotation Item": _item_tax_fields(),
 		"Sales Order Item": _item_tax_fields(),
 		"Item": [
@@ -523,17 +579,20 @@ def make_custom_fields(update=True):
 				label="TaxJar",
 			),
 			*_make_status_fields("taxjar_tab", allow_on_submit=True),
+			*_marketplace_fields(),
 			dict(
 				fieldname="taxjar_sync_section",
 				fieldtype="Section Break",
-				insert_after="taxjar_status_html",
+				# Chained behind the marketplace section, which claims
+				# taxjar_status_html - two fields cannot share one insert_after.
+				insert_after="taxjar_skip_transaction_sync",
 				label="Transaction Sync",
 				allow_on_submit=1,
 			),
 			dict(
 				# Draft docs never reach set_sales_tax's sync path (see
 				# enqueue_taxjar_sync's on_submit hook) - showing the Sync Status
-				# Select at its "Not Applicable" default there reads as "TaxJar
+				# Select at its "Excluded" default there reads as "TaxJar
 				# doesn't apply to this invoice" rather than "not submitted yet",
 				# so this replaces the Select/Last Synced fields entirely while
 				# a draft, same message the sidebar pill shows for consistency.
@@ -548,8 +607,8 @@ def make_custom_fields(update=True):
 				fieldtype="Select",
 				insert_after="taxjar_sync_draft_message_html",
 				label="Sync Status",
-				options="Not Applicable\nQueued\nSynced\nFailed",
-				default="Not Applicable",
+				options="Excluded\nQueued\nSynced\nFailed",
+				default="Excluded",
 				allow_on_submit=1,
 				in_list_view=1,
 				read_only=1,
@@ -574,17 +633,19 @@ def make_custom_fields(update=True):
 				depends_on="eval: doc.docstatus === 1",
 			),
 			dict(
-				fieldname="taxjar_response_section",
-				fieldtype="Section Break",
+				# Set from classify_taxjar_error() when a sync fails, and read
+				# only by retry_failed_taxjar_syncs() to decide what the 15-min
+				# cron may re-send. Hidden: "we will try again" is already said
+				# in Sync Error, in words, and a second half-explained checkbox
+				# on the form would only invite people to tick it.
+				fieldname="taxjar_sync_retryable",
+				fieldtype="Check",
 				insert_after="taxjar_last_synced",
-				label="TaxJar Response",
-				depends_on="eval: doc.taxjar_sync_status == 'Synced'",
-			),
-			dict(
-				fieldname="taxjar_response_html",
-				fieldtype="HTML",
-				insert_after="taxjar_response_section",
-				label="TaxJar Response",
+				label="TaxJar Retry Pending",
+				read_only=1,
+				hidden=1,
+				no_copy=1,
+				allow_on_submit=1,
 			),
 		],
 		"Customer": [
@@ -663,6 +724,16 @@ def make_custom_fields(update=True):
 				read_only=1,
 				depends_on="eval: doc.taxjar_customer_sync_status == 'Failed'",
 			),
+			dict(
+				# Customer-side twin of taxjar_sync_retryable - see its comment.
+				fieldname="taxjar_customer_sync_retryable",
+				fieldtype="Check",
+				insert_after="taxjar_customer_sync_error",
+				label="TaxJar Retry Pending",
+				read_only=1,
+				hidden=1,
+				no_copy=1,
+			),
 		],
 	}
 	create_custom_fields(custom_fields, update=update)
@@ -687,10 +758,18 @@ def hide_legacy_exempt_from_sales_tax():
 	checkbox. The field itself is still read by check_sales_tax_exemption() as
 	a safety net for any already-set old records; only hidden here so nobody
 	sets it fresh once TaxJar is installed.
+
+	Written unconditionally, without first checking that the column exists.
+	ERPNext only adds the field once a Company's country is United States, so on
+	a site where TaxJar is installed first there is nothing to hide yet - and
+	skipping meant the checkbox turned up unhidden the moment a US company was
+	created, and stayed that way until the next migrate. A Property Setter that
+	names a field which does not exist is inert: apply_property_setters() matches
+	on fieldname and skips whatever it cannot find (frappe/model/meta.py:441-445),
+	so writing it up front simply takes effect once ERPNext creates the field.
 	"""
 	for doctype in _EXEMPT_FROM_SALES_TAX_DOCTYPES:
-		if frappe.db.has_column(doctype, "exempt_from_sales_tax"):
-			make_property_setter(doctype, "exempt_from_sales_tax", "hidden", "1", "Check")
+		make_property_setter(doctype, "exempt_from_sales_tax", "hidden", "1", "Check")
 
 
 _TAXES_FIELD_DOCTYPES = ("Quotation", "Sales Order", "Sales Invoice")

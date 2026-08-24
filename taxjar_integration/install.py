@@ -58,7 +58,7 @@ GUIDED_SETUP_ALERT_HTML = """
 	</svg>
 	<div>
 		<div style="font-weight: 600; font-size: 13px; color: var(--heading-color);">
-			New to TaxJar Integration?
+			Configure TaxJar Integration
 		</div>
 		<div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">
 			<a href="/app/taxjar-setup" style="color: var(--blue-600); font-weight: 500;">
@@ -67,16 +67,6 @@ GUIDED_SETUP_ALERT_HTML = """
 		</div>
 	</div>
 </div>
-""".strip()
-
-# Mirrors _set_setup_intro()'s own logic (taxjar_settings.js) for retiring its
-# banner on the Settings form: once guided setup is done, stop nagging.
-GUIDED_SETUP_ALERT_SCRIPT = """
-frappe.db.get_single_value("TaxJar Settings", "setup_complete").then((complete) => {
-	if (complete) {
-		root_element.style.display = "none";
-	}
-});
 """.strip()
 
 
@@ -138,16 +128,15 @@ def add_guided_setup_alert():
 	"""
 	if frappe.db.exists("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK):
 		block = frappe.get_doc("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK)
-		if block.html != GUIDED_SETUP_ALERT_HTML or block.script != GUIDED_SETUP_ALERT_SCRIPT:
+		if block.html != GUIDED_SETUP_ALERT_HTML or block.script:
 			block.html = GUIDED_SETUP_ALERT_HTML
-			block.script = GUIDED_SETUP_ALERT_SCRIPT
+			block.script = ""
 			block.save(ignore_permissions=True)
 	else:
 		frappe.get_doc({
 			"doctype": "Custom HTML Block",
 			"name": GUIDED_SETUP_ALERT_BLOCK,
 			"html": GUIDED_SETUP_ALERT_HTML,
-			"script": GUIDED_SETUP_ALERT_SCRIPT,
 			"private": 0,
 		}).insert(ignore_permissions=True)
 
