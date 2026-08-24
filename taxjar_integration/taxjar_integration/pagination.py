@@ -1,11 +1,28 @@
 import frappe
 
-PAGE_SIZE = 50
+# The tables render at their natural height with no inner scrollbar, so the
+# default is a page that stays roughly a screenful.
+PAGE_SIZE = 20
+PAGE_SIZES = (20, 50, 100)
 
 
 def parse_filters(filters):
 	"""Normalise the filters argument from a whitelisted page method."""
 	return frappe.parse_json(filters) if filters else {}
+
+
+def parse_page_size(page_size):
+	"""Clamp a caller-supplied page size to the sizes the UI offers.
+
+	These are whitelisted endpoints, so the value is attacker-controlled -
+	without the clamp a crafted request could ask for every row in the table.
+	"""
+	try:
+		page_size = int(page_size)
+	except (TypeError, ValueError):
+		return PAGE_SIZE
+
+	return page_size if page_size in PAGE_SIZES else PAGE_SIZE
 
 
 def paginated_response(items_key, items, total, page, page_size=PAGE_SIZE):
