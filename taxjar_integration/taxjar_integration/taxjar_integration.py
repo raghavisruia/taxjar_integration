@@ -287,7 +287,7 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	client = get_client(doc.company)
 	if not client:
-		_set_sync_status(invoice_name, "Failed", error="TaxJar client is not configured")
+		_set_sync_status(invoice_name, "Failed", error="TaxJar is not configured for this company.", retryable=True)
 		return
 
 	# Matched by account_head, not description - the row's description is
@@ -301,7 +301,12 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	tax_dict = get_tax_data(doc)
 	if not tax_dict:
-		_set_sync_status(invoice_name, "Failed", error="No TaxJar payload generated")
+		_set_sync_status(
+			invoice_name,
+			"Failed",
+			error="No TaxJar payload could be built for this document - check the company's TaxJar configuration.",
+			retryable=True,
+		)
 		log_taxjar_call(action="create_transaction", status="skipped", error="No TaxJar payload generated", context=ctx)
 		return
 
@@ -325,17 +330,8 @@ def sync_transaction_to_taxjar(invoice_name):
 			log_taxjar_call(action="create_order", status="success", payload=tax_dict, response=response, context=ctx)
 
 		_set_sync_status(invoice_name, "Synced")
-	except taxjar.exceptions.TaxJarConnectionError:
-		log_taxjar_call(action="create_transaction", status="error", payload=tax_dict, error="TaxJar API is unreachable", context=ctx)
-		_set_sync_status(invoice_name, "Failed", error="TaxJar API is unreachable")
-	except taxjar.exceptions.TaxJarResponseError as err:
-		error_msg = sanitize_error_response(err)
-		log_taxjar_call(action="create_transaction", status="error", payload=tax_dict, error=getattr(err, "full_response", str(err)), context=ctx)
-		_set_sync_status(invoice_name, "Failed", error=error_msg)
-	except Exception:
-		log_taxjar_call(action="create_transaction", status="error", payload=tax_dict, error=traceback.format_exc(), context=ctx)
-		_set_sync_status(invoice_name, "Failed", error=traceback.format_exc())
-		_get_taxjar_logger().error(traceback.format_exc())
+	except Exception as err:
+		_record_sync_failure(err, "create_transaction", tax_dict, ctx, invoice_name)
 
 
 def delete_transaction_from_taxjar(invoice_name):
@@ -345,7 +341,7 @@ def delete_transaction_from_taxjar(invoice_name):
 
 	client = get_client(doc.company)
 	if not client:
-		_set_sync_status(invoice_name, "Failed", error="TaxJar client is not configured")
+		_set_sync_status(invoice_name, "Failed", error="TaxJar is not configured for this company.", retryable=True)
 		return
 
 	is_refund = doc.is_return
@@ -361,17 +357,19 @@ def delete_transaction_from_taxjar(invoice_name):
 			response = client.delete_order(doc.name, params=provider_params)
 		log_taxjar_call(action=action, status="success", payload=payload, response=response, context=ctx)
 		_set_sync_status(invoice_name, "Synced")
-	except taxjar.exceptions.TaxJarConnectionError:
-		log_taxjar_call(action=action, status="error", payload=payload, error="TaxJar API is unreachable", context=ctx)
-		_set_sync_status(invoice_name, "Failed", error="TaxJar API is unreachable")
 	except taxjar.exceptions.TaxJarResponseError as err:
-		error_msg = sanitize_error_response(err)
-		log_taxjar_call(action=action, status="error", payload=payload, error=getattr(err, "full_response", str(err)), context=ctx)
-		_set_sync_status(invoice_name, "Failed", error=error_msg)
-	except Exception:
-		log_taxjar_call(action=action, status="error", payload=payload, error=traceback.format_exc(), context=ctx)
-		_set_sync_status(invoice_name, "Failed", error=traceback.format_exc())
-		_get_taxjar_logger().error(traceback.format_exc())
+		full = getattr(err, "full_response", None)
+		if isinstance(full, dict) and full.get("status_code") == 404:
+			# Already gone from TaxJar, so the cancellation has nothing left to
+			# undo. Read as done rather than Failed - a 404 here can never clear
+			# on retry, and delete_customer_from_taxjar() already treats it the
+			# same way.
+			log_taxjar_call(action=action, status="success", payload=payload, error="404 - already absent in TaxJar", context=ctx)
+			_set_sync_status(invoice_name, "Synced")
+			return
+		_record_sync_failure(err, action, payload, ctx, invoice_name)
+	except Exception as err:
+		_record_sync_failure(err, action, payload, ctx, invoice_name)
 
 
 def _publish_transaction_update(invoice_name, status):
@@ -396,19 +394,28 @@ def _publish_transaction_update(invoice_name, status):
 	)
 
 
-def _set_sync_status(invoice_name, status, error=None):
+def _set_sync_status(invoice_name, status, error=None, retryable=False):
 	"""Update TaxJar sync status fields on a Sales Invoice via db_set, then
 	notify any open form and the Transaction Sync page via realtime so neither
 	sits showing a stale status until manually reloaded. This is reached only
 	from async contexts (the background sync job, the 15-min cron retry, bulk
 	retry from the Transactions page) - the synchronous button-click path
 	already reloads via its own frappe.call callback and doesn't need this.
+
+	``retryable`` records whether the failure is one a later, identical attempt
+	could clear - see classify_taxjar_error(). It is what retry_failed_taxjar_syncs()
+	filters on, so a permanently-rejected document stops being re-sent every 15
+	minutes and waits for the Retry button instead.
 	"""
+	if error and retryable:
+		error = f"{error} Automatic retry is scheduled."
+
 	frappe.db.set_value(
 		"Sales Invoice", invoice_name,
 		{
 			"taxjar_sync_status": status,
 			"taxjar_sync_error": error or "",
+			"taxjar_sync_retryable": 1 if status == "Failed" and retryable else 0,
 			"taxjar_last_synced": frappe.utils.now() if status == "Synced" else None,
 		},
 		update_modified=False,
@@ -423,65 +430,20 @@ def _set_sync_status(invoice_name, status, error=None):
 	_publish_transaction_update(invoice_name, status)
 
 
-@frappe.whitelist()
-def get_taxjar_response_html(invoice_name):
-	"""Return HTML table rendering of the latest successful TaxJar API Log for an invoice."""
-	if not frappe.db.exists("DocType", "TaxJar API Log"):
-		return ""
+def _record_sync_failure(err, action, payload, ctx, invoice_name):
+	"""One funnel for every exception a transaction sync can raise: classify it,
+	send the technical detail to TaxJar API Log, and leave a single readable
+	sentence on the invoice.
 
-	log_name = frappe.db.get_value(
-		"TaxJar API Log",
-		filters={
-			"reference_doctype": "Sales Invoice",
-			"reference_name": invoice_name,
-			"action": ("in", ("create_order", "create_refund", "show_order", "show_refund")),
-			"status": "success",
-		},
-		fieldname="name",
-		order_by="creation desc",
-	)
-
-	if not log_name:
-		return ""
-
-	response_json = frappe.db.get_value("TaxJar API Log", log_name, "response")
-	if not response_json:
-		return ""
-
-	try:
-		data = json.loads(response_json)
-	except (json.JSONDecodeError, TypeError):
-		return ""
-
-	resp = data.get("__dict__", data) if isinstance(data, dict) else data
-
-	rows = []
-	field_map = [
-		("Transaction ID", "transaction_id"),
-		("Transaction Date", "transaction_date"),
-		("Amount", "amount"),
-		("Sales Tax", "sales_tax"),
-		("Shipping", "shipping"),
-		("From State", "from_state"),
-		("To State", "to_state"),
-		("Transaction Reference ID", "transaction_reference_id"),
-		("Provider", "provider"),
-	]
-
-	for label, key in field_map:
-		val = resp.get(key) if isinstance(resp, dict) else getattr(resp, key, None)
-		if val is not None and val != "":
-			rows.append(f"<tr><td><b>{frappe.utils.escape_html(label)}</b></td>"
-						f"<td>{frappe.utils.escape_html(str(val))}</td></tr>")
-
-	if not rows:
-		return ""
-
-	return (
-		'<table class="table table-bordered table-sm">'
-		+ "".join(rows)
-		+ "</table>"
-	)
+	Replaces the three per-call-site except branches this used to need, whose
+	catch-all wrote a raw traceback into Sync Error - a field users read on the
+	form. Tracebacks now stop at the log, where they are useful.
+	"""
+	info = classify_taxjar_error(err)
+	log_taxjar_call(action=action, status="error", payload=payload, error=info["log_detail"], context=ctx)
+	if info["kind"] == "unknown":
+		_get_taxjar_logger().error(info["log_detail"])
+	_set_sync_status(invoice_name, "Failed", error=info["message"], retryable=info["retryable"])
 
 
 @frappe.whitelist()
@@ -564,7 +526,7 @@ def delete_transaction_manual(invoice_name):
 		else:
 			response = client.delete_order(doc.name, params=provider_params)
 		log_taxjar_call(action=action, status="success", response=response, context=ctx)
-		_set_sync_status(invoice_name, "Not Applicable")
+		_set_sync_status(invoice_name, "Excluded")
 		return {"success": True}
 	except Exception as e:
 		log_taxjar_call(action=action, status="error", error=str(e), context=ctx)
@@ -685,10 +647,10 @@ def get_state_code(address, location):
 def _get_item_product_tax_category(item):
 	"""Return the product tax category for a transaction line item.
 
-	Prefer the value already on the line item (populated by fetch_from on Sales
-	Invoice Item). Fall back to the Item master for doctypes whose item table
-	doesn't carry the custom field (Quotation Item, Sales Order Item) and for
-	programmatically created documents where the client-side fetch_from never fired.
+	Prefer the value already on the line item - all three item tables carry the
+	field, populated by fetch_from off item_code. Fall back to the Item master
+	for programmatically created documents whose rows were never saved through
+	the fetch, and for line items with no item_code at all.
 	"""
 	return item.get("product_tax_category") or (
 		frappe.db.get_value("Item", item.get("item_code"), "product_tax_category", cache=True)
@@ -811,23 +773,28 @@ def set_sales_tax(doc, method):
 			idx = cint(item.id) - 1
 			if 0 <= idx < len(doc.items):
 				tc = flt(item.tax_collectable)
-				ta = flt(item.taxable_amount)
 				if usd_rate:
 					tc = flt(tc / usd_rate)
-					ta = flt(ta / usd_rate)
 				doc.get("items")[idx].tax_collectable = tc
-				doc.get("items")[idx].taxable_amount = ta
 
 		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
 
 		product_status, product_reason = _compute_product_taxable(doc)
 		to_state = tax_dict.get("to_state", "")
-		exemption_type, exemption_source = _get_effective_exemption(doc)
-		customer_taxable = not exemption_type
-		if exemption_source == "transaction":
-			customer_reason = f"Overridden ({exemption_type})"
-		elif exemption_type:
-			customer_reason = f"Customer is exempt ({exemption_type})"
+		# The status matrix reports what the CUSTOMER MASTER says, not the
+		# effective outcome: a transaction-level override used to flip this to
+		# "No", hiding the fact that the customer themselves is taxable. The
+		# override is a separate, visible fact (taxjar_transaction_exempt), and
+		# the card appends it rather than replacing the answer.
+		#
+		# This is display only - _get_effective_exemption() still decides what is
+		# actually sent to TaxJar, and its precedence is unchanged.
+		customer_exemption_type = _get_customer_exemption_type(doc)
+		customer_taxable = not customer_exemption_type
+		if customer_exemption_type:
+			customer_reason = f"Customer is exempt ({customer_exemption_type})"
+		elif _has_transaction_exemption(doc):
+			customer_reason = "Taxable, but transaction is marked as exempt"
 		else:
 			customer_reason = "Taxable"
 		_set_tax_status_fields(doc,
@@ -838,6 +805,10 @@ def set_sales_tax(doc, method):
 			ship_from=_format_address_short(tax_dict, "from"),
 			ship_to=_format_address_short(tax_dict, "to"),
 			freight_taxable=bool(tax_data.freight_taxable),
+			# "" not None: _set_tax_status_fields skips None, so a document that
+			# was sourced once and now calculates without a tax_source would
+			# keep the old value. The empty string clears it.
+			tax_source=(tax_data.tax_source or ""),
 		)
 
 		doc.run_method("calculate_taxes_and_totals")
@@ -876,15 +847,20 @@ def _clear_breakdown_data(doc):
 		doc.taxjar_breakdown_json = None
 	if hasattr(doc, "taxjar_freight_taxable"):
 		doc.taxjar_freight_taxable = 0
+	# tax_collectable is read back as the per-line sales_tax on create_order, and
+	# is read_only - left behind it shows tax on every line of a document that
+	# now carries none (exempt customer, no nexus, TaxJar switched off) with no
+	# way for the user to correct it.
 	for item in (doc.get("items") or []):
-		if hasattr(item, "taxjar_item_breakdown_json"):
-			item.taxjar_item_breakdown_json = None
+		if hasattr(item, "tax_collectable"):
+			item.tax_collectable = 0
 
 
 def _set_tax_status_fields(doc, *, has_nexus=None, nexus_reason=None,
                            customer_taxable=None, customer_reason=None,
                            product_taxable=None, product_reason=None,
-                           ship_from=None, ship_to=None, freight_taxable=None):
+                           ship_from=None, ship_to=None, freight_taxable=None,
+                           tax_source=None):
 	"""Populate persistent TaxJar status fields on a transaction document."""
 	_pairs = [
 		("taxjar_has_nexus", 1 if has_nexus else 0 if has_nexus is not None else None),
@@ -896,6 +872,7 @@ def _set_tax_status_fields(doc, *, has_nexus=None, nexus_reason=None,
 		("taxjar_ship_from", ship_from),
 		("taxjar_ship_to", ship_to),
 		("taxjar_freight_taxable", 1 if freight_taxable else 0 if freight_taxable is not None else None),
+		("taxjar_tax_source", tax_source),
 	]
 	for field, value in _pairs:
 		if value is not None and hasattr(doc, field):
@@ -1112,24 +1089,6 @@ def _store_breakdown_data(tax_data, doc, usd_rate=None):
 	if hasattr(doc, "taxjar_breakdown_json"):
 		doc.taxjar_breakdown_json = json.dumps(breakdown_data)
 
-	for li_data in breakdown_data.get("line_items", []):
-		item_idx = cint(li_data["id"]) - 1
-		if 0 <= item_idx < len(doc.items):
-			item = doc.items[item_idx]
-			if hasattr(item, "taxjar_item_breakdown_json"):
-				item_json = dict(li_data)
-				if usd_rate:
-					usd_li = next(
-						(u for u in breakdown_data["usd"]["line_items"] if u["id"] == li_data["id"]),
-						None,
-					)
-					if usd_li:
-						item_json["usd"] = usd_li
-					item_json["currency"] = currency
-					item_json["base_currency"] = "USD"
-					item_json["exchange_rate"] = usd_rate
-				item.taxjar_item_breakdown_json = json.dumps(item_json)
-
 
 def get_taxjar_breakdown_html(doc):
 	"""Render the TaxJar Tax Breakdown table (plus, for multi-currency docs,
@@ -1160,6 +1119,14 @@ def get_taxjar_breakdown_html(doc):
 		dict(
 			data=data,
 			currency=(data or {}).get("currency") or getattr(doc, "currency", None) or "USD",
+			# With no nexus there is no breakdown to render and never will be,
+			# so the empty state says why rather than reporting an absence.
+			# nexus_reason already reads "No nexus in NJ" (see set_sales_tax).
+			no_nexus_reason=(
+				getattr(doc, "taxjar_nexus_reason", None)
+				if not getattr(doc, "taxjar_has_nexus", None)
+				else None
+			),
 		),
 	)
 	# Jinja's {% if/for %} control tags leave behind their surrounding blank
@@ -1252,25 +1219,102 @@ def check_sales_tax_exemption(doc, company_config):
 
 
 def _get_customer_exemption_type(doc):
-	"""Return the customer's taxjar_exemption_type if it marks them as exempt
-	(anything other than blank or "Non Exempt"), else None.
+	"""Return the customer's master exemption type where it applies to THIS
+	document's destination, else None.
 
-	Used only to populate the "Is the customer taxable?" status display in
-	set_sales_tax() - the tax amount itself always stays TaxJar's own
-	computation. Region-scoped exemption (via exempt_regions) is TaxJar's job
-	based on customer_id, not replicated here - see check_sales_tax_exemption()'s
-	own docstring. A customer can have an exemption_type set without the blunt
-	exempt_from_sales_tax checkbox being ticked (that's the whole point of the
-	TaxJar-native exemption fields), so this still runs for documents that
-	reach the API call - it just corrects what the status matrix says about it.
+	Feeds both the "Is the customer taxable?" card and, via
+	_get_effective_exemption(), the exemption_type sent to TaxJar. Region
+	scoping lives in _customer_master_exemption() - see its docstring for why
+	the destination matters.
 	"""
-	customer_name = _get_customer_name(doc)
-	if not customer_name or not frappe.db.has_column("Customer", "taxjar_exemption_type"):
+	return _customer_master_exemption(_get_customer_name(doc), _destination_address(doc))[0]
+
+
+def _has_transaction_exemption(doc):
+	"""Whether the per-transaction override is both ticked and given a reason.
+
+	The reason is mandatory alongside the checkbox, but a doc can be inspected
+	mid-edit, so both are required before the override counts as real.
+	"""
+	return bool(
+		getattr(doc, "taxjar_transaction_exempt", None)
+		and getattr(doc, "taxjar_transaction_exemption_type", None)
+	)
+
+
+def _destination_address(doc):
+	"""Ship-to if set, else bill-to - the same fallback get_shipping_address_details
+	uses to decide where the sale is taxed."""
+	return getattr(doc, "shipping_address_name", None) or getattr(doc, "customer_address", None)
+
+
+def _address_state(address):
+	"""Destination state code for an Address, or None if it cannot be read."""
+	if not address or not frappe.db.exists("Address", address):
 		return None
-	exemption_type = frappe.db.get_value("Customer", customer_name, "taxjar_exemption_type", cache=True)
+	row = frappe.db.get_value("Address", address, ["taxjar_state_code", "state"], as_dict=True) or {}
+	return (row.get("taxjar_state_code") or row.get("state") or "").strip().upper() or None
+
+
+def _customer_master_exemption(customer, address=None):
+	"""Return (exemption_type, state) for the customer's master exemption where
+	it applies to this destination, else (None, None).
+
+	Region-scoped, because a customer can be exempt in some states and not
+	others (taxjar_exempt_regions). TaxJar applies that scoping itself off the
+	matched customer_id, so this exists to agree with it: without it a customer
+	exempt only in Florida read as exempt on a New Jersey sale, which both
+	mis-stated the status matrix and suppressed the per-transaction override
+	that should have taken over there (see _get_effective_exemption).
+
+	No regions listed means exempt everywhere - that is how TaxJar reads an
+	empty exempt_regions. A destination we cannot read falls back the same way,
+	deliberately: better to keep honouring a customer's standing exemption than
+	to start taxing them because an address is missing a state.
+	"""
+	if not customer or not frappe.db.has_column("Customer", "taxjar_exemption_type"):
+		return None, None
+
+	exemption_type = frappe.db.get_value("Customer", customer, "taxjar_exemption_type", cache=True)
 	if not exemption_type or exemption_type == "Non Exempt":
-		return None
-	return exemption_type
+		return None, None
+
+	regions = [
+		(r.state or "").strip().upper()
+		for r in frappe.get_all(
+			"TaxJar Customer Exempt Region",
+			filters={"parent": customer, "parenttype": "Customer"},
+			fields=["state"],
+		)
+	]
+	if not regions:
+		return exemption_type, None
+
+	destination = _address_state(address)
+	if not destination:
+		return exemption_type, None
+
+	if destination in regions:
+		return exemption_type, destination
+
+	return None, None
+
+
+@frappe.whitelist()
+def get_region_exemption(customer, address=None):
+	"""Whether the customer's master exemption covers this destination.
+
+	Read by the form (apply_region_exemption in taxjar_utils.js) to pre-set and
+	lock the per-transaction override, so a sale that is already exempt says so
+	before it is saved. Changes no tax on its own.
+	"""
+	frappe.has_permission("Customer", "read", throw=True)
+
+	exemption_type, state = _customer_master_exemption(customer, address)
+	if not exemption_type:
+		return {}
+
+	return {"exemption_type": exemption_type, "state": state}
 
 
 def _get_effective_exemption(doc):
@@ -1623,22 +1667,198 @@ def _get_taxjar_customer_id(doc):
 	return taxjar_customer_id or _make_safe_customer_id(customer_name)
 
 
-def sanitize_error_response(response):
-	full = getattr(response, "full_response", None) or {}
-	detail = full.get("detail") or "An unexpected error occurred. Please try again."
-	detail = detail.replace("_", " ")
+# ── TaxJar error classification ──────────────────────────────────────────────
 
-	sanitized_responses = {
-		"to zip": "Zipcode",
-		"to city": "City",
-		"to state": "State",
-		"to country": "Country",
+# python-taxjar collapses every failure into four exception classes
+# (taxjar/exceptions.py) and carries no status-code table of its own, so the
+# taxonomy below is ours. The status it does surface is the one TaxJar puts in
+# the JSON error body ("status"), which TaxJarResponse.raise_response_error()
+# re-exposes as full_response["status_code"] - not the HTTP status line.
+#
+# Retryable means "this exact request could succeed later, unchanged": transport
+# failures, rate limiting, and TaxJar-side outages. Everything else needs a human
+# to change something first, and re-sending it on a timer only burns API quota
+# while rewriting the document's Sync Error with the same text - a duplicate
+# transaction_id is never going to stop being a duplicate. retry_failed_taxjar_syncs()
+# only picks up documents this classification flagged retryable.
+TAXJAR_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+TAXJAR_STATUS_MESSAGES = {
+	400: "TaxJar rejected the request as malformed",
+	401: "TaxJar rejected the API token",
+	403: "This TaxJar account is not allowed to make that request",
+	404: "TaxJar has no record of this resource",
+	405: "TaxJar rejected the request method",
+	406: "TaxJar cannot answer in the requested format",
+	410: "This resource has been removed from TaxJar",
+	422: "TaxJar could not process the request",
+	429: "TaxJar's API rate limit was reached",
+	500: "TaxJar hit an internal server error",
+	502: "TaxJar is temporarily unreachable",
+	503: "TaxJar is temporarily offline for maintenance",
+	504: "TaxJar took too long to respond",
+}
+
+# Kept separate from the headline so the same wording serves the background sync
+# (where the hint lands in Sync Error) and the interactive throw paths. Only for
+# failures with something to act on: the transient ones already read as transient,
+# and _set_sync_status() adds the retry sentence for them anyway.
+_STATUS_HINTS = {
+	401: "Check this company's API token in TaxJar Settings, and that it matches the current API mode (Sandbox/Live).",
+	403: "Check that the TaxJar plan on this account covers this API.",
+	404: "It may have been created in the other API mode (Sandbox/Live), or already deleted in TaxJar.",
+}
+
+# The two rejections this integration hits most often, both close to unreadable
+# in TaxJar's own words. Matched against the raw detail, before relabelling.
+_DETAIL_OVERRIDES = (
+	(
+		("already imported", "already exists"),
+		"This transaction already exists in TaxJar under the same ID. Delete it in TaxJar, or amend this document so it syncs under a new ID - retrying on its own will not clear this.",
+	),
+	(
+		("exemption_type must be",),
+		"TaxJar will not accept an exempt transaction that still carries sales tax. Either set the customer (or this document) to Non Exempt, or remove the TaxJar tax rows before syncing.",
+	),
+)
+
+# TaxJar names the offending API field in its error text. Relabelled one field at
+# a time rather than by blanket-stripping underscores, which used to mangle the
+# values TaxJar quotes back ("non_exempt" -> "non exempt") along with the keys.
+_API_FIELD_LABELS = {
+	"from_country": "Origin Country",
+	"from_zip": "Origin Zipcode",
+	"from_state": "Origin State",
+	"from_city": "Origin City",
+	"from_street": "Origin Street",
+	"to_country": "Country",
+	"to_zip": "Zipcode",
+	"to_state": "State",
+	"to_city": "City",
+	"to_street": "Street",
+	"transaction_reference_id": "Original Transaction ID",
+	"transaction_date": "Transaction Date",
+	"transaction_id": "Transaction ID",
+	"customer_id": "Customer ID",
+	"exemption_type": "Exemption Type",
+	"exempt_regions": "Exempt Regions",
+	"product_tax_code": "Product Tax Code",
+	"line_items": "Line Items",
+	"unit_price": "Unit Price",
+	"sales_tax": "Sales Tax",
+}
+
+_API_FIELD_PATTERN = re.compile(
+	r"\b(" + "|".join(sorted(_API_FIELD_LABELS, key=len, reverse=True)) + r")\b"
+)
+
+
+def classify_taxjar_error(err):
+	"""Describe any exception a TaxJar API call can raise.
+
+	Returns a dict of:
+
+	* ``status`` - the TaxJar status code, or None for failures that never reached
+	  a TaxJar response body;
+	* ``retryable`` - whether re-sending the identical request could succeed
+	  (see TAXJAR_RETRYABLE_STATUS_CODES);
+	* ``message`` - one plain sentence for the user, safe to store on a document
+	  or hand to frappe.throw();
+	* ``log_detail`` - the full technical payload for TaxJar API Log, which is
+	  where tracebacks and raw responses belong rather than on the document;
+	* ``kind`` - which branch classified it, so callers can decide what also
+	  deserves an error-log entry.
+
+	Unrecognised exceptions are deliberately classified non-retryable: a retry
+	loop we cannot reason about is worse than one failed document waiting for a
+	manual retry.
+	"""
+	if isinstance(err, taxjar.exceptions.TaxJarConnectionError):
+		return {
+			"status": None,
+			"retryable": True,
+			"message": "TaxJar is unreachable - the request timed out or the connection failed.",
+			"log_detail": f"TaxJarConnectionError: {err}",
+			"kind": "connection",
+		}
+
+	if isinstance(err, taxjar.exceptions.TaxJarResponseError):
+		full = getattr(err, "full_response", None)
+		if not isinstance(full, dict):
+			full = {}
+		status = cint(full.get("status_code")) or None
+		return {
+			"status": status,
+			"retryable": status in TAXJAR_RETRYABLE_STATUS_CODES,
+			"message": _describe_response_error(status, full.get("detail")),
+			"log_detail": full or str(err),
+			"kind": "response",
+		}
+
+	if isinstance(err, frappe.ValidationError):
+		# Raised by our own pre-flight checks (get_state_code, address validation),
+		# already worded for the user - re-wrapping it would only bury it.
+		return {
+			"status": None,
+			"retryable": False,
+			"message": str(err),
+			"log_detail": _format_exception(err),
+			"kind": "validation",
+		}
+
+	if isinstance(err, json.JSONDecodeError):
+		# TaxJarResponse.data_from_request() calls request.json() before looking at
+		# the status code, so a gateway error page (HTML, or an empty body) never
+		# becomes a TaxJarResponseError - it surfaces here. Always transport-level,
+		# so always worth retrying.
+		return {
+			"status": None,
+			"retryable": True,
+			"message": "TaxJar returned a response that could not be read, which usually means a temporary outage at TaxJar.",
+			"log_detail": _format_exception(err),
+			"kind": "unreadable",
+		}
+
+	return {
+		"status": None,
+		"retryable": False,
+		"message": f"Unexpected error while calling TaxJar: {type(err).__name__}: {err}",
+		"log_detail": _format_exception(err),
+		"kind": "unknown",
 	}
 
-	for k, v in sanitized_responses.items():
-		detail = detail.replace(k, v)
 
-	return detail
+def _describe_response_error(status, detail):
+	"""Turn a TaxJar error body into one readable, actionable sentence."""
+	detail = (detail or "").strip()
+
+	for needles, message in _DETAIL_OVERRIDES:
+		if any(needle in detail.lower() for needle in needles):
+			return message
+
+	headline = TAXJAR_STATUS_MESSAGES.get(status) or "TaxJar rejected the request"
+	if detail:
+		detail = _API_FIELD_PATTERN.sub(lambda m: _API_FIELD_LABELS[m.group(0)], detail)
+		if not detail.endswith((".", "!", "?")):
+			detail += "."
+		message = f"{headline}: {detail}"
+	else:
+		message = f"{headline}."
+
+	hint = _STATUS_HINTS.get(status)
+	return f"{message} {hint}" if hint else message
+
+
+def _format_exception(err):
+	"""Full traceback for the log, without depending on being inside an except
+	block the way traceback.format_exc() does."""
+	return "".join(traceback.format_exception(type(err), err, err.__traceback__))
+
+
+def sanitize_error_response(response):
+	"""The user-facing half of classify_taxjar_error(), kept under its original
+	name for the interactive callers that only ever wanted the sentence."""
+	return classify_taxjar_error(response)["message"]
 
 
 # ── TaxJar Customer API ──────────────────────────────────────────────────────
@@ -1681,18 +1901,23 @@ def _publish_customer_update(customer_name, status):
 	)
 
 
-def _set_customer_sync_status(customer_name, status, error=None):
+def _set_customer_sync_status(customer_name, status, error=None, retryable=False):
 	"""Update TaxJar sync status fields on a Customer, then notify any open
 	form via realtime - same reasoning as _set_sync_status's docstring.
 	Reached from on_customer_update (fires on ordinary Customer saves, not
 	just a submit/cancel event), the 15-min cron retry, and the Customers
-	page's bulk sync.
+	page's bulk sync. ``retryable`` gates the 15-min cron the same way it does
+	for invoices - see _set_sync_status().
 	"""
+	if error and retryable:
+		error = f"{error} Automatic retry is scheduled."
+
 	frappe.db.set_value(
 		"Customer", customer_name,
 		{
 			"taxjar_customer_sync_status": status,
 			"taxjar_customer_sync_error": error or "",
+			"taxjar_customer_sync_retryable": 1 if status == "Failed" and retryable else 0,
 		},
 		update_modified=False,
 	)
@@ -1706,6 +1931,15 @@ def _set_customer_sync_status(customer_name, status, error=None):
 	_publish_customer_update(customer_name, status)
 
 
+def _record_customer_sync_failure(err, action, payload, ctx, customer_name):
+	"""_record_sync_failure() for the Customer API side."""
+	info = classify_taxjar_error(err)
+	log_taxjar_call(action=action, status="error", payload=payload, error=info["log_detail"], context=ctx)
+	if info["kind"] == "unknown":
+		_get_taxjar_logger().error(info["log_detail"])
+	_set_customer_sync_status(customer_name, "Failed", error=info["message"], retryable=info["retryable"])
+
+
 @frappe.whitelist()
 def sync_customer_to_taxjar(customer_name, company=None):
 	"""Create or update a customer record in TaxJar.
@@ -1715,12 +1949,18 @@ def sync_customer_to_taxjar(customer_name, company=None):
 	"""
 	client = get_client(company)
 	if not client:
+		# Mirrors sync_transaction_to_taxjar's own client-missing branch: without
+		# this, a customer queued by bulk_sync_to_taxjar (or on_customer_update)
+		# stays at "Queued" forever - invisible to retry_failed_taxjar_customer_syncs,
+		# which only ever looks for "Failed" - and the Customers page's Retry
+		# action just re-queues the same no-op.
 		log_taxjar_call(
 			action="sync_customer",
 			status="skipped",
 			error="TaxJar client is not configured",
 			context={"doctype": "Customer", "name": customer_name, "company": company},
 		)
+		_set_customer_sync_status(customer_name, "Failed", error="TaxJar is not configured for this company.", retryable=True)
 		return
 
 	customer_doc = frappe.get_doc("Customer", customer_name)
@@ -1748,14 +1988,8 @@ def sync_customer_to_taxjar(customer_name, company=None):
 			response = _update_taxjar_customer(client, safe_id, customer_data, ctx)
 		else:
 			response = _create_taxjar_customer(client, customer_data, ctx)
-	except taxjar.exceptions.TaxJarConnectionError:
-		log_taxjar_call(action="sync_customer", status="error", payload=customer_data, error="TaxJar API is unreachable", context=ctx)
-		_set_customer_sync_status(customer_name, "Failed", error="TaxJar API is unreachable")
-		return
-	except Exception:
-		log_taxjar_call(action="sync_customer", status="error", payload=customer_data, error=traceback.format_exc(), context=ctx)
-		_get_taxjar_logger().error(traceback.format_exc())
-		_set_customer_sync_status(customer_name, "Failed", error=traceback.format_exc())
+	except Exception as err:
+		_record_customer_sync_failure(err, "sync_customer", customer_data, ctx, customer_name)
 		return
 
 	if response is None:
@@ -1768,14 +2002,15 @@ def sync_customer_to_taxjar(customer_name, company=None):
 
 def _create_taxjar_customer(client, customer_data, ctx):
 	"""POST a new customer to TaxJar. Returns the response or None on failure."""
-	customer_name = customer_data["customer_id"]
 	log_taxjar_call(action="create_customer", status="request", payload=customer_data, context=ctx)
 	try:
 		response = client.create_customer(customer_data)
 	except taxjar.exceptions.TaxJarResponseError as err:
-		log_taxjar_call(action="create_customer", status="error", payload=customer_data, error=getattr(err, "full_response", str(err)), context=ctx)
-		_get_taxjar_logger().error(traceback.format_exc())
-		_set_customer_sync_status(customer_name, "Failed", error=sanitize_error_response(err))
+		# Status is written against ctx["name"], the Customer docname ("David
+		# Fox"). customer_data["customer_id"] is the URL-safe TaxJar id
+		# ("David-Fox"), which matches no row - writing status against that
+		# updated nothing and left the customer showing Queued forever.
+		_record_customer_sync_failure(err, "create_customer", customer_data, ctx, ctx["name"])
 		return None
 	log_taxjar_call(action="create_customer", status="success", payload=customer_data, response=response, context=ctx)
 	return response
@@ -1791,9 +2026,7 @@ def _update_taxjar_customer(client, customer_id, customer_data, ctx):
 		if full.get("status_code") == 404:
 			log_taxjar_call(action="update_customer", status="error", payload=customer_data, error="404 — falling back to create", context=ctx)
 			return _create_taxjar_customer(client, customer_data, ctx)
-		log_taxjar_call(action="update_customer", status="error", payload=customer_data, error=full, context=ctx)
-		_get_taxjar_logger().error(traceback.format_exc())
-		_set_customer_sync_status(customer_id, "Failed", error=sanitize_error_response(err))
+		_record_customer_sync_failure(err, "update_customer", customer_data, ctx, ctx["name"])
 		return None
 	log_taxjar_call(action="update_customer", status="success", payload=customer_data, response=response, context=ctx)
 	return response

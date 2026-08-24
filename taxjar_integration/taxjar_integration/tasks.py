@@ -58,13 +58,26 @@ def sync_product_tax_categories():
 
 def retry_failed_taxjar_syncs():
 	"""Every 15 min: re-enqueue Failed Sales Invoices for companies that still have
-	transaction filing enabled."""
+	transaction filing enabled.
+
+	Only invoices whose last failure was classified retryable - a timeout, a rate
+	limit, a TaxJar outage (classify_taxjar_error) - are picked up. A rejection
+	the request itself caused, such as a duplicate transaction_id or an exemption
+	that contradicts the tax rows, cannot clear on its own; re-sending it every 15
+	minutes burns API quota and keeps rewriting Sync Error with whatever TaxJar
+	objects to that hour, which reads as an error that "keeps changing". Those wait
+	for the Retry button on the Transactions page instead.
+	"""
 	if not _is_taxjar_enabled():
 		return
 
 	failed_invoices = frappe.get_all(
 		"Sales Invoice",
-		filters={"taxjar_sync_status": "Failed", "docstatus": ("in", (1, 2))},
+		filters={
+			"taxjar_sync_status": "Failed",
+			"taxjar_sync_retryable": 1,
+			"docstatus": ("in", (1, 2)),
+		},
 		fields=["name", "company"],
 		limit=50,
 	)
@@ -82,13 +95,15 @@ def retry_failed_taxjar_syncs():
 
 
 def retry_failed_taxjar_customer_syncs():
-	"""Every 15 min: re-enqueue all Customers with Failed TaxJar sync status."""
+	"""Every 15 min: re-enqueue Customers whose last TaxJar sync failed in a way a
+	retry could clear - see retry_failed_taxjar_syncs() for why the rest are left
+	alone."""
 	if not _is_taxjar_enabled():
 		return
 
 	failed_customers = frappe.get_all(
 		"Customer",
-		filters={"taxjar_customer_sync_status": "Failed"},
+		filters={"taxjar_customer_sync_status": "Failed", "taxjar_customer_sync_retryable": 1},
 		pluck="name",
 		limit=50,
 	)

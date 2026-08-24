@@ -31,7 +31,11 @@
 {% endmacro %}
 
 {% if not data %}
+{% if no_nexus_reason %}
+<p class="text-muted">{{ _("{0}, hence no taxes are charged.").format(no_nexus_reason) }}</p>
+{% else %}
 <p class="text-muted">{{ _("No TaxJar tax breakdown available for this transaction.") }}</p>
+{% endif %}
 {% else %}
 	{% if data.usd %}
 	<p class="text-muted small">{{ _("This is a multi-currency transaction. Amounts were converted from {0} to USD at a rate of {1} ({2}) for TaxJar tax calculation.").format(data.currency, data.exchange_rate, data.exchange_date) }}</p>
