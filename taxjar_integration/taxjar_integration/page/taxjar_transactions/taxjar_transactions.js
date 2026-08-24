@@ -27,17 +27,40 @@ const STATUS_COLORS = {
 	Synced: "green",
 	Failed: "red",
 	Queued: "blue",
-	"Not Applicable": "grey",
+	Excluded: "grey",
 };
 
+// Submitted is the normal resting state, so it stays quiet; Cancelled is the
+// one worth noticing in a list that mixes the two.
+const DOC_STATUS_COLORS = { Submitted: "blue", Cancelled: "red" };
+
 const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
+
+// The two tabs: what TaxJar has, and what it never received. The Excluded tab
+// holds both drafts and submitted-but-not-applicable rows, told apart by its
+// Status column. Nothing there has been acted on, so it carries no sync status,
+// no checkboxes and no bulk actions.
+const INCLUDED_TAB = "included";
+const EXCLUDED_TAB = "excluded";
+
+// The two halves of the Excluded tab, as the summary drills into them.
+const KIND_DRAFT = "Draft";
+const KIND_NOT_APPLICABLE = "Not Applicable";
+
+const TABS = [
+	{ name: INCLUDED_TAB, label: __("Included"), is_active: true },
+	{ name: EXCLUDED_TAB, label: __("Excluded") },
+];
 
 class TaxJarTransactionSync {
 	constructor(page) {
 		this.page = page;
-		this.filters = {};
 		this.current_page = 1;
-		this.selected = new Set();
+		this.page_size = 20;
+		this.active_tab = INCLUDED_TAB;
+		this.status_filter = null;
+		this.excluded_kind = null;
+		this.column_search = {};
 
 		// Built once so on_hide() has the same reference to pass to
 		// frappe.realtime.off(). Debounced because a bulk retry of N invoices
@@ -47,8 +70,8 @@ class TaxJarTransactionSync {
 
 		this.make_filters();
 		this.make_summary();
-		this.make_bulk_actions();
-		this.make_table();
+		this.make_tabs();
+		this.make_not_configured_panel();
 	}
 
 	on_show() {
@@ -70,6 +93,8 @@ class TaxJarTransactionSync {
 		this._hide_sync_popover();
 	}
 
+	// ── Shell ─────────────────────────────────────────────────────────────
+
 	make_filters() {
 		this.filter_area = $('<div class="taxjar-filters"></div>').appendTo(this.page.main);
 
@@ -78,6 +103,9 @@ class TaxJarTransactionSync {
 			label: __("Company"),
 			fieldtype: "Link",
 			options: "Company",
+			// Same default every ERPNext report opens with, so the page lands on
+			// the company you actually work in rather than every company at once.
+			default: frappe.defaults.get_user_default("Company"),
 		});
 
 		this.filter_from_date = this.add_filter({
@@ -94,26 +122,13 @@ class TaxJarTransactionSync {
 			default: frappe.datetime.get_today(),
 		});
 
-		this.filter_sync_status = this.add_filter({
-			fieldname: "sync_status",
-			label: __("Sync Status"),
-			fieldtype: "Select",
-			options: [
-				{ label: __("All"), value: "" },
-				{ label: __("Not Applicable"), value: "Not Applicable" },
-				{ label: __("Queued"), value: "Queued" },
-				{ label: __("Synced"), value: "Synced" },
-				{ label: __("Failed"), value: "Failed" },
-			],
-		});
-
 		this.filter_transaction_type = this.add_filter({
 			fieldname: "transaction_type",
 			label: __("Transaction Type"),
 			fieldtype: "Select",
 			options: [
 				{ label: __("All"), value: "" },
-				{ label: __("Invoice"), value: "Invoice" },
+				{ label: __("Sales Invoice"), value: "Sales Invoice" },
 				{ label: __("Credit Note"), value: "Credit Note" },
 				{ label: __("Debit Note"), value: "Debit Note" },
 			],
@@ -125,7 +140,10 @@ class TaxJarTransactionSync {
 	// leaving just a placeholder - fine for the standard page toolbar, not
 	// for a filter row that needs visible labels.
 	add_filter(df) {
-		df.change = () => { this.current_page = 1; this.refresh(); };
+		df.change = () => {
+			this.current_page = 1;
+			this.refresh();
+		};
 		const control = frappe.ui.form.make_control({
 			df,
 			parent: this.filter_area,
@@ -136,79 +154,424 @@ class TaxJarTransactionSync {
 		return control;
 	}
 
-	make_bulk_actions() {
-		this.bulk_area = $(`
-			<div class="taxjar-bulk-actions" style="padding: 8px 15px; display: flex; align-items: center; gap: 8px;">
-				<label style="margin: 0; display: flex; align-items: center; gap: 4px; cursor: pointer;">
-					<input type="checkbox" class="taxjar-select-all"> ${__("Select All")}
-				</label>
-				<span class="taxjar-selection-count text-muted" style="margin-left: 4px;"></span>
-				<div style="margin-left: auto; display: flex; gap: 8px;">
-					<button class="btn btn-xs btn-primary taxjar-bulk-retry" disabled>
-						${__("Retry Selected")}
-					</button>
-				</div>
-			</div>
-		`).appendTo(this.page.main);
-
-		this.bulk_area.find(".taxjar-select-all").on("change", (e) => {
-			const checked = e.target.checked;
-			this.page.main.find(".taxjar-row-check").prop("checked", checked);
-			if (checked) {
-				(this.invoices || []).forEach((inv) => this.selected.add(inv.name));
-			} else {
-				this.selected.clear();
-			}
-			this.update_bulk_state();
-		});
-
-		this.bulk_area.find(".taxjar-bulk-retry").on("click", () => this.bulk_retry());
-	}
-
 	make_summary() {
-		this.summary_area = $(`
-			<div class="report-summary" style="padding: 20px 15px; display: flex; border-bottom: 1px solid var(--border-color);"></div>
-		`).appendTo(this.page.main);
+		this.summary_area = $('<div class="taxjar-summary"></div>').appendTo(this.page.main);
 	}
 
-	make_table() {
-		this.table_wrapper = $(`
-			<div class="taxjar-table-wrapper" style="padding: 0 15px;">
-				<table class="table table-bordered" style="margin-bottom: 0;">
-					<thead>
-						<tr>
-							<th style="width: 30px;"></th>
-							<th style="width: 110px;">${__("Posting Date")}</th>
-							<th style="width: 160px; white-space: nowrap;">${__("Transaction ID")}</th>
-							<th>${__("Customer")}</th>
-							<th style="width: 110px;">${__("Type")}</th>
-							<th style="width: 120px;">${__("Grand Total")}</th>
-							<th style="width: 100px;">${__("Doc Status")}</th>
-							<th style="width: 140px;">${__("Sync Status")}</th>
-						</tr>
-					</thead>
-					<tbody class="taxjar-transactions-body"></tbody>
-				</table>
-				<div class="taxjar-pagination" style="padding: 12px 0; display: flex; align-items: center; justify-content: space-between;"></div>
-			</div>
-		`).appendTo(this.page.main);
+	// frappe.ui.FieldGroup with Tab Break fields is how the desk draws tabs
+	// (same mechanism a Form uses); each tab gets an HTML field the data table
+	// mounts into.
+	make_tabs() {
+		this.tabs_wrapper = $('<div class="taxjar-page-tabs"></div>').appendTo(this.page.main);
 
-		this.tbody = this.table_wrapper.find(".taxjar-transactions-body");
-		this.pagination = this.table_wrapper.find(".taxjar-pagination");
+		// Two properties on the Tab Break fields are load-bearing, both because
+		// a FieldGroup outside a form has no frm:
+		//
+		//   hidden: false - Layout.render() decides whether to inject its own
+		//     "Details" tab by looking for the first field matching
+		//     `element.hidden == false`. An absent property is undefined, which
+		//     fails that check, so it would splice a tab of its own in front of
+		//     ours - and that one carries no parent, so it crashes below.
+		//   parent - Tab builds its DOM id from `frm.doctype ?? df.parent`, and
+		//     frappe.scrub() throws on undefined.
+		//
+		// No leading Section Break: make_tab() opens a section per tab already,
+		// and a Section Break first would itself become the "first visible
+		// field" and re-trigger the injected tab.
+		const tab_fields = TABS.reduce(
+			(fields, tab) => [
+				...fields,
+				{
+					fieldtype: "Tab Break",
+					fieldname: `${tab.name}_tab`,
+					label: tab.label,
+					parent: "TaxJar Transaction Sync",
+					hidden: false,
+					active: tab.is_active ? 1 : 0,
+				},
+				{ fieldtype: "HTML", fieldname: `${tab.name}_html` },
+			],
+			[]
+		);
 
+		this.tab_group = new frappe.ui.FieldGroup({
+			fields: tab_fields,
+			body: this.tabs_wrapper,
+		});
+		this.tab_group.make();
+
+		this.tabs = Object.fromEntries(this.tab_group.tabs.map((tab) => [tab.df.fieldname, tab]));
+
+		this.make_tab_actions();
+		this.setup_tab_change();
+
+		this.paginator = new taxjar_integration.Paginator({
+			$wrapper: $('<div class="taxjar-pagination"></div>').appendTo(this.page.main),
+			on_page: (page) => {
+				this.current_page = page;
+				this.refresh();
+			},
+			on_page_size: (size) => {
+				// Every page boundary moves, so the old page number is meaningless.
+				this.page_size = size;
+				this.current_page = 1;
+				this.refresh();
+			},
+		});
+	}
+
+	// Selection count + Bulk Action. Built detached and moved into the active
+	// tab's table wrapper by render_table(), so it sits directly above the rows
+	// it acts on and inherits that wrapper's padding.
+	make_tab_actions() {
+		this.$tab_actions = $('<div class="taxjar-tab-actions"></div>');
+		this.$selection_count = $('<span class="taxjar-selection-count"></span>').appendTo(this.$tab_actions);
+
+		this.bulk_action = new taxjar_integration.BulkActionButton({
+			$wrapper: this.$tab_actions,
+			label: __("Bulk Action"),
+		});
+	}
+
+	// Bound per tab, directly on the nav-link element - NOT delegated from an
+	// ancestor. Layout.setup_events() puts its own delegated handler on the
+	// .form-tabs <ul> which calls e.stopImmediatePropagation(), so a handler on
+	// any ancestor of that <ul> (.form-tabs-list, say) never runs and the tab
+	// would switch panes without ever reloading its rows. A handler bound
+	// directly on the link fires in the target phase, before the ancestor
+	// delegate gets the chance to stop it. That same setup_events() also calls
+	// .off("click") on the <ul>, so binding there would just be erased.
+	setup_tab_change() {
+		TABS.forEach((tab) => {
+			this.tabs[`${tab.name}_tab`]?.tab_link.find(".nav-link").on("click", () => {
+				if (tab.name === this.active_tab) return;
+				this.enter_tab(tab.name);
+				this.refresh();
+			});
+		});
+	}
+
+	// State side of a tab switch, without touching frappe's tab UI - safe to
+	// call both from a user click (where frappe already switched) and from
+	// go_to_tab (which drives the UI first).
+	enter_tab(name) {
+		this.active_tab = name;
+		this.current_page = 1;
+		this.status_filter = null;
+		this.excluded_kind = null;
+		// The Draft card doubles as the Draft tab's own indicator.
+		this.summary?.set_active(name === EXCLUDED_TAB ? EXCLUDED_TAB : null);
+	}
+
+	go_to_tab(name) {
+		this.tabs[`${name}_tab`]?.set_active();
+		this.enter_tab(name);
+	}
+
+	make_not_configured_panel() {
 		this.not_configured_panel = $('<div class="taxjar-not-configured"></div>')
 			.hide()
 			.appendTo(this.page.main);
+	}
 
-		// Delegated once here (rather than rebound on every render_table()
-		// call) so it keeps working across re-renders without re-wiring.
-		// Shows immediately on hover - no native-tooltip delay - and also
-		// toggles on click, since hover never fires on touch devices.
-		this.tbody.on("mouseenter", ".taxjar-sync-trigger", (e) => {
-			this._show_sync_popover($(e.currentTarget));
+	show_not_configured() {
+		this.summary_area.hide();
+		this.tabs_wrapper.hide();
+		this.paginator.$wrapper.hide();
+		taxjar_integration.render_not_configured_panel(this.not_configured_panel);
+		this.not_configured_panel.show();
+	}
+
+	hide_not_configured() {
+		this.not_configured_panel.hide();
+		this.summary_area.show();
+		this.tabs_wrapper.show();
+		this.paginator.$wrapper.show();
+	}
+
+	// ── Data ──────────────────────────────────────────────────────────────
+
+	// What the page is scoped to. The summary counts describe exactly this
+	// population, which is why the status drill-down is NOT part of it - see
+	// get_filters().
+	get_scope_filters() {
+		const filters = {};
+
+		const company = this.filter_company?.get_value();
+		if (company) filters.company = company;
+
+		const from_date = this.filter_from_date?.get_value();
+		if (from_date) filters.from_date = from_date;
+
+		const to_date = this.filter_to_date?.get_value();
+		if (to_date) filters.to_date = to_date;
+
+		const transaction_type = this.filter_transaction_type?.get_value();
+		if (transaction_type) filters.transaction_type = transaction_type;
+
+		// The datatable's inline filter row, resolved server-side so it
+		// narrows the whole result set rather than the loaded page.
+		if (Object.keys(this.column_search).length) filters.search = this.column_search;
+
+		return filters;
+	}
+
+	// The scope plus the status drill-down, which only the table honours.
+	// Feeding it to the summary too would make clicking "Failed" collapse every
+	// other number to zero - the strip is what you drill *from*, so it has to
+	// keep standing still while you do.
+	get_filters() {
+		const filters = this.get_scope_filters();
+
+		if (this.status_filter && this.active_tab === INCLUDED_TAB) {
+			filters.sync_status = this.status_filter;
+		}
+
+		if (this.excluded_kind && this.active_tab === EXCLUDED_TAB) {
+			filters.excluded_kind = this.excluded_kind;
+		}
+
+		return filters;
+	}
+
+	refresh() {
+		const filters = this.get_filters();
+
+		Promise.all([
+			frappe.xcall(
+				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_transactions",
+				{ filters, page: this.current_page, scope: this.active_tab, page_size: this.page_size }
+			),
+			frappe.xcall(
+				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_summary",
+				{ filters: this.get_scope_filters() }
+			),
+		]).then(([data, summary]) => {
+			if (data.not_configured) {
+				this.show_not_configured();
+				return;
+			}
+			this.hide_not_configured();
+			this.invoices = data.invoices;
+			this.render_summary(summary);
+			this.render_table();
+			this.paginator.render(data);
+			this.update_bulk_state();
 		});
-		this.tbody.on("mouseleave", ".taxjar-sync-trigger", () => this._hide_sync_popover());
-		this.tbody.on("click", ".taxjar-sync-trigger", (e) => {
+	}
+
+	// Two captioned groups so "All Transactions" and "Draft" read as
+	// separate totals. Every number drills the table down without disturbing
+	// the company/date filters above.
+	render_summary(summary) {
+		const groups = [
+			{
+				label: __("Included"),
+				cards: [
+					{ label: __("Synced"), value: summary.submitted.synced, value_key: "Synced", indicator: "green" },
+					{ label: __("Queued"), value: summary.submitted.queued, value_key: "Queued", indicator: "blue" },
+					{ label: __("Failed"), value: summary.submitted.failed, value_key: "Failed", indicator: "red" },
+				],
+			},
+			{
+				// The two ways a transaction ends up outside TaxJar: not
+				// submitted yet, or submitted and deliberately not sent.
+				label: __("Excluded"),
+				cards: [
+					{ label: __("Draft"), value: summary.draft.total, value_key: KIND_DRAFT },
+					{
+						// The stored status is "Excluded" - the group heading
+						// already says that, so the card names the case instead.
+						label: __("Not Applicable"),
+						value: summary.submitted.excluded,
+						value_key: KIND_NOT_APPLICABLE,
+						indicator: "grey",
+					},
+				],
+			},
+		];
+
+		if (!this.summary) {
+			this.summary = new taxjar_integration.SummaryStrip({
+				$wrapper: this.summary_area,
+				groups,
+				on_select: (card) => this.on_summary_select(card),
+			});
+			return;
+		}
+
+		const active = this.summary.active_key;
+		this.summary.update(groups);
+		this.summary.set_active(active);
+	}
+
+	on_summary_select(card) {
+		// The Excluded counts are not sync statuses - they pick which half of
+		// the Excluded tab to show.
+		if (card?.value_key === KIND_DRAFT || card?.value_key === KIND_NOT_APPLICABLE) {
+			this.go_to_tab(EXCLUDED_TAB);
+			this.excluded_kind = card.value_key;
+			this.summary.set_active(card.value_key);
+			this.refresh();
+			return;
+		}
+
+		if (this.active_tab !== INCLUDED_TAB) this.go_to_tab(INCLUDED_TAB);
+
+		// "" is the Total card: a filter of nothing, i.e. show everything.
+		this.status_filter = card?.value_key || null;
+		this.current_page = 1;
+		this.refresh();
+	}
+
+	// ── Table ─────────────────────────────────────────────────────────────
+
+	get_columns() {
+		const columns = [
+			{
+				label: __("Posting Date"),
+				fieldname: "posting_date",
+				fieldtype: "Date",
+			},
+			{
+				label: __("Transaction ID"),
+				fieldname: "name",
+				_html: (value) =>
+					`<a href="/app/sales-invoice/${encodeURIComponent(value)}">${frappe.utils.escape_html(
+						value
+					)}</a>`,
+			},
+			{ label: __("Customer"), fieldname: "customer_name" },
+			{ label: __("Type"), fieldname: "transaction_type" },
+			{
+				label: __("Grand Total"),
+				fieldname: "grand_total",
+				fieldtype: "Currency",
+				align: "right",
+			},
+		];
+
+		// Which half of the Excluded tab a row belongs to. Only this tab mixes
+		// the two; everywhere else it would read the same on every row.
+		if (this.active_tab === EXCLUDED_TAB) {
+			columns.push({
+				label: __("Status"),
+				fieldname: "doc_status",
+				resizable: false,
+				_html: (value) =>
+					`<span class="indicator-pill grey">${
+						value === "Draft" ? __("Draft") : __("Not Applicable")
+					}</span>`,
+			});
+		}
+
+		// Both only mean something on the Included tab. Nothing in Excluded has
+		// a sync status - it is defined as the rows that never got one.
+		if (this.active_tab === INCLUDED_TAB) {
+			columns.push({
+				label: __("Transaction Status"),
+				fieldname: "doc_status",
+				_html: (value) =>
+					value
+						? `<span class="indicator-pill ${DOC_STATUS_COLORS[value] || "grey"}">${__(value)}</span>`
+						: "",
+			});
+			columns.push({
+				label: __("Sync Status"),
+				fieldname: "taxjar_sync_status",
+				_html: (value, row) => this.render_sync_status_cell(row),
+			});
+		}
+
+		return columns;
+	}
+
+	render_table() {
+		const $wrapper = this.tab_group.get_field(`${this.active_tab}_html`).$wrapper;
+		const key = this.active_tab;
+
+		// Columns differ per tab, and so does checkboxColumn - both are fixed
+		// at construction in frappe.DataTable, so each tab keeps its own
+		// instance rather than one being reconfigured on the fly.
+		if (!this.datatables) this.datatables = {};
+
+		if (!this.datatables[key]) {
+			this.datatables[key] = new taxjar_integration.DataTableManager({
+				$wrapper,
+				columns: this.get_columns(),
+				data: this.invoices,
+				options: {
+					checkboxColumn: key === INCLUDED_TAB,
+					noDataMessage: __("No transactions found"),
+				},
+				on_check_row: () => this.update_bulk_state(),
+				on_filter_change: (search) => {
+					this.column_search = search;
+					this.current_page = 1;
+					this.refresh();
+				},
+			});
+			this.bind_sync_popover($wrapper);
+		} else {
+			this.datatables[key].refresh(this.invoices);
+		}
+
+		// Move rather than copy, so the one instance of each - handlers and all
+		// - follows whichever tab is showing. Both live inside the table's own
+		// wrapper so they share its padding and line up with its edges instead
+		// of merely happening to sit at the same inset.
+		this.$tab_actions.prependTo($wrapper);
+		this.paginator.$wrapper.appendTo($wrapper);
+	}
+
+	get datatable() {
+		return this.datatables?.[this.active_tab];
+	}
+
+	// Synced rows carry their detail (last-synced time) as a hover/click
+	// popover on the pill itself - no separate info icon needed since the
+	// pill's own text already says everything else. Failed pairs the pill with
+	// a separate info icon (never nested inside the pill) for its popover,
+	// since the pill text alone doesn't carry the error. Queued and Excluded
+	// say all they have to say in the pill.
+	render_sync_status_cell(row) {
+		const status = row.taxjar_sync_status;
+		if (!status) return "";
+
+		const color = STATUS_COLORS[status] || "grey";
+		const label = __(status);
+
+		if (status === "Synced") {
+			if (!row.taxjar_last_synced) {
+				return `<span class="indicator-pill ${color}">${label}</span>`;
+			}
+			const info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(row.taxjar_last_synced)]);
+			return `<span class="indicator-pill ${color} taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
+				info_text
+			)}">${label}</span>`;
+		}
+
+		const pill = `<span class="indicator-pill ${color}">${label}</span>`;
+
+		if (status !== "Failed") return pill;
+
+		const info_text = row.taxjar_sync_error || __("Unknown error");
+		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
+			info_text
+		)}">${frappe.utils.icon("info", "sm")}</button>`;
+		return `${pill}${icon}`;
+	}
+
+	// Delegated once per table (rather than rebound on every render) so it
+	// keeps working across re-renders. Shows immediately on hover - no
+	// native-tooltip delay - and also toggles on click, since hover never
+	// fires on touch devices.
+	bind_sync_popover($wrapper) {
+		$wrapper.on("mouseenter", ".taxjar-sync-trigger", (e) =>
+			this._show_sync_popover($(e.currentTarget))
+		);
+		$wrapper.on("mouseleave", ".taxjar-sync-trigger", () => this._hide_sync_popover());
+		$wrapper.on("click", ".taxjar-sync-trigger", (e) => {
 			e.stopPropagation();
 			this._show_sync_popover($(e.currentTarget));
 		});
@@ -238,247 +601,56 @@ class TaxJarTransactionSync {
 		$(document).off("click.taxjarSyncPop");
 	}
 
-	show_not_configured() {
-		this.bulk_area.hide();
-		this.summary_area.hide();
-		this.table_wrapper.hide();
-		taxjar_integration.render_not_configured_panel(this.not_configured_panel);
-		this.not_configured_panel.show();
+	// ── Bulk actions ──────────────────────────────────────────────────────
+
+	get_checked() {
+		return this.datatable?.get_checked_items().filter(Boolean) || [];
 	}
 
-	hide_not_configured() {
-		this.not_configured_panel.hide();
-		this.bulk_area.show();
-		this.summary_area.show();
-		this.table_wrapper.show();
-	}
-
-	get_filters() {
-		const filters = {};
-
-		const company = this.filter_company?.get_value();
-		if (company) filters.company = company;
-
-		const from_date = this.filter_from_date?.get_value();
-		if (from_date) filters.from_date = from_date;
-
-		const to_date = this.filter_to_date?.get_value();
-		if (to_date) filters.to_date = to_date;
-
-		const sync_status = this.filter_sync_status?.get_value();
-		if (sync_status) filters.sync_status = sync_status;
-
-		const transaction_type = this.filter_transaction_type?.get_value();
-		if (transaction_type) filters.transaction_type = transaction_type;
-
-		return filters;
-	}
-
-	refresh() {
-		const filters = this.get_filters();
-
-		Promise.all([
-			frappe.xcall(
-				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_transactions",
-				{ filters, page: this.current_page },
-			),
-			frappe.xcall(
-				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_summary",
-				{ filters },
-			),
-		]).then(([data, summary]) => {
-			if (data.not_configured) {
-				this.show_not_configured();
-				return;
-			}
-			this.hide_not_configured();
-			this.invoices = data.invoices;
-			this.total = data.total;
-			this.total_pages = data.total_pages;
-			this.render_summary(summary);
-			this.render_table();
-			this.render_pagination(data);
-			this.update_bulk_state();
-		});
-	}
-
-	render_summary(summary) {
-		const items = [
-			{ label: __("Total Invoices"), value: summary.total, color: "" },
-			{ label: __("Synced"), value: summary.synced, color: "green" },
-			{ label: __("Failed"), value: summary.failed, color: "red" },
-			{ label: __("Queued"), value: summary.queued, color: "blue" },
-		];
-
-		this.summary_area.empty();
-		items.forEach((item) => {
-			const value_color = item.color ? `var(--text-on-${item.color})` : "var(--text-color)";
-			this.summary_area.append(`
-				<div class="summary-item" style="flex: 1; text-align: center;">
-					<div class="text-muted" style="font-size: var(--text-sm);">${item.label}</div>
-					<div style="font-size: var(--text-2xl); font-weight: 600; color: ${value_color}; margin-top: 4px;">
-						${item.value}
-					</div>
-				</div>
-			`);
-		});
-	}
-
-	render_table() {
-		this.tbody.empty();
-
-		if (!this.invoices || !this.invoices.length) {
-			this.tbody.append(`
-				<tr><td colspan="8" class="text-muted text-center" style="padding: 40px;">
-					${__("No transactions found")}
-				</td></tr>
-			`);
-			return;
-		}
-
-		this.invoices.forEach((inv) => {
-			const checked = this.selected.has(inv.name) ? "checked" : "";
-
-			const row = $(`
-				<tr data-invoice="${frappe.utils.escape_html(inv.name)}">
-					<td><input type="checkbox" class="taxjar-row-check" ${checked}></td>
-					<td>${frappe.utils.escape_html(inv.posting_date)}</td>
-					<td style="white-space: nowrap;"><a href="/app/sales-invoice/${encodeURIComponent(inv.name)}">${frappe.utils.escape_html(inv.name)}</a></td>
-					<td>${frappe.utils.escape_html(inv.customer_name || "")}</td>
-					<td>${frappe.utils.escape_html(inv.transaction_type || "")}</td>
-					<td style="text-align: right;">${frappe.format(inv.grand_total, { fieldtype: "Currency" })}</td>
-					<td>${frappe.utils.escape_html(inv.doc_status || "")}</td>
-					<td>${this.render_sync_status_cell(inv)}</td>
-				</tr>
-			`);
-
-			row.find(".taxjar-row-check").on("change", (e) => {
-				if (e.target.checked) {
-					this.selected.add(inv.name);
-				} else {
-					this.selected.delete(inv.name);
-				}
-				this.update_bulk_state();
-			});
-
-			this.tbody.append(row);
-		});
-	}
-
-	// Synced rows carry their detail (last-synced time) as a hover/click
-	// popover on the pill itself - no separate info icon needed since the
-	// pill's own text already says everything else. Queued and Failed still
-	// pair the pill with a separate info icon (never nested inside the pill)
-	// for their popover, since the pill text alone doesn't carry the detail.
-	// Retrying a failed row goes through the checkbox + "Retry Selected" bulk
-	// action rather than a dedicated button here, so Failed reads the same as
-	// every other status.
-	render_sync_status_cell(inv) {
-		const status = inv.taxjar_sync_status;
-		if (!status) return "";
-
-		const color = STATUS_COLORS[status] || "grey";
-		const label = status === "Not Applicable" ? __("NA") : __(status);
-
-		if (status === "Synced") {
-			if (!inv.taxjar_last_synced) {
-				return `<span class="indicator-pill ${color}">${label}</span>`;
-			}
-			const info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(inv.taxjar_last_synced)]);
-			return `<span class="indicator-pill ${color} taxjar-sync-trigger" data-info="${frappe.utils.escape_html(info_text)}">${label}</span>`;
-		}
-
-		const pill = `<span class="indicator-pill ${color}">${label}</span>`;
-
-		let info_text = "";
-		if (status === "Queued") {
-			info_text = __("Queued for sync");
-		} else if (status === "Failed") {
-			info_text = inv.taxjar_sync_error || __("Unknown error");
-		}
-		if (!info_text) return pill;
-
-		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(info_text)}">${frappe.utils.icon("info", "sm")}</button>`;
-		return `${pill}${icon}`;
-	}
-
-	render_pagination(data) {
-		this.pagination.empty();
-
-		const start = (data.page - 1) * data.page_size + 1;
-		const end = Math.min(data.page * data.page_size, data.total);
-
-		this.pagination.append(`
-			<span class="text-muted">
-				${data.total ? __("Showing {0} - {1} of {2}", [start, end, data.total]) : __("No results")}
-			</span>
-			<div style="display: flex; align-items: center; gap: 8px;">
-				<button class="btn btn-xs btn-default taxjar-prev" ${data.page <= 1 ? "disabled" : ""}>
-					${__("← Prev")}
-				</button>
-				<span>${__("Page {0} of {1}", [data.page, data.total_pages])}</span>
-				<button class="btn btn-xs btn-default taxjar-next" ${data.page >= data.total_pages ? "disabled" : ""}>
-					${__("Next →")}
-				</button>
-			</div>
-		`);
-
-		this.pagination.find(".taxjar-prev").on("click", () => {
-			if (this.current_page > 1) {
-				this.current_page--;
-				this.refresh();
-			}
-		});
-
-		this.pagination.find(".taxjar-next").on("click", () => {
-			if (this.current_page < data.total_pages) {
-				this.current_page++;
-				this.refresh();
-			}
-		});
-	}
-
+	// The menu names the eligible subset up front ("Retry 2 Failed") and the
+	// counter spells out the gap, so a mixed selection can't silently drop
+	// rows the way a bare "Retry Selected" did.
 	update_bulk_state() {
-		const count = this.selected.size;
-		const disabled = count === 0;
-
-		this.bulk_area.find(".taxjar-bulk-retry").prop("disabled", disabled);
-		this.bulk_area.find(".taxjar-selection-count").text(
-			count ? __("{0} selected", [count]) : ""
-		);
-
-		// Derived from what's actually selected rather than blanket-cleared on
-		// refresh, so a refresh landing mid-selection (realtime update,
-		// pagination) can't desync the header checkbox from the rows, which
-		// keep their state via this.selected across re-renders.
-		const rows = this.invoices || [];
-		this.bulk_area.find(".taxjar-select-all").prop(
-			"checked", rows.length > 0 && rows.every((inv) => this.selected.has(inv.name))
-		);
-	}
-
-	bulk_retry() {
-		const selected = Array.from(this.selected);
-		const failed_selected = selected.filter((name) => {
-			const inv = (this.invoices || []).find((i) => i.name === name);
-			return inv && inv.taxjar_sync_status === "Failed";
-		});
-
-		if (!failed_selected.length) {
-			frappe.msgprint(__("No failed transactions in selection."));
+		if (this.active_tab !== INCLUDED_TAB) {
+			this.$tab_actions.hide();
 			return;
 		}
+		this.$tab_actions.show();
 
-		frappe.xcall(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.bulk_retry",
-			{ invoices: failed_selected },
-		).then((r) => {
-			frappe.show_alert({
-				message: __("{0} transactions queued for retry", [r.queued]),
-				indicator: "blue",
+		const checked = this.get_checked();
+		const failed = checked.filter((row) => row.taxjar_sync_status === "Failed");
+
+		this.$selection_count.text(
+			checked.length
+				? __("{0} selected · {1} retryable", [checked.length, failed.length])
+				: ""
+		);
+
+		this.bulk_action.set_items(
+			failed.length ? [{ label: __("Resync with TaxJar"), action: () => this.bulk_retry(failed) }] : []
+		);
+
+		if (checked.length && !failed.length) {
+			this.bulk_action.disabled_title = __("Nothing in this selection can be retried");
+			this.bulk_action.toggle_disabled(true);
+		} else {
+			this.bulk_action.disabled_title = __("Select one or more records to run an action");
+		}
+	}
+
+	bulk_retry(failed) {
+		frappe
+			.xcall(
+				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.bulk_retry",
+				{ invoices: failed.map((row) => row.name) }
+			)
+			.then((r) => {
+				frappe.show_alert({
+					message: __("{0} transactions queued for retry", [r.queued]),
+					indicator: "blue",
+				});
+				this.datatable?.clear_checked_items();
+				this.refresh();
 			});
-			this.selected.clear();
-			this.refresh();
-		});
 	}
 }

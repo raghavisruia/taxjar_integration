@@ -1,16 +1,6 @@
-.taxjar-table-wrapper .table th {
-	background-color: var(--subtle-fg);
-	font-size: var(--text-sm);
-	font-weight: 600;
-}
-
-.taxjar-table-wrapper .table td {
-	vertical-align: middle;
-}
-
-.report-summary .summary-item + .summary-item {
-	border-left: 1px solid var(--border-color);
-}
+/* Shared page chrome (data table, summary strip, bulk action button) lives in
+   public/scss/taxjar_integration.bundle.scss. Only what is specific to this
+   page stays here. */
 
 .taxjar-filters {
 	display: flex;
@@ -24,10 +14,11 @@
 	width: 180px;
 }
 
-/* Sync Status column popover trigger. Queued/Failed pair the pill with a
-   separate small info icon (never nested inside the pill); Synced has no
-   icon and the pill itself is the trigger, since its own text already
-   covers the status and the popover only adds the last-synced time.
+/* Sync Status column popover trigger. Failed pairs the pill with a separate
+   small info icon (never nested inside the pill) carrying the error; Synced
+   has no icon and the pill itself is the trigger, since its own text already
+   covers the status and the popover only adds the last-synced time. Queued
+   and Excluded have no popover at all - the pill says everything.
    cursor: pointer, not help - "help" makes the browser draw its own
    question-mark cursor glyph next to the pointer, which reads as a stray
    "?" floating over the trigger. */

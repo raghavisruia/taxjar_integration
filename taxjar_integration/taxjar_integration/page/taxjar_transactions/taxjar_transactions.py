@@ -6,6 +6,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	not_configured_response,
 	paginated_response,
 	parse_filters,
+	parse_page_size,
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import _publish_transaction_update
 
@@ -15,21 +16,53 @@ _TAXJAR_INVOICE_COLUMN = "taxjar_sync_status"
 
 _DOC_STATUS_LABELS = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 
+# The page's two tabs: what TaxJar has, and what it does not.
+INCLUDED_SCOPE = "included"
+EXCLUDED_SCOPE = "excluded"
+
+# Summary-only scopes. The strip counts drafts and submitted docs separately
+# even though the Excluded tab lists them together.
+SUBMITTED_SCOPE = "submitted"
+DRAFT_SCOPE = "draft"
+
+# The statuses a transaction can only reach by actually being sent.
+_INCLUDED_STATUSES = ("Synced", "Queued", "Failed")
+
+_SCOPE_CONDITIONS = {
+	INCLUDED_SCOPE: {
+		"docstatus": ("in", (1, 2)),
+		"taxjar_sync_status": ("in", _INCLUDED_STATUSES),
+	},
+	# Everything TaxJar never received: drafts (nothing syncs before submit,
+	# see enqueue_taxjar_sync's on_submit hook) and submitted docs deliberately
+	# left out. Deliberately not filtered on docstatus - the two live together
+	# here, told apart by the tab's Status column.
+	#
+	# "not in" rather than "= Excluded" so a row whose status was never written
+	# still lands somewhere: frappe wraps a nullable field in IFNULL for this
+	# operator (query.py:1971), so a NULL counts as excluded instead of falling
+	# out of both tabs.
+	EXCLUDED_SCOPE: {"taxjar_sync_status": ("not in", _INCLUDED_STATUSES)},
+	SUBMITTED_SCOPE: {"docstatus": ("in", (1, 2))},
+	DRAFT_SCOPE: {"docstatus": 0},
+}
+
 
 def _taxjar_invoice_fields_ready():
 	return frappe.db.has_column("Sales Invoice", _TAXJAR_INVOICE_COLUMN)
 
 
 @frappe.whitelist()
-def get_transactions(filters=None, page=1):
+def get_transactions(filters=None, page=1, scope=INCLUDED_SCOPE, page_size=PAGE_SIZE):
 	frappe.has_permission("Sales Invoice", "read", throw=True)
 	if not _taxjar_invoice_fields_ready():
 		return not_configured_response("invoices")
 
 	filters = parse_filters(filters)
 	page = max(1, int(page))
+	page_size = parse_page_size(page_size)
 
-	conditions = _build_conditions(filters)
+	conditions = _build_conditions(filters, scope)
 
 	total = frappe.db.count("Sales Invoice", conditions)
 
@@ -42,8 +75,8 @@ def get_transactions(filters=None, page=1):
 			"taxjar_sync_status", "taxjar_last_synced", "taxjar_sync_error",
 		],
 		order_by="posting_date desc, name desc",
-		start=(page - 1) * PAGE_SIZE,
-		limit_page_length=PAGE_SIZE,
+		start=(page - 1) * page_size,
+		limit_page_length=page_size,
 	)
 
 	for row in invoices:
@@ -52,29 +85,41 @@ def get_transactions(filters=None, page=1):
 		elif row.get("is_debit_note"):
 			row["transaction_type"] = "Debit Note"
 		else:
-			row["transaction_type"] = "Invoice"
+			row["transaction_type"] = "Sales Invoice"
 
 		row["doc_status"] = _DOC_STATUS_LABELS.get(row.docstatus, "")
 
-		if row.taxjar_sync_error and len(row.taxjar_sync_error) > 100:
-			row["taxjar_sync_error"] = row.taxjar_sync_error[:100] + "..."
+		# Shown in full inside a popover, not a table cell, so the cap is only
+		# there to keep a runaway message out of the response. 100 used to cut
+		# the sentence before the part that says what to do about it.
+		if row.taxjar_sync_error and len(row.taxjar_sync_error) > 300:
+			row["taxjar_sync_error"] = row.taxjar_sync_error[:300] + "..."
 
-	return paginated_response("invoices", invoices, total, page)
+	return paginated_response("invoices", invoices, total, page, page_size)
 
 
 @frappe.whitelist()
 def get_summary(filters=None):
+	"""Counts for the summary strip: the submitted/cancelled statuses plus a
+	draft total, both under the same company/date/type filters as the table -
+	the strip drills into what is on screen, so it has to be scoped the same.
+	"""
 	frappe.has_permission("Sales Invoice", "read", throw=True)
 	if not _taxjar_invoice_fields_ready():
 		return not_configured_response()
 
 	filters = parse_filters(filters)
-	conditions = _build_conditions(filters)
+	# The strip is what you drill *from*, so a status drill-down must not feed
+	# back into it - honouring it here would collapse every other number to zero
+	# the moment one was clicked. Enforced at the endpoint, not just by what the
+	# page happens to send.
+	filters.pop("sync_status", None)
+	filters.pop("excluded_kind", None)
 
 	# Aggregate counts in SQL instead of pulling every row into Python.
 	rows = frappe.get_all(
 		"Sales Invoice",
-		filters=conditions,
+		filters=_build_conditions(filters, SUBMITTED_SCOPE),
 		fields=["taxjar_sync_status", {"COUNT": "*"}],
 		group_by="taxjar_sync_status",
 	)
@@ -84,10 +129,16 @@ def get_summary(filters=None):
 		by_status[status] = next((v for k, v in r.items() if k != "taxjar_sync_status"), 0)
 
 	return {
-		"total": sum(by_status.values()),
-		"synced": by_status.get("Synced", 0),
-		"failed": by_status.get("Failed", 0),
-		"queued": by_status.get("Queued", 0),
+		"submitted": {
+			"total": sum(by_status.values()),
+			"synced": by_status.get("Synced", 0),
+			"queued": by_status.get("Queued", 0),
+			"failed": by_status.get("Failed", 0),
+			"excluded": by_status.get("Excluded", 0),
+		},
+		"draft": {
+			"total": frappe.db.count("Sales Invoice", _build_conditions(filters, DRAFT_SCOPE)),
+		},
 	}
 
 
@@ -126,8 +177,8 @@ def bulk_retry(invoices):
 	return {"queued": queued}
 
 
-def _build_conditions(filters):
-	conditions = {"docstatus": ("in", (1, 2))}
+def _build_conditions(filters, scope=INCLUDED_SCOPE):
+	conditions = dict(_SCOPE_CONDITIONS.get(scope, _SCOPE_CONDITIONS[INCLUDED_SCOPE]))
 
 	if filters.get("company"):
 		conditions["company"] = filters["company"]
@@ -145,6 +196,14 @@ def _build_conditions(filters):
 	if filters.get("sync_status"):
 		conditions["taxjar_sync_status"] = filters["sync_status"]
 
+	# Drilled in from the Excluded group of the summary strip: which half of
+	# that tab to show.
+	excluded_kind = filters.get("excluded_kind")
+	if excluded_kind == "Draft":
+		conditions["docstatus"] = 0
+	elif excluded_kind == "Not Applicable":
+		conditions["docstatus"] = ("in", (1, 2))
+
 	transaction_type = filters.get("transaction_type")
 	if transaction_type:
 		if transaction_type == "Credit Note":
@@ -155,4 +214,25 @@ def _build_conditions(filters):
 			conditions["is_return"] = 0
 			conditions["is_debit_note"] = 0
 
+	_add_column_search(conditions, filters)
+
 	return conditions
+
+
+# Columns the inline filter row is allowed to search on. An allowlist, not
+# "whatever the client sent" - these land in a database query, and the caller
+# is a whitelisted endpoint.
+_SEARCHABLE_COLUMNS = ("name", "customer_name")
+
+
+def _add_column_search(conditions, filters):
+	"""Apply the datatable's inline column filters as server-side LIKE terms.
+
+	The filter row narrows the whole result set rather than the loaded page -
+	the library's own filtering only ever sees one page of rows, which would
+	make a search for something on page 3 look like it does not exist.
+	"""
+	for fieldname in _SEARCHABLE_COLUMNS:
+		value = (filters.get("search") or {}).get(fieldname)
+		if value:
+			conditions[fieldname] = ("like", f"%{value}%")
