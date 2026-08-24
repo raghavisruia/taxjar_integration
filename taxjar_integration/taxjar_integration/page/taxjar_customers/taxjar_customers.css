@@ -1,19 +1,126 @@
-.taxjar-table-wrapper .table th {
-	background-color: var(--subtle-fg);
-	font-size: var(--text-sm);
-	font-weight: 600;
+/* Shared page chrome (summary strip, bulk action button, paginator) lives in
+   public/scss/taxjar_integration.bundle.scss. Only what is specific to this
+   page stays here.
+
+   This page renders a plain bordered table rather than frappe.DataTable, so
+   the padding the shared .taxjar-datatable rule provides is repeated here on
+   its own wrapper - the tab actions above the rows and the paginator below
+   both sit inside it and take their inset from it. */
+
+.taxjar-table-wrapper {
+	padding: 12px 15px 15px;
 }
 
-.taxjar-table-wrapper .table td {
+.taxjar-customers-table {
+	margin-bottom: 0;
+}
+
+/* The same subtle grey the desk's own data tables give their header row
+   (--dt-header-cell-bg in frappe's frappe_datatable.scss), so this page reads
+   as the same furniture as the Transaction Sync one beside it. */
+.taxjar-customers-table thead th {
+	background-color: var(--subtle-fg);
+	color: var(--heading-color);
+	font-weight: 600;
 	vertical-align: middle;
 }
 
-.taxjar-table-wrapper .taxjar-exemption-select {
-	padding: 2px 6px;
-	height: 28px;
+.taxjar-customers-table td {
+	vertical-align: middle;
+}
+
+/* Just wide enough for the checkbox, so it never takes width from a column
+   that carries content. */
+.taxjar-check-cell {
+	width: 32px;
+	text-align: center;
+}
+
+.taxjar-no-data {
+	padding: 40px;
+}
+
+/* The count and pencil read as one control, so the button carries no chrome of
+   its own. --icon-stroke is set here rather than inherited: frappe only points
+   it at currentColor inside .btn, and this is deliberately not a .btn. */
+.taxjar-configure-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: none;
+	border: none;
+	padding: 0;
+	color: var(--text-color);
+	cursor: pointer;
+	--icon-stroke: currentColor;
+}
+
+.taxjar-configure-link .icon {
+	/* The sprite's own box is 20px square whatever the size class says. */
+	width: 14px;
+	height: 14px;
+	flex-shrink: 0;
+}
+
+.taxjar-configure-link:hover {
+	color: var(--text-on-light-gray);
+}
+
+/* Regions need an exemption type behind them. The pencil stays put - removing
+   it would read as "nothing to configure here" - but it greys out and the
+   cursor says the click will not open anything. The tooltip and the click cue
+   both explain why. */
+.taxjar-configure-link--blocked,
+.taxjar-configure-link--blocked:hover {
+	color: var(--text-light);
+	cursor: not-allowed;
+}
+
+/* An external identifier, not prose - monospace so a mistyped or truncated id
+   is spottable at a glance. */
+.taxjar-customer-id {
+	font-family: var(--font-stack-monospace, monospace);
 	font-size: var(--text-sm);
 }
 
-.taxjar-table-wrapper .taxjar-regions-cell:hover {
-	background-color: var(--subtle-fg);
+/* ── Configure Exemption dialog ─────────────────────────────────────────── */
+
+.taxjar-regions-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 8px;
+}
+
+.taxjar-region-select-all {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin: 0;
+	font-weight: normal;
+	font-size: var(--text-sm);
+	cursor: pointer;
+}
+
+.taxjar-region-option {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	width: 60px;
+	margin: 2px 4px;
+	font-size: var(--text-sm);
+	font-weight: normal;
+	cursor: pointer;
+}
+
+/* Regions mean nothing without an exemption type. Greyed rather than hidden so
+   the dialog does not jump in height when a type is picked, and so it is
+   visible that there is something here to fill in next. */
+.taxjar-regions-disabled {
+	opacity: 0.45;
+	pointer-events: none;
+}
+
+.taxjar-regions-hint {
+	margin-bottom: 8px;
 }
