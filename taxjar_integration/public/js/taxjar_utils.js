@@ -163,11 +163,37 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 	d.show();
 };
 
+const TAXJAR_MESSAGE_CLASS = "taxjar-form-message";
+
+// Layout.show_message() *appends*; it only clears the container when called
+// with nothing at all (layout.js:132-164). refresh() runs more than once per
+// form load, so routing every call straight through it stacked a fresh copy of
+// the same strip each time.
+//
+// Clearing the container instead would take frappe's own messages with it -
+// "Submit this document to confirm" lives there too - so only our own block is
+// replaced: tagged on the way in, removed by that tag on the way out.
+taxjar_integration._set_tax_message = function (frm, text, color) {
+	const $container = frm.layout.message;
+	$container.find(`.${TAXJAR_MESSAGE_CLASS}`).remove();
+
+	if (!text) {
+		// Someone else's message may still be in there; only hide the container
+		// once it is genuinely empty.
+		if (!$container.children().length) $container.addClass("hidden");
+		return;
+	}
+
+	frm.layout.show_message(text, color);
+	$container.children().last().addClass(TAXJAR_MESSAGE_CLASS);
+};
+
 taxjar_integration.show_no_address_tax_message = function (frm) {
 	if (!(frm.doc.shipping_address_name || frm.doc.customer_address)) {
 		let party_name = frm.doc.party_name || frm.doc.customer;
 		if (party_name) {
-			frm.layout.show_message(
+			taxjar_integration._set_tax_message(
+				frm,
 				__("Taxes are not calculated, as address is not set to assess nexus."),
 				"orange"
 			);
@@ -176,14 +202,15 @@ taxjar_integration.show_no_address_tax_message = function (frm) {
 	}
 
 	if (frm.doc.taxjar_nexus_reason && !frm.doc.taxjar_has_nexus) {
-		frm.layout.show_message(
+		taxjar_integration._set_tax_message(
+			frm,
 			__("{0}, hence no taxes are charged.", [frm.doc.taxjar_nexus_reason]),
 			"blue"
 		);
 		return;
 	}
 
-	frm.layout.show_message("");
+	taxjar_integration._set_tax_message(frm, "");
 };
 
 taxjar_integration._open_new_address = function (frm) {
@@ -197,6 +224,59 @@ taxjar_integration._open_new_address = function (frm) {
 
 // ── TaxJar Tab: Status Cards & Addresses ──
 
+// ── Region-scoped customer exemption ──
+// A customer can be exempt in some states and not others. Where the master's
+// exemption covers this sale's destination, the transaction override is set
+// from the master and locked: it is not the user's call, and leaving it blank
+// would suggest the sale is taxable when it is not.
+//
+// Destination follows the same ship-to-then-bill-to fallback the server uses,
+// so this re-runs whenever either address changes.
+taxjar_integration.apply_region_exemption = function (frm) {
+	const fields = ["taxjar_transaction_exempt", "taxjar_transaction_exemption_type"];
+	const customer = frm.doc.party_name || frm.doc.customer;
+	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
+
+	const unlock = () => fields.forEach((f) => frm.set_df_property(f, "read_only", 0));
+
+	if (!customer || !address) {
+		unlock();
+		return;
+	}
+
+	return frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.get_region_exemption", {
+			customer,
+			address,
+		})
+		.then((exemption) => {
+			if (!exemption || !exemption.exemption_type) {
+				unlock();
+				return;
+			}
+
+			fields.forEach((f) => frm.set_df_property(f, "read_only", 1));
+
+			// Only written on a draft, and only when it would actually change
+			// something - set_value on an unchanged field still marks the form
+			// dirty, which would make merely opening a saved invoice look edited.
+			if (frm.doc.docstatus !== 0) return;
+
+			if (!cint(frm.doc.taxjar_transaction_exempt)) {
+				frm.set_value("taxjar_transaction_exempt", 1);
+			}
+			if (frm.doc.taxjar_transaction_exemption_type !== exemption.exemption_type) {
+				frm.set_value("taxjar_transaction_exemption_type", exemption.exemption_type);
+			}
+		});
+};
+
+// True when the per-transaction override is both ticked and given a reason -
+// the same test the server applies before it counts as real.
+taxjar_integration._has_transaction_exemption = function (frm) {
+	return Boolean(cint(frm.doc.taxjar_transaction_exempt) && frm.doc.taxjar_transaction_exemption_type);
+};
+
 taxjar_integration.render_status_cards = function (frm) {
 	if (!frm.fields_dict.taxjar_status_html) return;
 	const wrapper = frm.fields_dict.taxjar_status_html.$wrapper;
@@ -207,11 +287,11 @@ taxjar_integration.render_status_cards = function (frm) {
 	}
 
 	const has_nexus = frm.doc.taxjar_has_nexus;
+	// The customer master's own answer. A transaction override no longer flips
+	// this to "No" - that would hide the fact that the customer is taxable and
+	// only this one sale is not. The override is appended to the answer instead.
 	const customer_taxable = frm.doc.taxjar_customer_taxable;
-	// Only the transaction-level override (see taxjar_transaction_exempt) gets
-	// a second pill - a master-level customer exemption or the plain taxable
-	// case say nothing extra here, matching "rest don't show reasons at all".
-	const overridden = (frm.doc.taxjar_customer_taxable_reason || "").startsWith("Overridden");
+	const transaction_exempt = taxjar_integration._has_transaction_exemption(frm);
 
 	const card1 = {
 		question: __("Do you have a nexus here?"),
@@ -221,32 +301,47 @@ taxjar_integration.render_status_cards = function (frm) {
 
 	let card2, card3;
 
+	const skipped = { answer: __("Skipped"), color: "grey" };
+
 	if (!has_nexus && frm.doc.taxjar_nexus_reason) {
-		card2 = { question: __("Is the customer taxable?"), answer: __("Skipped"), color: "grey" };
-		card3 = { question: __("Is the product taxable?"), answer: __("Skipped"), color: "grey" };
-	} else if (!customer_taxable && frm.doc.taxjar_customer_taxable_reason) {
-		card2 = { question: __("Is the customer taxable?"), answer: __("No"), color: "orange", overridden };
-		card3 = { question: __("Is the product taxable?"), answer: __("Skipped"), color: "grey" };
+		// Nothing downstream is evaluated once there is no nexus.
+		card2 = { question: __("Is the customer taxable?"), ...skipped };
+		card3 = { question: __("Is the product taxable?"), ...skipped };
 	} else {
-		card2 = {
-			question: __("Is the customer taxable?"),
-			answer: customer_taxable ? __("Yes") : __("No"),
-			color: customer_taxable ? "green" : "orange",
-			overridden,
-		};
+		let answer = __("Yes");
+		let color = "green";
+		// Only this one answer is a sentence; every other pill on these cards
+		// is a single word and keeps frappe's own shape untouched.
+		let wrap = false;
 
-		const prod = frm.doc.taxjar_product_taxable;
-		let prod_color = "grey";
-		let prod_answer = __("Skipped");
-		if (prod === "Yes") { prod_color = "green"; prod_answer = __("Yes"); }
-		else if (prod === "No") { prod_color = "orange"; prod_answer = __("No"); }
-		else if (prod === "Partially") { prod_color = "blue"; prod_answer = __("Partially"); }
+		if (!customer_taxable) {
+			answer = __("No");
+			color = "orange";
+		} else if (transaction_exempt) {
+			answer = __("Yes, but transaction is marked as exempt");
+			color = "orange";
+			wrap = true;
+		}
 
-		card3 = {
-			question: __("Is the product taxable?"),
-			answer: prod_answer,
-			color: prod_color,
-		};
+		card2 = { question: __("Is the customer taxable?"), answer, color, wrap };
+
+		// Product taxability is moot once the sale is exempt either way.
+		if (!customer_taxable || transaction_exempt) {
+			card3 = { question: __("Is the product taxable?"), ...skipped };
+		} else {
+			const prod = frm.doc.taxjar_product_taxable;
+			let prod_color = "grey";
+			let prod_answer = __("Skipped");
+			if (prod === "Yes") { prod_color = "green"; prod_answer = __("Yes"); }
+			else if (prod === "No") { prod_color = "orange"; prod_answer = __("No"); }
+			else if (prod === "Partially") { prod_color = "blue"; prod_answer = __("Partially"); }
+
+			card3 = {
+				question: __("Is the product taxable?"),
+				answer: prod_answer,
+				color: prod_color,
+			};
+		}
 	}
 
 	taxjar_integration._inject_status_card_styles();
@@ -258,9 +353,8 @@ taxjar_integration.render_status_cards = function (frm) {
 			<div class="taxjar-status-card">
 				<div class="text-muted taxjar-status-card-q">${card.question}</div>
 				<div class="taxjar-status-card-a">
-					<span class="indicator-pill ${card.color}">${card.answer}</span>
+					<span class="indicator-pill ${card.color}${card.wrap ? " taxjar-pill-wrap" : ""}">${card.answer}</span>
 				</div>
-				${card.overridden ? `<div class="taxjar-status-card-override"><span class="indicator-pill grey">${__("Overridden")}</span></div>` : ""}
 			</div>
 			${i < 2 ? '<div class="taxjar-status-arrow">→</div>' : ""}`;
 	});
@@ -299,7 +393,32 @@ taxjar_integration._inject_status_card_styles = function () {
 			font-size: var(--text-lg);
 			font-weight: 600;
 		}
-		.taxjar-status-card-override {
+		/* .indicator-pill is built for one short word: a fixed 20px height, a
+		   fully round radius, and a dot centred on that fixed box
+		   (frappe/public/scss/common/indicator.scss). "Yes, but transaction is
+		   marked as exempt" wraps, so the height has to give and the dot has to
+		   sit on the first line instead of halfway down the block, and the full
+		   radius has to come down - it bows a two-line block out into a
+		   lozenge.
+
+		   Opt-in via .taxjar-pill-wrap rather than applied to every pill in
+		   these cards: a single-word pill under these rules sizes to its
+		   content instead of frappe's fixed 20px and lifts its dot off centre,
+		   so "Yes" and "Skipped" would drift out of step with pills elsewhere
+		   in the desk. */
+		.taxjar-status-card .indicator-pill.taxjar-pill-wrap {
+			height: auto;
+			min-height: 20px;
+			align-items: flex-start;
+			white-space: normal;
+			text-align: left;
+			/* --radius-full on a two-line block bows the sides out into a
+			   lozenge; a fixed radius keeps the corners round without the
+			   stretch. Single-word pills keep the inherited full radius. */
+			border-radius: 10px;
+		}
+		.taxjar-status-card .indicator-pill.taxjar-pill-wrap::before {
+			/* centres the 6px dot on the first line rather than the whole block */
 			margin-top: 6px;
 		}
 		.taxjar-status-arrow {
@@ -312,6 +431,42 @@ taxjar_integration._inject_status_card_styles = function () {
 			.taxjar-status-cards { flex-direction: column; }
 			.taxjar-status-card { flex-basis: auto; }
 			.taxjar-status-arrow { justify-content: center; transform: rotate(90deg); }
+		}
+
+		.taxjar-addresses { display: flex; align-items: center; gap: 16px; padding: 8px 0; }
+		/* Both cells carry the padding and a transparent border of the same
+		   width, so lighting one up tints it in place instead of nudging the
+		   other one sideways. */
+		/* --radius-md, not --border-radius-md: this frappe ships the Espresso
+		   --radius-* scale (css/espresso/radius.css) and never defines the old
+		   --border-radius-* aliases, so that name resolves to nothing and the
+		   corners come out square. Dashed rather than dotted for a longer
+		   segment - dotted renders as round dots at 1px. */
+		.taxjar-address {
+			flex: 1;
+			text-align: center;
+			padding: 10px 12px;
+			border: 1px dashed transparent;
+			border-radius: var(--radius-md);
+		}
+		.taxjar-address-label { font-size: var(--text-sm); color: var(--text-muted); }
+		.taxjar-address-value { font-weight: 600; margin-top: 4px; }
+		.taxjar-address-arrow { font-size: 20px; color: var(--text-muted); }
+		/* --bg-blue / --text-on-blue are frappe's own indicator-pill tokens
+		   (indicator.scss), redefined per theme - so this tracks light/dark
+		   without a hex of ours, and stays clear of the green/orange/grey
+		   verdict pills on the status cards above. */
+		.taxjar-address-lit { background: var(--bg-blue); border-color: var(--text-on-blue); }
+		/* Not blue: the box carries the colour, and colouring its caption too
+		   would read as a second signal rather than as the words for the one
+		   already there. --text-light (ink-gray-5) rather than --text-muted
+		   (ink-gray-6), a step lighter again, so it also sits below the
+		   "Ship To" label it shares the box with rather than competing with
+		   it. Both track the theme. */
+		.taxjar-address-note {
+			margin-top: 4px;
+			font-size: var(--text-sm);
+			color: var(--text-light);
 		}
 	`;
 	document.head.appendChild(style);
@@ -326,63 +481,67 @@ taxjar_integration.render_addresses = function (frm) {
 		return;
 	}
 
+	taxjar_integration._inject_status_card_styles();
+
 	const from_text = frm.doc.taxjar_ship_from || __("Not set");
 	const to_text = frm.doc.taxjar_ship_to || __("Not set");
 
+	// Which end of the shipment set the rate, off TaxJar's own tax_source.
+	// Only trusted while the document actually has nexus: the early returns in
+	// set_sales_tax that stop before calculating (no nexus, exempt, no payload)
+	// leave the stored value untouched, so a document that was taxed once would
+	// otherwise keep advertising a rule that no longer applies to it. Same
+	// guard shape as _has_no_nexus. With no source, neither side is tinted or
+	// captioned - the row reads exactly as it did before.
+	const source = frm.doc.taxjar_has_nexus ? (frm.doc.taxjar_tax_source || "") : "";
+	const origin = source === "origin";
+	const destination = source === "destination";
+
+	// The tint alone says "this one" without saying why, so the rule is named
+	// inside the box it applies to - no separate legend to read across to, and
+	// nothing rendered at all on the side that didn't source the rate. One
+	// argument drives both the tint and the caption, so they cannot disagree.
+	// Brackets live in the markup, not in the translatable - a translator gets
+	// the phrase to translate, not punctuation to reproduce.
+	const cell = (label, text, note) => `
+		<div class="taxjar-address${note ? " taxjar-address-lit" : ""}">
+			<div class="taxjar-address-label">${label}</div>
+			<div class="taxjar-address-value">${frappe.utils.escape_html(text)}</div>
+			${note ? `<div class="taxjar-address-note">(${note})</div>` : ""}
+		</div>`;
+
 	wrapper.html(`
-		<div style="display:flex;align-items:center;gap:16px;padding:8px 0">
-			<div style="flex:1;text-align:center">
-				<div class="text-muted" style="font-size:var(--text-sm)">${__("Ship From")}</div>
-				<div style="font-weight:600;margin-top:4px">${frappe.utils.escape_html(from_text)}</div>
-			</div>
-			<div style="font-size:20px;color:var(--text-muted)">→</div>
-			<div style="flex:1;text-align:center">
-				<div class="text-muted" style="font-size:var(--text-sm)">${__("Ship To")}</div>
-				<div style="font-weight:600;margin-top:4px">${frappe.utils.escape_html(to_text)}</div>
-			</div>
+		<div class="taxjar-addresses">
+			${cell(__("Ship From"), from_text, origin ? __("Origin based tax") : "")}
+			<div class="taxjar-address-arrow">→</div>
+			${cell(__("Ship To"), to_text, destination ? __("Destination based tax") : "")}
 		</div>
 	`);
 };
 
 // ── TaxJar Tax Breakdown Rendering ──
-// Shared by Sales Invoice / Sales Order / Quotation forms and their item grids.
-// These render the jurisdiction-level tax breakdown stored on taxjar_breakdown_json
-// (transaction) and taxjar_item_breakdown_json (per line item).
+// Shared by the Sales Invoice / Sales Order / Quotation forms. Renders the
+// jurisdiction-level tax breakdown stored on taxjar_breakdown_json.
 
-taxjar_integration._no_breakdown_msg = function (is_new) {
-	const text = is_new
-		? __("Please save to see tax breakdown.")
-		: __("No TaxJar tax breakdown available for this transaction.");
+taxjar_integration._no_breakdown_msg = function (is_new, frm) {
+	let text;
+	if (is_new) {
+		text = __("Please save to see tax breakdown.");
+	} else if (frm && taxjar_integration._has_no_nexus(frm)) {
+		// There is no breakdown and there never will be - say why, rather than
+		// reporting an absence the user cannot act on.
+		text = __("{0}, hence no taxes are charged.", [frm.doc.taxjar_nexus_reason]);
+	} else {
+		text = __("No TaxJar tax breakdown available for this transaction.");
+	}
 	return `<p class="text-muted">${text}</p>`;
 };
 
-taxjar_integration.build_item_table = function (rows, currency) {
-	const body = rows
-		.map(
-			(r) =>
-				`<tr>
-				<td>${frappe.utils.escape_html(r.jurisdiction)}</td>
-				<td class="text-right">${format_currency(r.exempt_or_non_taxable || 0, currency)}</td>
-				<td class="text-right">${format_currency(r.taxable_amount || 0, currency)}</td>
-				<td class="text-right">${(r.rate * 100).toFixed(3)}%</td>
-				<td class="text-right">${format_currency(r.tax_amount, currency)}</td>
-			</tr>`
-		)
-		.join("");
-
-	return `
-		<div class="tax-break-up" style="overflow-x: auto;">
-			<table class="table table-bordered table-hover">
-				<thead style="background-color: var(--subtle-fg);"><tr>
-					<th class="text-left">${__("Jurisdiction")}</th>
-					<th class="text-right">${__("Exempt/Non-Taxable")}</th>
-					<th class="text-right">${__("Taxable")}</th>
-					<th class="text-right">${__("Rate")}</th>
-					<th class="text-right">${__("Tax Amount")}</th>
-				</tr></thead>
-				<tbody>${body}</tbody>
-			</table>
-		</div>`;
+// Nexus was actually assessed and came back negative. taxjar_has_nexus alone
+// is 0 both for "no nexus" and "not evaluated yet", so the reason has to be
+// present too.
+taxjar_integration._has_no_nexus = function (frm) {
+	return Boolean(frm.doc.taxjar_nexus_reason) && !frm.doc.taxjar_has_nexus;
 };
 
 // Plain HTML field, rendered client-side straight off the already-loaded
@@ -394,15 +553,25 @@ taxjar_integration.render_shipping_taxability = function (frm) {
 	if (!frm.fields_dict.taxjar_freight_taxable_html) return;
 	const wrapper = frm.fields_dict.taxjar_freight_taxable_html.$wrapper;
 
-	if (frm.doc.taxjar_freight_taxable === undefined || frm.doc.taxjar_freight_taxable === null) {
-		wrapper.html("");
+	// Nothing is taxed without a nexus, so shipping taxability is moot - the
+	// pill would answer a question that does not arise.
+	//
+	// hide() rather than just emptying: the field's own wrapper keeps its
+	// margins when it holds no content, leaving a blank band above the
+	// breakdown on an unsaved doc.
+	if (
+		frm.doc.taxjar_freight_taxable === undefined ||
+		frm.doc.taxjar_freight_taxable === null ||
+		taxjar_integration._has_no_nexus(frm)
+	) {
+		wrapper.empty().hide();
 		return;
 	}
 
 	const taxable = cint(frm.doc.taxjar_freight_taxable);
 	const color = taxable ? "green" : "grey";
 	const label = taxable ? __("Yes") : __("No");
-	wrapper.html(`
+	wrapper.show().html(`
 		<div style="margin-bottom: 10px; font-size: var(--text-md);">
 			<span class="text-muted">${__("Is shipping charges taxable?")}</span>
 			<span class="indicator-pill ${color}" style="margin-left: 6px; font-size: var(--text-md);">${label}</span>
@@ -425,43 +594,17 @@ taxjar_integration.render_tax_breakdown = function (frm) {
 	if (frm.is_new()) {
 		frm.doc.taxjar_breakdown_html = taxjar_integration._no_breakdown_msg(true);
 	} else {
-		frm.doc.taxjar_breakdown_html = frm.doc.__onload?._taxjar_breakdown_html || taxjar_integration._no_breakdown_msg(false);
+		frm.doc.taxjar_breakdown_html =
+			frm.doc.__onload?._taxjar_breakdown_html || taxjar_integration._no_breakdown_msg(false, frm);
 	}
 	frm.refresh_field("taxjar_breakdown_html");
-};
 
-taxjar_integration.render_single_item_breakdown = function (frm, cdn, item_doctype) {
-	const row = frm.fields_dict.items?.grid?.grid_rows_by_docname[cdn];
-	const field = row?.grid_form?.fields_dict?.taxjar_item_breakdown_html;
-	if (!field) return;
-
-	const item = frappe.get_doc(item_doctype, cdn);
-	if (!item?.taxjar_item_breakdown_json) {
-		field.$wrapper.html(taxjar_integration._no_breakdown_msg());
-		return;
-	}
-
-	let data;
-	try {
-		data = JSON.parse(item.taxjar_item_breakdown_json);
-	} catch (e) {
-		field.$wrapper.html(taxjar_integration._no_breakdown_msg());
-		return;
-	}
-
-	let html = "";
-	const currency = data.currency || frm.doc.currency;
-
-	if (data.usd) {
-		html += `<p class="text-muted small" style="margin-bottom:4px"><strong>${__("Tax Calculation (USD)")}</strong></p>`;
-		html += taxjar_integration.build_item_table(data.usd.breakdown || [], "USD");
-		html += `<p class="text-muted small" style="margin-top:12px;margin-bottom:4px"><strong>${
-			__("Equivalent in Transaction Currency ({0})", [currency])
-		}</strong></p>`;
-	}
-
-	html += taxjar_integration.build_item_table(data.breakdown || [], currency);
-	field.$wrapper.html(html);
+	// The field carries no label - the section heading above already names it -
+	// but frappe renders the label block regardless and only hides it on
+	// request (base_input.js:22-25, toggle_label). Left alone it is an empty
+	// row of whitespace between the heading and the table. After
+	// refresh_field(), which re-renders the value beneath it.
+	frm.fields_dict.taxjar_breakdown_html.toggle_label?.(false);
 };
 
 // ── TaxJar Sync Status: sidebar pill (Sales Invoice) ──
@@ -478,7 +621,7 @@ taxjar_integration.SYNC_STATUS_COLORS = {
 	Synced: "green",
 	Failed: "red",
 	Queued: "blue",
-	"Not Applicable": "grey",
+	Excluded: "grey",
 };
 
 taxjar_integration._hide_sync_sidebar_pop = function () {
@@ -541,7 +684,7 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 
 // TaxJar isn't configured for this company at all - there's no sync state to
 // report, so no "TaxJar Status" label and no pill, just a plain link to go
-// fix it. Distinct from the "Not Applicable" pill (below), which covers a
+// fix it. Distinct from the "Excluded" pill (below), which covers a
 // company that IS enabled but hasn't reached _set_sync_status yet.
 taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
 	const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
@@ -551,7 +694,7 @@ taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
 				href="/app/taxjar-setup"
 				class="taxjar-not-enabled-link"
 				style="display: inline-flex; align-items: center; gap: 4px; text-decoration: underline dotted; text-underline-offset: 3px;"
-			>${__("TaxJar not enabled")}${icon}</a>
+			>${__("Configure TaxJar")}${icon}</a>
 		</div>
 	`);
 	$(document).find(".form-sidebar .sidebar-meta-details").after($section);
@@ -562,7 +705,7 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	// on_cancel delete path (see _set_sync_status), so docstatus === 2 is
 	// what turns those two into the cancel-flow wording below.
 	const cancelled = frm.doc.docstatus === 2;
-	const status = frm.doc.taxjar_sync_status || "Not Applicable";
+	const status = frm.doc.taxjar_sync_status || "Excluded";
 	let label, color, info_text;
 
 	if (frm.doc.docstatus === 0) {
