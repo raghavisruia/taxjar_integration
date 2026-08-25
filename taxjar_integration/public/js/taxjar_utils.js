@@ -21,9 +21,208 @@ taxjar_integration.US_STATE_NAMES = {
 	WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
 };
 taxjar_integration.US_STATE_CODES = Object.keys(taxjar_integration.US_STATE_NAMES);
-taxjar_integration.CA_PROVINCE_CODES = [
-	"AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
-];
+
+// ISO 3166-2:CA - https://en.wikipedia.org/wiki/ISO_3166-2:CA
+taxjar_integration.CA_PROVINCE_NAMES = {
+	AB: "Alberta", BC: "British Columbia", MB: "Manitoba", NB: "New Brunswick",
+	NL: "Newfoundland and Labrador", NS: "Nova Scotia", NT: "Northwest Territories",
+	NU: "Nunavut", ON: "Ontario", PE: "Prince Edward Island", QC: "Quebec",
+	SK: "Saskatchewan", YT: "Yukon",
+};
+taxjar_integration.CA_PROVINCE_CODES = Object.keys(taxjar_integration.CA_PROVINCE_NAMES);
+
+taxjar_integration.REGION_NAMES_BY_COUNTRY = {
+	US: taxjar_integration.US_STATE_NAMES,
+	CA: taxjar_integration.CA_PROVINCE_NAMES,
+};
+
+taxjar_integration.region_full_name = function (country, code) {
+	return (taxjar_integration.REGION_NAMES_BY_COUNTRY[country] || {})[code] || code;
+};
+
+// One frappe.ui.form MultiCheck field per country (US states, CA provinces),
+// each with its own built-in "Select All"/"Unselect All" buttons - real desk
+// controls rather than a hand-built checkbox grid. `selected` is a Set of
+// "US:TX"-style keys. Returns dialog field defs to splice into a Dialog's
+// `fields` array, right after the Exemption Type Select. Shared by the
+// Customers page's bulk dialog and the Customer form's per-customer dialog.
+taxjar_integration.build_region_multicheck_fields = function (selected) {
+	taxjar_integration._inject_multicheck_column_styles();
+
+	const to_options = (codes, country) =>
+		codes.map((code) => ({
+			label: taxjar_integration.region_full_name(country, code),
+			value: `${country}:${code}`,
+			checked: selected.has(`${country}:${code}`),
+		}));
+
+	return [
+		// Named so update_visibility can hide the section itself (not just
+		// its individual fields) for a type like Non Exempt that shows
+		// neither the hint nor the grid - otherwise the section's own
+		// divider and padding are left behind as bare whitespace with
+		// nothing inside it.
+		{ fieldtype: "Section Break", fieldname: "taxjar_regions_section" },
+		{
+			fieldtype: "HTML",
+			fieldname: "taxjar_regions_hint",
+			options: `<p class="text-muted small">${__(
+				"Choose an exemption type to select exempt regions."
+			)}</p>`,
+		},
+		{
+			fieldtype: "MultiCheck",
+			fieldname: "taxjar_us_states",
+			label: __("US States"),
+			options: to_options(taxjar_integration.US_STATE_CODES, "US"),
+			columns: 3,
+			select_all: true,
+		},
+		{
+			fieldtype: "MultiCheck",
+			fieldname: "taxjar_ca_provinces",
+			label: __("CA Provinces"),
+			options: to_options(taxjar_integration.CA_PROVINCE_CODES, "CA"),
+			columns: 2,
+			select_all: true,
+		},
+		{
+			fieldtype: "HTML",
+			fieldname: "taxjar_regions_warning",
+			options: `<p class="taxjar-region-requirement-warning text-danger small" style="display:none;">
+				${__("Select at least one region for this exemption type.")}
+			</p>`,
+		},
+	];
+};
+
+// MultiCheck's own `columns` option relies on this rule (multicheck.js sets
+// --checkbox-options-columns inline and expects `.checkbox-options { columns:
+// var(...) }` to consume it) - frappe only ships that rule in its website/
+// portal stylesheet (templates/styles/standard.css), not the desk bundle, so
+// a MultiCheck field inside a desk dialog renders as one long single column
+// without it. Injected once.
+taxjar_integration._inject_multicheck_column_styles = function () {
+	if (document.getElementById("taxjar-multicheck-column-styles")) return;
+	const style = document.createElement("style");
+	style.id = "taxjar-multicheck-column-styles";
+	style.textContent = `
+		.checkbox-options {
+			columns: var(--checkbox-options-columns);
+		}
+	`;
+	document.head.appendChild(style);
+};
+
+// Reads both MultiCheck fields built by build_region_multicheck_fields back
+// into {country, state} rows, the shape configure_exemption expects.
+taxjar_integration.get_selected_regions = function (dialog) {
+	const values = [
+		...(dialog.get_value("taxjar_us_states") || []),
+		...(dialog.get_value("taxjar_ca_provinces") || []),
+	];
+	return values.map((value) => {
+		const [country, state] = value.split(":");
+		return { country, state };
+	});
+};
+
+// Types that require at least one exempt region on file - kept in lockstep
+// with _EXEMPTION_TYPES_REQUIRING_REGIONS in taxjar_integration.py, the real
+// enforcement point. This is a live UX layer on top of that server throw,
+// not a replacement for it.
+const EXEMPTION_TYPES_REQUIRING_REGIONS = new Set(["Wholesale", "Government", "Other"]);
+
+// Wires a dialog built from build_region_multicheck_fields: hides the region
+// fields (showing the hint instead) until a type is chosen, and disables the
+// primary action with a warning while a region-scoped type has no regions
+// checked. Returns an `update()` function the caller invokes on
+// exemption_type change and once after dialog.show().
+taxjar_integration.wire_exemption_dialog = function (dialog) {
+	const $warning = dialog.fields_dict.taxjar_regions_warning.$wrapper.find(
+		".taxjar-region-requirement-warning"
+	);
+
+	// MultiCheck.toggle() forces a full refresh(), which re-derives its
+	// checkboxes from the field's original df.options (construction-time
+	// `checked` flags) and overwrites selected_options from those - calling
+	// it on every checkbox click would silently undo the very click that
+	// triggered it. So visibility is only touched here, driven off whether
+	// "enabled" actually flipped, never on every requirement check.
+	let regions_visible = null;
+	const update_visibility = () => {
+		const type = dialog.get_value("exemption_type");
+		const enabled = EXEMPTION_TYPES_REQUIRING_REGIONS.has(type);
+
+		// Blank has something to say ("choose a type"); Non Exempt has
+		// nothing useful to add once the grid is hidden - showing
+		// not-a-real-instruction text there would read as a leftover rather
+		// than a considered "nothing to select" state. Safe to touch on
+		// every call: a plain HTML field, not a MultiCheck one, so toggling
+		// it carries none of the destructive-refresh risk guarded against
+		// below.
+		dialog.fields_dict.taxjar_regions_hint.toggle(!type);
+
+		// The section itself (its divider + padding) must disappear along
+		// with its contents for a type like Non Exempt that shows neither
+		// the hint nor the grid - otherwise it's left behind as bare
+		// whitespace between Exemption Type and Apply. Section isn't a
+		// Control subclass (no .toggle()) - .show()/.hide() are its own
+		// API, and - like the hint above - a plain class toggle, not the
+		// MultiCheck-specific refresh() risk below.
+		if (!type || enabled) {
+			dialog.fields_dict.taxjar_regions_section.show();
+		} else {
+			dialog.fields_dict.taxjar_regions_section.hide();
+		}
+
+		if (enabled === regions_visible) return;
+		regions_visible = enabled;
+
+		dialog.fields_dict.taxjar_us_states.toggle(enabled);
+		dialog.fields_dict.taxjar_ca_provinces.toggle(enabled);
+	};
+
+	const update_requirement = () => {
+		const type = dialog.get_value("exemption_type");
+		const has_region = taxjar_integration.get_selected_regions(dialog).length > 0;
+		const blocked = EXEMPTION_TYPES_REQUIRING_REGIONS.has(type) && !has_region;
+
+		$warning.toggle(blocked);
+		if (blocked) {
+			dialog.disable_primary_action();
+		} else {
+			dialog.enable_primary_action();
+		}
+	};
+
+	// Switching to a type that doesn't take regions (blank, or Non Exempt)
+	// must drop whatever was checked for the PREVIOUS type - otherwise
+	// regions picked for e.g. Wholesale silently ride along underneath,
+	// invisible once update_visibility hides the grid for either of these.
+	// select_all(true) is the same call the "Unselect All" button makes - a
+	// direct checkbox update, not the destructive toggle()-driven refresh()
+	// above.
+	const clear_regions_if_not_required = () => {
+		if (EXEMPTION_TYPES_REQUIRING_REGIONS.has(dialog.get_value("exemption_type"))) return;
+		dialog.fields_dict.taxjar_us_states.select_all(true);
+		dialog.fields_dict.taxjar_ca_provinces.select_all(true);
+	};
+
+	// MultiCheck's Select All/Unselect All buttons set checkbox.checked
+	// directly (not via .prop()), which never dispatches a "change" event -
+	// on_change is the control's own hook, fired for both that and a single
+	// checkbox click, so it's the only reliable place to catch every case.
+	// Only the (non-destructive) requirement check runs from here.
+	dialog.fields_dict.taxjar_us_states.df.on_change = update_requirement;
+	dialog.fields_dict.taxjar_ca_provinces.df.on_change = update_requirement;
+
+	return () => {
+		clear_regions_if_not_required();
+		update_visibility();
+		update_requirement();
+	};
+};
 
 taxjar_integration.check_shipping_address = function (frm) {
 	if (frm.doc.shipping_address_name) {

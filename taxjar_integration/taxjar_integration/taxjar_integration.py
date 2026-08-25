@@ -2092,8 +2092,33 @@ _CA_PROVINCES = {
 _STATES_BY_COUNTRY = {"US": _US_STATES, "CA": _CA_PROVINCES}
 
 
+# The two values that describe a customer's taxability without scoping it to
+# specific regions - "" (never configured) and "Non Exempt" (explicitly
+# taxable everywhere). Every other option is a real, region-scoped exemption.
+_EXEMPTION_TYPES_REQUIRING_REGIONS = {"Wholesale", "Government", "Other"}
+
+
 def _validate_exempt_regions(doc):
-	for row in doc.get("taxjar_exempt_regions") or []:
+	"""Region rows must be valid for their country, and a region-scoped
+	exemption type must actually carry at least one region.
+
+	The second rule is what makes exemption explicit: leaving regions blank
+	used to mean "exempt everywhere", which was never a decision anyone
+	visibly made. Now "everywhere" means every region was picked (the dialog's
+	Select all does exactly that) - an exemption type with zero regions is
+	simply not a valid state to save, regardless of which of the three write
+	paths reaches here (the Manage Exemption dialog's configure_exemption, the
+	list's inline set_exemption_type, or a direct Customer.save()).
+	"""
+	regions = doc.get("taxjar_exempt_regions") or []
+
+	if doc.get("taxjar_exemption_type") in _EXEMPTION_TYPES_REQUIRING_REGIONS and not regions:
+		frappe.throw(
+			_("Select at least one exempt region for this exemption type. Use Select all to apply it everywhere."),
+			title=_("Exempt Region Required"),
+		)
+
+	for row in regions:
 		valid_states = _STATES_BY_COUNTRY.get(row.country)
 		if not valid_states:
 			continue
@@ -2106,14 +2131,40 @@ def _validate_exempt_regions(doc):
 
 
 def on_customer_update(doc, method):
-	"""Enqueue TaxJar customer sync when exemption fields change."""
-	if not _is_taxjar_enabled():
-		return
+	"""Enqueue TaxJar customer sync when exemption fields change.
 
+	Two cases used to leave taxjar_customer_sync_status stale with no
+	indication why: TaxJar disabled, and nothing left to push once the
+	exemption is cleared. Both now clear the status explicitly (via
+	_set_customer_sync_status, same as a real sync attempt would) instead of
+	silently doing nothing - "I changed/cleared the exemption and the status
+	didn't move" should never be unexplained.
+
+	A third case - master switch on but no company actually configured -
+	needs no equivalent handling here: _is_taxjar_enabled() already requires
+	at least one company to have calculate/create on (the exact predicate the
+	loop below uses to decide what to enqueue), so reaching the loop at all
+	guarantees at least one enqueue.
+	"""
 	if not _has_taxjar_fields_changed(doc):
 		return
 
+	if not _is_taxjar_enabled():
+		if doc.get("taxjar_customer_sync_status"):
+			_set_customer_sync_status(doc.name, "")
+		frappe.msgprint(
+			_("TaxJar is disabled, so this customer's exemption details were saved but not sent to TaxJar."),
+			indicator="orange",
+			alert=True,
+		)
+		return
+
 	if not doc.get("taxjar_exemption_type") and not doc.get("taxjar_customer_id"):
+		# Nothing to push - no exemption to set, no existing TaxJar customer
+		# record to update - but a stale Queued/Failed status from an earlier
+		# attempt must not linger now that the exemption itself is gone.
+		if doc.get("taxjar_customer_sync_status"):
+			_set_customer_sync_status(doc.name, "")
 		return
 
 	doc.db_set("taxjar_customer_sync_status", "Queued", update_modified=False)

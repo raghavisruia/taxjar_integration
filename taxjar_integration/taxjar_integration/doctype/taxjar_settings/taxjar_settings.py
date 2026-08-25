@@ -649,7 +649,7 @@ def make_custom_fields(update=True):
 			),
 		],
 		"Customer": [
-			# ── TaxJar Tax Exemption (user-editable) ───────────────
+			# ── TaxJar Tax Exemption (summary card + sync status) ──
 			dict(
 				fieldname="taxjar_section_break",
 				fieldtype="Section Break",
@@ -658,17 +658,14 @@ def make_custom_fields(update=True):
 				collapsible=0,
 			),
 			dict(
-				fieldname="taxjar_exemption_type",
-				fieldtype="Select",
+				fieldname="taxjar_exemption_summary_html",
+				fieldtype="HTML",
 				insert_after="taxjar_section_break",
-				label="TaxJar Exemption Type",
-				options="\nWholesale\nGovernment\nNon Exempt\nOther",
-				description="Maps to TaxJar's exemption_type. Leave blank for normal taxable customers.",
 			),
 			dict(
 				fieldname="taxjar_column_break",
 				fieldtype="Column Break",
-				insert_after="taxjar_exemption_type",
+				insert_after="taxjar_exemption_summary_html",
 			),
 			dict(
 				fieldname="taxjar_customer_sync_status",
@@ -679,22 +676,20 @@ def make_custom_fields(update=True):
 				read_only=1,
 			),
 			dict(
-				fieldname="taxjar_exempt_regions",
-				fieldtype="Table",
+				fieldname="taxjar_customer_sync_error",
+				fieldtype="Small Text",
 				insert_after="taxjar_customer_sync_status",
-				label="Tax Exempt Regions",
-				options="TaxJar Customer Exempt Region",
-				description="States where this customer is exempt. Only applies when Exemption Type is set.",
-				depends_on="eval: doc.taxjar_exemption_type && doc.taxjar_exemption_type !== 'Non Exempt'",
+				label="TaxJar Sync Error",
+				read_only=1,
+				depends_on="eval: doc.taxjar_customer_sync_status == 'Failed'",
 			),
-			# ── TaxJar Sync Details (read-only, collapsible) ───────
+			# ── TaxJar Tax Exemption Sync Details (collapsed by default) ───
 			dict(
 				fieldname="taxjar_sync_details_section",
 				fieldtype="Section Break",
-				insert_after="taxjar_exempt_regions",
+				insert_after="taxjar_customer_sync_error",
 				label="TaxJar Sync Details",
 				collapsible=1,
-				depends_on="eval: doc.taxjar_customer_id",
 			),
 			dict(
 				fieldname="taxjar_customer_id",
@@ -702,7 +697,7 @@ def make_custom_fields(update=True):
 				insert_after="taxjar_sync_details_section",
 				label="TaxJar Customer ID",
 				read_only=1,
-				description="Auto-set on first sync to TaxJar. Used as customer_id in TaxJar API calls.",
+				description="",
 			),
 			dict(
 				fieldname="taxjar_sync_details_cb",
@@ -716,23 +711,49 @@ def make_custom_fields(update=True):
 				label="Last Synced to TaxJar",
 				read_only=1,
 			),
+			# ── TaxJar Exemption Raw Data (hidden - backing fields for the
+			# summary card + dialog above; configure_exemption is their only
+			# write path) ───────────────────────────────────────────
 			dict(
-				fieldname="taxjar_customer_sync_error",
-				fieldtype="Small Text",
+				fieldname="taxjar_raw_section",
+				fieldtype="Section Break",
 				insert_after="taxjar_last_synced",
-				label="TaxJar Sync Error",
-				read_only=1,
-				depends_on="eval: doc.taxjar_customer_sync_status == 'Failed'",
+				label="TaxJar Exemption Raw Data",
+				collapsible=0,
+			),
+			dict(
+				fieldname="taxjar_exemption_type",
+				fieldtype="Select",
+				insert_after="taxjar_raw_section",
+				label="TaxJar Exemption Type",
+				options="\nWholesale\nGovernment\nNon Exempt\nOther",
+				hidden=1,
+				description="",
+			),
+			dict(
+				fieldname="taxjar_raw_column_break",
+				fieldtype="Column Break",
+				insert_after="taxjar_exemption_type",
 			),
 			dict(
 				# Customer-side twin of taxjar_sync_retryable - see its comment.
 				fieldname="taxjar_customer_sync_retryable",
 				fieldtype="Check",
-				insert_after="taxjar_customer_sync_error",
+				insert_after="taxjar_raw_column_break",
 				label="TaxJar Retry Pending",
 				read_only=1,
 				hidden=1,
 				no_copy=1,
+			),
+			dict(
+				fieldname="taxjar_exempt_regions",
+				fieldtype="Table",
+				insert_after="taxjar_customer_sync_retryable",
+				label="Tax Exempt Regions",
+				options="TaxJar Customer Exempt Region",
+				depends_on="eval: doc.taxjar_exemption_type && doc.taxjar_exemption_type !== 'Non Exempt'",
+				hidden=1,
+				description="",
 			),
 		],
 	}

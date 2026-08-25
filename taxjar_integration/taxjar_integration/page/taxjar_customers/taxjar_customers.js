@@ -18,11 +18,6 @@ frappe.pages["taxjar-customers"].on_page_show = function (wrapper) {
 
 const EXEMPTION_OPTIONS = ["", "Wholesale", "Government", "Non Exempt", "Other"];
 
-// Defined once in taxjar_utils.js (loaded globally via the app bundle, which is
-// present on every desk page including this one).
-const US_STATES = taxjar_integration.US_STATE_CODES;
-const CA_PROVINCES = taxjar_integration.CA_PROVINCE_CODES;
-
 const STATUS_COLORS = {
 	Synced: "green",
 	Failed: "red",
@@ -708,112 +703,48 @@ class TaxJarCustomerConfig {
 			? __("Configure Exemption: {0}", [rows[0].customer_name || rows[0].name])
 			: __("Configure Exemption: {0} customers", [rows.length]);
 
-		const make_checkboxes = (codes, country) =>
-			codes
-				.map((code) => {
-					const checked = selected.has(`${country}:${code}`) ? "checked" : "";
-					return `<label class="taxjar-region-option">
-						<input type="checkbox" class="region-cb" data-country="${country}" data-state="${code}" ${checked}>
-						<span>${code}</span>
-					</label>`;
-				})
-				.join("");
+		const fields = [
+			{
+				fieldtype: "Select",
+				fieldname: "exemption_type",
+				label: __("Exemption Type"),
+				options: EXEMPTION_OPTIONS.map((opt) => ({
+					label: opt || __("(Not Set)"),
+					value: opt,
+				})),
+				default: exemption_type,
+				change: () => update_requirement(),
+			},
+		];
+		if (rows.length > 1) {
+			fields.push({
+				fieldtype: "HTML",
+				fieldname: "taxjar_bulk_note",
+				options: `<p class="text-muted small">${__(
+					"Applying will replace the exempt regions on all {0} selected customers.",
+					[rows.length]
+				)}</p>`,
+			});
+		}
+		fields.push(...taxjar_integration.build_region_multicheck_fields(selected));
 
 		const dialog = new frappe.ui.Dialog({
 			title,
 			size: "large",
-			fields: [
-				{
-					fieldtype: "Select",
-					fieldname: "exemption_type",
-					label: __("Exemption Type"),
-					options: EXEMPTION_OPTIONS.map((opt) => ({
-						label: opt || __("(Not Set)"),
-						value: opt,
-					})),
-					default: exemption_type,
-					change: () => toggle_regions(),
-				},
-				{ fieldtype: "Section Break" },
-				{
-					fieldtype: "HTML",
-					fieldname: "regions_html",
-					options: `
-						<div class="taxjar-regions">
-							${
-								rows.length > 1
-									? `<p class="text-muted small">${__(
-											"Applying will replace the exempt regions on all {0} selected customers.",
-											[rows.length]
-									  )}</p>`
-									: ""
-							}
-							<p class="taxjar-regions-hint text-muted small">${__(
-								"Choose an exemption type to select exempt regions."
-							)}</p>
-							<div class="taxjar-regions-grids" style="display:flex;gap:32px;">
-								<div style="flex:1;">
-									<div class="taxjar-regions-head">
-										<strong>${__("US States")}</strong>
-										<label class="taxjar-region-select-all">
-											<input type="checkbox" class="select-all-country" data-country="US">
-											${__("Select All")}
-										</label>
-									</div>
-									<div class="us-states-grid">${make_checkboxes(US_STATES, "US")}</div>
-								</div>
-								<div style="flex:1;">
-									<div class="taxjar-regions-head">
-										<strong>${__("CA Provinces")}</strong>
-										<label class="taxjar-region-select-all">
-											<input type="checkbox" class="select-all-country" data-country="CA">
-											${__("Select All")}
-										</label>
-									</div>
-									<div class="ca-provinces-grid">${make_checkboxes(CA_PROVINCES, "CA")}</div>
-								</div>
-							</div>
-						</div>
-					`,
-				},
-			],
+			fields,
 			primary_action_label: __("Apply"),
 			primary_action: () => {
 				const type = dialog.get_value("exemption_type");
-				const regions = type
-					? dialog.$wrapper
-							.find(".region-cb:checked")
-							.map((_, cb) => ({
-								country: $(cb).data("country"),
-								state: $(cb).data("state"),
-							}))
-							.get()
-					: [];
+				const regions = type ? taxjar_integration.get_selected_regions(dialog) : [];
 
 				dialog.hide();
 				this.save_exemption(rows, type, regions);
 			},
 		});
 
-		// The regions grid is only meaningful once a type is chosen - same rule
-		// the Regions column follows, applied live as the Select changes.
-		const toggle_regions = () => {
-			const enabled = !!dialog.get_value("exemption_type");
-			const $regions = dialog.$wrapper.find(".taxjar-regions-grids");
-			$regions.toggleClass("taxjar-regions-disabled", !enabled);
-			$regions.find("input").prop("disabled", !enabled);
-			dialog.$wrapper.find(".taxjar-regions-hint").toggle(!enabled);
-		};
-
-		dialog.$wrapper.on("change", ".select-all-country", (e) => {
-			const country = $(e.currentTarget).data("country");
-			dialog.$wrapper
-				.find(`.region-cb[data-country="${country}"]`)
-				.prop("checked", e.currentTarget.checked);
-		});
-
+		const update_requirement = taxjar_integration.wire_exemption_dialog(dialog);
 		dialog.show();
-		toggle_regions();
+		update_requirement();
 	}
 
 	save_exemption(rows, exemption_type, regions) {

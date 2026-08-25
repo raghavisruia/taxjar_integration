@@ -83,44 +83,6 @@
 	font-size: var(--text-sm);
 }
 
-/* ── Configure Exemption dialog ─────────────────────────────────────────── */
-
-.taxjar-regions-head {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	margin-bottom: 8px;
-}
-
-.taxjar-region-select-all {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	margin: 0;
-	font-weight: normal;
-	font-size: var(--text-sm);
-	cursor: pointer;
-}
-
-.taxjar-region-option {
-	display: inline-flex;
-	align-items: center;
-	gap: 2px;
-	width: 60px;
-	margin: 2px 4px;
-	font-size: var(--text-sm);
-	font-weight: normal;
-	cursor: pointer;
-}
-
-/* Regions mean nothing without an exemption type. Greyed rather than hidden so
-   the dialog does not jump in height when a type is picked, and so it is
-   visible that there is something here to fill in next. */
-.taxjar-regions-disabled {
-	opacity: 0.45;
-	pointer-events: none;
-}
-
-.taxjar-regions-hint {
-	margin-bottom: 8px;
-}
+/* The Configure Exemption dialog's region pickers are frappe.ui.form
+   MultiCheck fields now - styled by desk's own control CSS plus
+   taxjar_integration._inject_multicheck_column_styles(), not this file. */
