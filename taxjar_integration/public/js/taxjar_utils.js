@@ -739,7 +739,7 @@ taxjar_integration.render_addresses = function (frm) {
 taxjar_integration._no_breakdown_msg = function (is_new, frm) {
 	let text;
 	if (is_new) {
-		text = __("Please save to see tax breakdown.");
+		text = __("Save transaction to fetch sales tax & view breakup.");
 	} else if (frm && taxjar_integration._has_no_nexus(frm)) {
 		// There is no breakdown and there never will be - say why, rather than
 		// reporting an absence the user cannot act on.

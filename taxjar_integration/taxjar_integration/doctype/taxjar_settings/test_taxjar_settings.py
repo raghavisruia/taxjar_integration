@@ -8066,7 +8066,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 	def test_no_breakdown_msg_distinguishes_unsaved_doc(self):
 		js = self._read_js("taxjar_utils.js")
 		fn = js.split("_no_breakdown_msg = function (is_new, frm) {")[1].split("\n};")[0]
-		self.assertIn("Please save to see tax breakdown.", fn)
+		self.assertIn("Save transaction to fetch sales tax & view breakup.", fn)
 		# Still keyed on is_new; a ternary became an if/else when the no-nexus
 		# case was added as a third branch.
 		self.assertIn("if (is_new) {", fn)
