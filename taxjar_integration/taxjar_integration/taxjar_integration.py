@@ -1685,9 +1685,7 @@ TAXJAR_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
 TAXJAR_STATUS_MESSAGES = {
 	400: "TaxJar rejected the request as malformed",
-	401: "TaxJar rejected the API token",
 	403: "This TaxJar account is not allowed to make that request",
-	404: "TaxJar has no record of this resource",
 	405: "TaxJar rejected the request method",
 	406: "TaxJar cannot answer in the requested format",
 	410: "This resource has been removed from TaxJar",
@@ -1704,9 +1702,14 @@ TAXJAR_STATUS_MESSAGES = {
 # failures with something to act on: the transient ones already read as transient,
 # and _set_sync_status() adds the retry sentence for them anyway.
 _STATUS_HINTS = {
-	401: "Check this company's API token in TaxJar Settings, and that it matches the current API mode (Sandbox/Live).",
 	403: "Check that the TaxJar plan on this account covers this API.",
-	404: "It may have been created in the other API mode (Sandbox/Live), or already deleted in TaxJar.",
+}
+
+# Statuses whose own detail never adds anything a user can act on, so the whole
+# message is ours.
+_FIXED_STATUS_MESSAGES = {
+	401: "API Token is invalid, go to guided setup to configure.",
+	404: "Transaction not found in TaxJar, can't update the latest changes.",
 }
 
 # The two rejections this integration hits most often, both close to unreadable
@@ -1714,11 +1717,11 @@ _STATUS_HINTS = {
 _DETAIL_OVERRIDES = (
 	(
 		("already imported", "already exists"),
-		"This transaction already exists in TaxJar under the same ID. Delete it in TaxJar, or amend this document so it syncs under a new ID - retrying on its own will not clear this.",
+		"Transaction ID already exists in TaxJar, please create a new transaction.",
 	),
 	(
 		("exemption_type must be",),
-		"TaxJar will not accept an exempt transaction that still carries sales tax. Either set the customer (or this document) to Non Exempt, or remove the TaxJar tax rows before syncing.",
+		"Exempt transactions cannot have sales tax, please clear exemption or remove sales tax.",
 	),
 )
 
@@ -1835,6 +1838,9 @@ def _describe_response_error(status, detail):
 	for needles, message in _DETAIL_OVERRIDES:
 		if any(needle in detail.lower() for needle in needles):
 			return message
+
+	if status in _FIXED_STATUS_MESSAGES:
+		return _FIXED_STATUS_MESSAGES[status]
 
 	headline = TAXJAR_STATUS_MESSAGES.get(status) or "TaxJar rejected the request"
 	if detail:
@@ -1960,7 +1966,7 @@ def sync_customer_to_taxjar(customer_name, company=None):
 			error="TaxJar client is not configured",
 			context={"doctype": "Customer", "name": customer_name, "company": company},
 		)
-		_set_customer_sync_status(customer_name, "Failed", error="TaxJar is not configured for this company.", retryable=True)
+		_set_customer_sync_status(customer_name, "Failed", error="TaxJar is not configured for this company.")
 		return
 
 	customer_doc = frappe.get_doc("Customer", customer_name)
