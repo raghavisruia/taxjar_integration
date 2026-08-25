@@ -728,7 +728,7 @@ class TestSetSalesTax(UnitTestCase):
 
 class TestGetLineItemDict(UnitTestCase):
 
-	def _make_item(self, item_code=None, product_tax_category=None):
+	def _make_item(self, item_code=None, product_tax_category=None, item_name=None, description=None):
 		item = MagicMock()
 		item.get = lambda key, default=None: {
 			"idx": 1,
@@ -736,6 +736,8 @@ class TestGetLineItemDict(UnitTestCase):
 			"rate": 100.0,
 			"item_code": item_code,
 			"product_tax_category": product_tax_category,
+			"item_name": item_name,
+			"description": description,
 		}.get(key, default)
 		return item
 
@@ -786,6 +788,41 @@ class TestGetLineItemDict(UnitTestCase):
 		item = self._make_item(item_code="ITEM-001", product_tax_category=None)
 		result = self._call(item, item_master_category=None)
 		self.assertIsNone(result["product_tax_code"])
+
+	# product_identifier / description — TaxJar's create-order line_items shape
+	# (https://developers.taxjar.com/api/reference/#post-create-an-order-transaction)
+
+	def test_product_identifier_is_the_item_code(self):
+		"""item_code is the row's reference to the Item master, and by this
+		app's autoname convention (field:item_code) already equals that Item
+		doc's own name - no separate lookup needed to satisfy "the name of
+		the Item"."""
+		item = self._make_item(item_code="ITEM-001")
+		result = self._call(item)
+		self.assertEqual(result["product_identifier"], "ITEM-001")
+
+	def test_description_combines_item_name_and_row_description(self):
+		item = self._make_item(item_code="ITEM-001", item_name="Fuzzy Widget", description="Extra soft edition")
+		result = self._call(item)
+		self.assertEqual(result["description"], "Fuzzy Widget - Extra soft edition")
+
+	def test_description_falls_back_to_item_name_alone(self):
+		"""Quotation/Sales Order rows commonly carry item_name with no free-text
+		description filled in - the combined description must not end up with
+		a dangling separator in that case."""
+		item = self._make_item(item_code="ITEM-001", item_name="Fuzzy Widget", description=None)
+		result = self._call(item)
+		self.assertEqual(result["description"], "Fuzzy Widget")
+
+	def test_description_falls_back_to_row_description_alone(self):
+		item = self._make_item(item_code="ITEM-001", item_name=None, description="Extra soft edition")
+		result = self._call(item)
+		self.assertEqual(result["description"], "Extra soft edition")
+
+	def test_description_is_blank_when_neither_is_set(self):
+		item = self._make_item(item_code="ITEM-001", item_name=None, description=None)
+		result = self._call(item)
+		self.assertEqual(result["description"], "")
 
 
 # ── Phase 2: sync_transaction_to_taxjar row detection ────────────────────────
@@ -4931,6 +4968,17 @@ class TestSalesInvoiceClientScript(UnitTestCase):
 		js = self._read_js()
 		self.assertIn('__("TaxJar")', js)
 
+	def test_manual_sync_shows_a_dialog_on_failure(self):
+		"""A failed manual sync used to leave the user with only the success
+		alert wording and a Sync Status field to notice on their own - the
+		callback now checks the freshly-reloaded status and surfaces the
+		actual error via a dialog instead of claiming success either way."""
+		js = self._read_js()
+		callback_fn = js.split("callback() {")[1].split("\n\t\t\t}\n")[0]
+		self.assertIn('frm.doc.taxjar_sync_status === "Failed"', callback_fn)
+		self.assertIn("taxjar_integration.show_taxjar_sync_error(", callback_fn)
+		self.assertIn("frm.doc.taxjar_sync_error", callback_fn)
+
 
 # ── Phase 6: retry_failed_taxjar_syncs ───────────────────────────────────────
 
@@ -5578,6 +5626,19 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		js = self._read_js()
 		self.assertIn('__("TaxJar")', js)
 
+	def test_manual_sync_shows_a_dialog_on_failure(self):
+		"""A failed manual sync used to leave the user with only the "queued"
+		alert and a Sync Status field to notice on their own - the .then()
+		chain now checks the freshly-reloaded status and surfaces the actual
+		error via a dialog instead of claiming success either way."""
+		js = self._read_js()
+		sync_click = js.split('"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",')[1].split(
+			"\n\t\t\t\t},\n"
+		)[0]
+		self.assertIn('frm.doc.taxjar_customer_sync_status === "Failed"', sync_click)
+		self.assertIn("taxjar_integration.show_taxjar_sync_error(", sync_click)
+		self.assertIn("frm.doc.taxjar_customer_sync_error", sync_click)
+
 	def test_dead_state_filter_code_removed(self):
 		"""The raw taxjar_exempt_regions grid is hidden and configure_exemption
 		is the only write path now - the per-row state-filter code that kept
@@ -5637,11 +5698,11 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		js = self._read_js()
 		fn = js.split("function _exemption_card_body(frm) {")[1].split("\nfunction ")[0]
 		self.assertIn(
-			'_exemption_region_block("US", us_codes, taxjar_integration.US_STATE_CODES, __("United States"), __("US States"), __("All states selected"))',
+			'_exemption_region_block("US", us_codes, taxjar_integration.US_STATE_CODES, __("United States"), __("US States"), __("All states exempted"))',
 			fn,
 		)
 		self.assertIn(
-			'_exemption_region_block("CA", ca_codes, taxjar_integration.CA_PROVINCE_CODES, __("Canada"), __("CA Provinces"), __("All provinces selected"))',
+			'_exemption_region_block("CA", ca_codes, taxjar_integration.CA_PROVINCE_CODES, __("Canada"), __("CA Provinces"), __("All provinces exempted"))',
 			fn,
 		)
 		self.assertIn("No regions selected", fn)
@@ -5699,6 +5760,20 @@ class TestSharedRegionHelpersJS(UnitTestCase):
 		import os
 		with open(os.path.join(self._js_dir(), filename)) as f:
 			return f.read()
+
+	def test_show_taxjar_sync_error_links_guided_setup(self):
+		"""The stored Sync Error field is a Small Text field (plain text, not
+		HTML) - only this dialog's own rendering turns the phrase "guided
+		setup" (from classify_taxjar_error's 401 message) into an actual
+		link, without touching what gets saved to that field."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration.show_taxjar_sync_error = function (title, message) {")[1].split(
+			"\n};"
+		)[0]
+		self.assertIn("frappe.utils", fn)
+		self.assertIn(".escape_html(message)", fn)
+		self.assertIn('<a href="/app/taxjar-setup">', fn)
+		self.assertIn('frappe.msgprint({ title, message: html, indicator: "red" });', fn)
 
 	def test_build_region_multicheck_fields_present(self):
 		js = self._read_js("taxjar_utils.js")
@@ -6897,6 +6972,21 @@ class TestTaxJarSettingsJsonNexusTab(UnitTestCase):
 		doctype_json = self._doctype_json()
 		tab = self._field(doctype_json, "nexus_tab")
 		self.assertEqual(tab["label"], "Nexus & Product Category")
+
+	def test_state_nexus_section_labelled(self):
+		"""The Update Nexus List button + table previously sat directly under
+		the Nexus & Product Category tab with no section heading of their
+		own - unlike the Product Tax Category block right below it, which
+		does have one. section_state_nexus gives this block the same
+		treatment."""
+		doctype_json = self._doctype_json()
+		section = self._field(doctype_json, "section_state_nexus")
+		self.assertEqual(section["fieldtype"], "Section Break")
+		self.assertEqual(section["label"], "State Nexus")
+
+		order = doctype_json["field_order"]
+		self.assertLess(order.index("nexus_tab"), order.index("section_state_nexus"))
+		self.assertLess(order.index("section_state_nexus"), order.index("update_nexus_list_btn"))
 
 	def test_nexus_last_synced_is_hidden(self):
 		"""The date is still shown - see
@@ -10549,7 +10639,7 @@ class TestClassifyTaxJarError(UnitTestCase):
 
 	def test_status_carries_a_readable_headline(self):
 		info = classify_taxjar_error(_response_error(401, "Not authorized for route"))
-		self.assertEqual(info["message"], "API Token is invalid, go to guided setup to configure.")
+		self.assertEqual(info["message"], "TaxJar API Token is invalid, go to guided setup to configure.")
 		self.assertNotIn("route", info["message"], "TaxJar's own 401 detail says nothing actionable")
 
 	def test_missing_resource_says_what_to_do(self):
