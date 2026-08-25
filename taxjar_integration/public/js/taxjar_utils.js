@@ -40,6 +40,20 @@ taxjar_integration.region_full_name = function (country, code) {
 	return (taxjar_integration.REGION_NAMES_BY_COUNTRY[country] || {})[code] || code;
 };
 
+// ── Sync failure dialog ──
+// Some of taxjar_integration.py's classify_taxjar_error() messages (e.g. an
+// invalid API token) point the user at the guided setup wizard by name -
+// turn that phrase into an actual link wherever the message reaches an
+// interactive dialog. The stored Sync Error field itself stays plain text
+// (it's a Small Text field, which renders as text, not HTML) - only this
+// dialog rendering gets the link.
+taxjar_integration.show_taxjar_sync_error = function (title, message) {
+	const html = frappe.utils
+		.escape_html(message)
+		.replace(/guided setup/i, `<a href="/app/taxjar-setup">${__("guided setup")}</a>`);
+	frappe.msgprint({ title, message: html, indicator: "red" });
+};
+
 // One frappe.ui.form MultiCheck field per country (US states, CA provinces),
 // each with its own built-in "Select All"/"Unselect All" buttons - real desk
 // controls rather than a hand-built checkbox grid. `selected` is a Set of

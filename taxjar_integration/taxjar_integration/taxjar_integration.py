@@ -1720,7 +1720,7 @@ _STATUS_HINTS = {
 # Statuses whose own detail never adds anything a user can act on, so the whole
 # message is ours.
 _FIXED_STATUS_MESSAGES = {
-	401: "API Token is invalid, go to guided setup to configure.",
+	401: "TaxJar API Token is invalid, go to guided setup to configure.",
 	404: "Transaction not found in TaxJar, can't update the latest changes.",
 }
 

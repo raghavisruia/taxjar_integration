@@ -66,8 +66,16 @@ function _add_taxjar_buttons(frm) {
 			freeze: true,
 			freeze_message: __("Syncing to TaxJar..."),
 			callback() {
-				frappe.show_alert({ message: __("Sync complete"), indicator: "green" }, 5);
-				frm.reload_doc();
+				frm.reload_doc().then(() => {
+					if (frm.doc.taxjar_sync_status === "Failed") {
+						taxjar_integration.show_taxjar_sync_error(
+							__("TaxJar Sync Failed"),
+							frm.doc.taxjar_sync_error || __("Sync failed.")
+						);
+					} else {
+						frappe.show_alert({ message: __("Sync complete"), indicator: "green" }, 5);
+					}
+				});
 			}
 		});
 	}, __("TaxJar"));

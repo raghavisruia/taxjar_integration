@@ -49,8 +49,8 @@ function _exemption_card_body(frm) {
 	const ca_codes = regions.filter((r) => r.country === "CA").map((r) => r.state);
 
 	const region_html = (us_codes.length || ca_codes.length)
-		? _exemption_region_block("US", us_codes, taxjar_integration.US_STATE_CODES, __("United States"), __("US States"), __("All states selected"))
-			+ _exemption_region_block("CA", ca_codes, taxjar_integration.CA_PROVINCE_CODES, __("Canada"), __("CA Provinces"), __("All provinces selected"))
+		? _exemption_region_block("US", us_codes, taxjar_integration.US_STATE_CODES, __("United States"), __("US States"), __("All states exempted"))
+			+ _exemption_region_block("CA", ca_codes, taxjar_integration.CA_PROVINCE_CODES, __("Canada"), __("CA Provinces"), __("All provinces exempted"))
 		// Defensive fallback - nothing else should reach this state past
 		// _validate_exempt_regions, which requires at least one region for
 		// every type that reaches this branch (Non Exempt is handled above).
@@ -165,9 +165,15 @@ frappe.ui.form.on("Customer", {
 					frappe.xcall(
 						"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
 						{ customer_name: frm.doc.name },
-					).then(() => {
-						frappe.show_alert({ message: __("Customer sync queued"), indicator: "green" });
-						frm.reload_doc();
+					).then(() => frm.reload_doc()).then(() => {
+						if (frm.doc.taxjar_customer_sync_status === "Failed") {
+							taxjar_integration.show_taxjar_sync_error(
+								__("TaxJar Sync Failed"),
+								frm.doc.taxjar_customer_sync_error || __("Sync failed.")
+							);
+						} else {
+							frappe.show_alert({ message: __("Customer sync queued"), indicator: "green" });
+						}
 					});
 				},
 				__("TaxJar"),
