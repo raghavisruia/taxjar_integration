@@ -757,8 +757,18 @@ def set_sales_tax(doc, method):
 	if not check_for_nexus(doc, tax_dict):
 		return
 
+	# TaxJar Settings' own modified timestamp rides along in the key so that
+	# saving Settings - a rotated API token, a Sandbox/Live switch, a changed
+	# tax account head - busts every cached result immediately. tax_dict never
+	# carries anything that identifies which credential produced it, so
+	# without this a stale success for the same cart/address (from before the
+	# token changed) would keep being served for up to five minutes with no
+	# call to TaxJar at all, silently masking a broken token.
+	settings_modified = frappe.db.get_value("TaxJar Settings", "TaxJar Settings", "modified")
 	cache_key = "taxjar_tax:" + hashlib.md5(
-		json.dumps(tax_dict, sort_keys=True, default=str).encode()
+		json.dumps(
+			{"tax_dict": tax_dict, "settings_modified": str(settings_modified)}, sort_keys=True, default=str
+		).encode()
 	).hexdigest()
 	cached = frappe.cache().get_value(cache_key)
 

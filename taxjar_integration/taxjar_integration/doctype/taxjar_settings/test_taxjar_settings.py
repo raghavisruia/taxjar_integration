@@ -552,6 +552,17 @@ def _no_cache():
 	return mock_cache
 
 
+def _fake_cache():
+	"""Return a mock frappe.cache() backed by a plain dict, so a value set by
+	one set_sales_tax() call is actually seen by the next one - unlike
+	_no_cache(), which always misses and so can't exercise a real hit."""
+	store = {}
+	mock_cache = MagicMock()
+	mock_cache.get_value.side_effect = store.get
+	mock_cache.set_value.side_effect = lambda key, value, expires_in_sec=None: store.__setitem__(key, value)
+	return mock_cache
+
+
 class TestSetSalesTax(UnitTestCase):
 
 	def test_replaces_template_row_not_duplicates(self):
@@ -570,6 +581,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -594,6 +606,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -619,6 +632,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -649,6 +663,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value="Wholesale"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -686,6 +701,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch(f"{mod}.validate_tax_request", return_value=tax_data), \
 		     patch(f"{mod}._get_customer_exemption_type", return_value=None), \
 		     patch(f"{mod}._set_tax_status_fields", side_effect=capture), \
+		     patch(f"{mod}.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch(f"{mod}.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -723,6 +739,58 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=None):
 			set_sales_tax(doc, None)
 		self.assertEqual(len(doc.taxes), 0)
+
+
+class TestSetSalesTaxCache(UnitTestCase):
+	"""set_sales_tax caches a successful TaxJar response for 5 minutes, keyed on
+	the request payload plus TaxJar Settings' own `modified` timestamp.
+
+	Regression coverage for a real incident: the key used to be derived from
+	the payload alone, so rotating the API token in TaxJar Settings (or
+	toggling Sandbox/Live, or editing the company config) did not bust the
+	cache. An identical cart/address kept silently replaying the pre-change
+	success for up to five minutes, with no call to TaxJar and no failure
+	surfaced anywhere - the token could be outright invalid and nothing would
+	show it.
+	"""
+
+	def _run(self, cache, settings_modified):
+		doc = _make_doc(taxes=[])
+		tax_data = MagicMock(amount_to_collect=85.0)
+		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data) as mock_validate, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=settings_modified), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=cache):
+			set_sales_tax(doc, None)
+
+		return mock_validate
+
+	def test_identical_payload_and_unchanged_settings_hits_the_cache(self):
+		cache = _fake_cache()
+
+		self._run(cache, "2026-08-25 10:00:00")
+		second_call = self._run(cache, "2026-08-25 10:00:00")
+
+		second_call.assert_not_called()
+
+	def test_saving_taxjar_settings_busts_the_cache_even_with_an_identical_cart(self):
+		"""The reported bug's exact scenario: the cart/address is unchanged
+		(same hash), but Settings was saved in between - the second call must
+		reach TaxJar again rather than replay the earlier success."""
+		cache = _fake_cache()
+
+		self._run(cache, "2026-08-25 10:00:00")
+		second_call = self._run(cache, "2026-08-25 10:00:05")
+
+		second_call.assert_called_once()
 
 
 # ── Phase 2: get_line_item_dict — product_tax_code resolution ────────────────
@@ -7502,6 +7570,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -7527,6 +7596,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 					set_sales_tax(doc, None)
 
@@ -7554,6 +7624,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 					set_sales_tax(doc, None)
 
@@ -7574,6 +7645,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
