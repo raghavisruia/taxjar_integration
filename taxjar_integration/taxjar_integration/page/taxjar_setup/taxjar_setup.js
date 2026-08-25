@@ -467,9 +467,11 @@ class TaxJarSetup {
 		// visible in the row, so nothing else needs to identify which
 		// company a row is for. Rows are separated with a divider instead
 		// (see .ts-cred-row + .ts-cred-row in the CSS).
-		// A company that already has a saved token starts already "tested" -
-		// re-running the guided setup shouldn't visually demand a re-test of a
-		// connection that was already verified and hasn't changed.
+		// A company that already has a saved token still needs re-verifying
+		// on every visit - the token could have been changed directly on the
+		// TaxJar Settings form since this wizard last ran, and trusting a
+		// stale "tested" flag showed a green Success pill for a token that
+		// was never actually checked. See the auto-test call below.
 		const alreadySaved = !!cred.token_last4;
 		const $card = $(`
 			<div class="ts-cred-row">
@@ -482,7 +484,7 @@ class TaxJarSetup {
 			</div>
 		`).appendTo(this.$body.find(".ts-cred-rows"));
 
-		const entry = { company: cred.company, tested: alreadySaved, lastError: null, $card, controls: {} };
+		const entry = { company: cred.company, tested: false, lastError: null, $card, controls: {} };
 		this._connectCards.push(entry);
 
 		const otherCompanies = () => this._connectCards
@@ -569,6 +571,17 @@ class TaxJarSetup {
 		this._render_cred_action(entry);
 		$card.find(".ts-card-remove").on("click", () => this._remove_credential_card(entry, cred));
 		this._sync_remove_buttons();
+
+		// Re-verify a previously-saved token every time this step is opened,
+		// rather than trusting that it's still the one that was last tested -
+		// it may have been edited directly on the TaxJar Settings form since.
+		// _test_connection sends no token for a restored row, so the server
+		// falls back to whatever is currently stored (see test_connection's
+		// own docstring) - this is a real check, not a re-display of the old
+		// result.
+		if (alreadySaved) {
+			this._test_connection(entry);
+		}
 	}
 
 	// At least one company/token row must always remain - the Connect step
@@ -654,7 +667,12 @@ class TaxJarSetup {
 	}
 
 	_test_connection(entry) {
-		const company = entry.controls.company.get_value();
+		// entry.company (kept in sync directly, not re-read off the control) -
+		// same asynchronous-set_value gotcha _sync_connect_gate already guards
+		// against. This runs synchronously right after set_value() for the
+		// auto re-test on a restored card, before that promise has resolved,
+		// so the control's own get_value() would still read blank here.
+		const company = entry.company;
 		if (!company) {
 			frappe.show_alert({ message: __("Select a company first."), indicator: "orange" });
 			return;
