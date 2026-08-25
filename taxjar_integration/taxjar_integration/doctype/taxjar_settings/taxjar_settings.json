@@ -19,6 +19,7 @@
   "configuration",
   "company_config",
   "nexus_tab",
+  "section_state_nexus",
   "update_nexus_list_btn",
   "nexus_last_synced",
   "nexus_html",
@@ -101,6 +102,11 @@
    "label": "Nexus & Product Category"
   },
   {
+   "fieldname": "section_state_nexus",
+   "fieldtype": "Section Break",
+   "label": "State Nexus"
+  },
+  {
    "fieldname": "update_nexus_list_btn",
    "fieldtype": "Button",
    "label": "Update Nexus List"
@@ -158,7 +164,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-07-20 13:00:00.000000",
+ "modified": "2026-08-25 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "TaxJar Integration",
  "name": "TaxJar Settings",
