@@ -801,26 +801,33 @@ class TestGetLineItemDict(UnitTestCase):
 		result = self._call(item)
 		self.assertEqual(result["product_identifier"], "ITEM-001")
 
-	def test_description_combines_item_name_and_row_description(self):
+	def test_description_is_bracketed_code_plus_name_plus_row_description(self):
 		item = self._make_item(item_code="ITEM-001", item_name="Fuzzy Widget", description="Extra soft edition")
 		result = self._call(item)
-		self.assertEqual(result["description"], "Fuzzy Widget - Extra soft edition")
+		self.assertEqual(result["description"], "[ITEM-001] Fuzzy Widget - Extra soft edition")
 
-	def test_description_falls_back_to_item_name_alone(self):
+	def test_description_falls_back_to_bracketed_code_and_name_alone(self):
 		"""Quotation/Sales Order rows commonly carry item_name with no free-text
 		description filled in - the combined description must not end up with
 		a dangling separator in that case."""
 		item = self._make_item(item_code="ITEM-001", item_name="Fuzzy Widget", description=None)
 		result = self._call(item)
-		self.assertEqual(result["description"], "Fuzzy Widget")
+		self.assertEqual(result["description"], "[ITEM-001] Fuzzy Widget")
+
+	def test_description_omits_brackets_when_no_item_code(self):
+		"""A row with no item_code (a free-text/service line) has nothing to
+		bracket - the format falls back to plain item_name, not "[] name"."""
+		item = self._make_item(item_code=None, item_name="Fuzzy Widget", description="Extra soft edition")
+		result = self._call(item)
+		self.assertEqual(result["description"], "Fuzzy Widget - Extra soft edition")
 
 	def test_description_falls_back_to_row_description_alone(self):
-		item = self._make_item(item_code="ITEM-001", item_name=None, description="Extra soft edition")
+		item = self._make_item(item_code=None, item_name=None, description="Extra soft edition")
 		result = self._call(item)
 		self.assertEqual(result["description"], "Extra soft edition")
 
-	def test_description_is_blank_when_neither_is_set(self):
-		item = self._make_item(item_code="ITEM-001", item_name=None, description=None)
+	def test_description_is_blank_when_nothing_is_set(self):
+		item = self._make_item(item_code=None, item_name=None, description=None)
 		result = self._call(item)
 		self.assertEqual(result["description"], "")
 

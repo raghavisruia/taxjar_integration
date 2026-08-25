@@ -668,18 +668,23 @@ def get_line_item_dict(item, docstatus):
 	# product_identifier is the Item master's own name - item_code is what
 	# the row is fetched from and, by this app's autoname convention
 	# (field:item_code), already is that Item doc's name, so no extra lookup
-	# is needed. description combines the row's own item_name with whatever
-	# free-text description was added on the child table row itself - either
-	# one on its own if the other is blank.
+	# is needed. description is "[item_code] item_name - description": the
+	# code bracketed up front for a quick cross-reference, then whatever
+	# free-text description was added on the child table row itself - each
+	# part dropped cleanly when blank rather than leaving stray brackets or
+	# a dangling separator.
+	item_code = item.get("item_code")
 	item_name = item.get("item_name") or ""
 	description = item.get("description") or ""
-	full_description = " - ".join(part for part in (item_name, description) if part)
+
+	name_part = f"[{item_code}] {item_name}".strip() if item_code else item_name
+	full_description = " - ".join(part for part in (name_part, description) if part)
 
 	tax_dict = dict(
 		id=item.get("idx"),
 		quantity=item.get("qty"),
 		product_tax_code=product_tax_code,
-		product_identifier=item.get("item_code"),
+		product_identifier=item_code,
 		description=full_description,
 	)
 
