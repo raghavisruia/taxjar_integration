@@ -24,6 +24,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_get_usd_exchange_rate,
 	_has_taxjar_fields_changed,
 	_is_taxjar_enabled,
+	_linkify_guided_setup,
 	_make_safe_customer_id,
 	_remove_taxjar_rows,
 	_set_customer_sync_status,
@@ -10655,6 +10656,23 @@ class TestClassifyTaxJarError(UnitTestCase):
 		self.assertEqual(
 			info["message"], "Transaction not found in TaxJar, can't update the latest changes."
 		)
+
+	def test_linkify_guided_setup_turns_the_phrase_into_a_link(self):
+		"""The 401 message points the user at "guided setup" by name - a message
+		about to reach frappe.throw() (rendered as HTML, unlike the plain-text
+		Sync Error field) should turn that into a real link."""
+		message = classify_taxjar_error(_response_error(401))["message"]
+		linked = _linkify_guided_setup(message)
+		self.assertIn('<a href="/app/taxjar-setup">guided setup</a>', linked)
+		self.assertNotIn("<a", message, "the stored/classified message itself must stay plain text")
+
+	def test_linkify_guided_setup_is_case_insensitive_and_leaves_other_text_alone(self):
+		linked = _linkify_guided_setup("Go to Guided Setup now.")
+		self.assertEqual(linked, 'Go to <a href="/app/taxjar-setup">guided setup</a> now.')
+
+	def test_linkify_guided_setup_is_a_no_op_without_the_phrase(self):
+		message = "Something else went wrong."
+		self.assertEqual(_linkify_guided_setup(message), message)
 
 	def test_duplicate_transaction_says_what_to_do(self):
 		info = classify_taxjar_error(

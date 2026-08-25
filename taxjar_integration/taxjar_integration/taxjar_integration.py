@@ -496,7 +496,7 @@ def fetch_transaction_from_taxjar(invoice_name):
 				_("Transaction {0} was not found in TaxJar. It may have been created in a different API mode (Sandbox/Live) "
 				  "or may not have been synced yet.").format(invoice_name)
 			)
-		frappe.throw(_("Failed to fetch from TaxJar: {0}").format(sanitize_error_response(err)))
+		frappe.throw(_linkify_guided_setup(_("Failed to fetch from TaxJar: {0}").format(sanitize_error_response(err))))
 	except taxjar.exceptions.TaxJarConnectionError:
 		log_taxjar_call(action="show_transaction", status="error", error="TaxJar API is unreachable", context=ctx)
 		frappe.throw(_("TaxJar API is unreachable. Please try again later."))
@@ -1393,7 +1393,7 @@ def validate_tax_request(tax_dict):
 			payload=tax_dict,
 			error=getattr(err, "full_response", str(err)),
 		)
-		frappe.throw(_(sanitize_error_response(err)))
+		frappe.throw(_linkify_guided_setup(_(sanitize_error_response(err))))
 	except Exception:
 		log_taxjar_call(
 			action="tax_for_order",
@@ -1882,6 +1882,20 @@ def sanitize_error_response(response):
 	"""The user-facing half of classify_taxjar_error(), kept under its original
 	name for the interactive callers that only ever wanted the sentence."""
 	return classify_taxjar_error(response)["message"]
+
+
+def _linkify_guided_setup(message):
+	"""Turn a "guided setup" mention into a real link, for a message about to
+	reach the user immediately via frappe.throw() (rendered as HTML, same as
+	the client-side taxjar_integration.show_taxjar_sync_error).
+
+	Never apply this to a message before it is stored on
+	taxjar_sync_error/taxjar_customer_sync_error - those are plain Small Text
+	fields, displayed elsewhere as text, and would show the raw tag.
+	"""
+	return re.sub(
+		r"guided setup", f'<a href="/app/taxjar-setup">{_("guided setup")}</a>', message, flags=re.IGNORECASE
+	)
 
 
 # ── TaxJar Customer API ──────────────────────────────────────────────────────
