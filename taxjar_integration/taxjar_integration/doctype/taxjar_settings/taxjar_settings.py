@@ -536,8 +536,13 @@ def _marketplace_fields():
 	]
 
 
-def make_custom_fields(update=True):
-	custom_fields = {
+def get_custom_fields():
+	"""The app's custom fields, keyed by doctype.
+
+	Split out from make_custom_fields() so uninstall.py can delete exactly
+	what install created without keeping a second, drifting copy of the list.
+	"""
+	return {
 		"Sales Invoice Item": _item_tax_fields(),
 		"Quotation Item": _item_tax_fields(),
 		"Sales Order Item": _item_tax_fields(),
@@ -765,7 +770,10 @@ def make_custom_fields(update=True):
 			),
 		],
 	}
-	create_custom_fields(custom_fields, update=update)
+
+
+def make_custom_fields(update=True):
+	create_custom_fields(get_custom_fields(), update=update)
 
 	make_property_setter(
 		"Sales Invoice", "return_against", "no_copy", "0", "Check",

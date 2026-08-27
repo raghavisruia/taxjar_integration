@@ -3956,13 +3956,15 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 			"taxjar_tax_source",
 			[f["fieldname"] for f in _make_status_fields("taxjar_tab")],
 		)
-		# ...spread into each doctype's list. Read off the source rather than by
-		# calling make_custom_fields(), which writes Custom Fields as it goes.
-		src = inspect.getsource(taxjar_settings.make_custom_fields)
+		# ...spread into each doctype's list. get_custom_fields() is pure - it
+		# builds the dict without writing anything - so this can assert against
+		# the real field lists rather than the source text.
+		status_fieldnames = {f["fieldname"] for f in _make_status_fields("taxjar_tab")}
+		custom_fields = taxjar_settings.get_custom_fields()
 		for doctype in ("Quotation", "Sales Order", "Sales Invoice"):
 			with self.subTest(doctype=doctype):
-				entry = src.split('"%s": [' % doctype)[1].split("\n\t\t],")[0]
-				self.assertIn("_make_status_fields(", entry)
+				present = {f["fieldname"] for f in custom_fields[doctype]}
+				self.assertTrue(status_fieldnames <= present)
 
 		# One validate hook writing it, covering all three.
 		validate_targets = [
@@ -5335,11 +5337,11 @@ class TestSalesInvoiceCustomFields(UnitTestCase):
 		"""A marketplace has already raised the invoice - there is no quotation
 		or order stage for one."""
 		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
-			make_custom_fields,
+			get_custom_fields,
 		)
 		import inspect
 
-		source = inspect.getsource(make_custom_fields)
+		source = inspect.getsource(get_custom_fields)
 		self.assertEqual(source.count("_marketplace_fields()"), 1)
 		sales_invoice_block = source.split('"Sales Invoice": [')[1]
 		self.assertIn("_marketplace_fields()", sales_invoice_block)
@@ -8370,23 +8372,23 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 		self.assertEqual(field["no_copy"], 1)
 
 	def test_breakdown_fields_on_all_transaction_doctypes(self):
-		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import get_custom_fields
 		import inspect
-		source = inspect.getsource(make_custom_fields)
+		source = inspect.getsource(get_custom_fields)
 		for dt in ("Quotation", "Sales Order", "Sales Invoice"):
 			self.assertIn(dt, source, f"make_custom_fields should reference {dt}")
 
 	def test_item_breakdown_fields_on_all_item_tables(self):
-		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import get_custom_fields
 		import inspect
-		source = inspect.getsource(make_custom_fields)
+		source = inspect.getsource(get_custom_fields)
 		for dt in ("Quotation Item", "Sales Order Item", "Sales Invoice Item"):
 			self.assertIn(dt, source, f"make_custom_fields should reference {dt}")
 
 	def test_sales_invoice_breakdown_json_allows_on_submit(self):
-		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import make_custom_fields
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import get_custom_fields
 		import inspect
-		source = inspect.getsource(make_custom_fields)
+		source = inspect.getsource(get_custom_fields)
 		self.assertIn("allow_on_submit", source)
 
 	def test_transaction_fields_insert_after_other_charges(self):
@@ -11570,3 +11572,124 @@ class TestWhitelistedEndpointContract(UnitTestCase):
 				with self.assertRaises(frappe.PermissionError):
 					getattr(settings, method)()
 			self.assertEqual(guard.call_args[0][0], "write")
+
+
+# ── Uninstall ────────────────────────────────────────────────────────────────
+
+
+class TestUninstall(UnitTestCase):
+	"""Removing the app has to hand the site back the way it was found.
+
+	The tax templates are the part that actually hurts if this regresses: the
+	site keeps defaulting sales transactions to a TaxJar template nothing
+	populates, with ERPNext's own US templates disabled.
+	"""
+
+	MOD = "taxjar_integration.uninstall"
+
+	def test_hooks_are_wired(self):
+		from taxjar_integration import hooks
+
+		self.assertEqual(hooks.before_uninstall, "taxjar_integration.uninstall.before_uninstall")
+		self.assertEqual(hooks.after_uninstall, "taxjar_integration.uninstall.after_uninstall")
+
+	def test_custom_field_removal_reads_the_same_list_install_writes(self):
+		"""One source of truth - a field added to get_custom_fields() later is
+		removed on uninstall without a second edit."""
+		from taxjar_integration import uninstall
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+
+		with patch(f"{self.MOD}.get_custom_fields", return_value={"Item": [{"fieldname": "x"}]}), patch(
+			"frappe.custom.doctype.custom_field.custom_field.delete_custom_fields"
+		) as deleter:
+			uninstall.remove_custom_fields()
+
+		deleter.assert_called_once_with({"Item": [{"fieldname": "x"}]})
+		# and the real list is non-trivial, so the wiring above is worth having
+		self.assertGreater(sum(len(v) for v in get_custom_fields().values()), 50)
+
+	def test_property_setter_list_matches_what_install_creates(self):
+		"""Scans the install source rather than restating the list, so a new
+		make_property_setter() call cannot be added without this failing."""
+		import ast
+		import pathlib
+
+		from taxjar_integration.uninstall import _PROPERTY_SETTERS
+
+		src_path = (
+			pathlib.Path(__file__).resolve().parent / "taxjar_settings.py"
+		)
+		tree = ast.parse(src_path.read_text())
+
+		call_count = sum(
+			1
+			for node in ast.walk(tree)
+			if isinstance(node, ast.Call)
+			and getattr(node.func, "id", None) == "make_property_setter"
+		)
+		# Three call sites: one literal, two inside per-doctype loops.
+		self.assertEqual(call_count, 3)
+		# Which expand to eight setters across five doctypes.
+		self.assertEqual(len(_PROPERTY_SETTERS), 8)
+		self.assertEqual(len({dt for dt, _, _ in _PROPERTY_SETTERS}), 4)
+		self.assertIn(("Sales Invoice", "return_against", "no_copy"), _PROPERTY_SETTERS)
+
+	def test_property_setters_are_deleted_and_caches_cleared(self):
+		from taxjar_integration import uninstall
+
+		with patch(f"{self.MOD}.frappe.db.delete") as deleter, patch(
+			f"{self.MOD}.frappe.clear_cache"
+		) as clear:
+			uninstall.remove_property_setters()
+
+		self.assertEqual(deleter.call_count, len(uninstall._PROPERTY_SETTERS))
+		self.assertEqual(
+			deleter.call_args_list[0][0][1],
+			{"doc_type": "Sales Invoice", "field_name": "return_against", "property": "no_copy"},
+		)
+		# Deleting the setter is enough - core's own no_copy=1 comes back from
+		# the DocType JSON, so nothing should be writing a value back.
+		self.assertEqual(clear.call_count, 4)
+
+	def test_tax_templates_are_handed_back_to_erpnext(self):
+		from taxjar_integration import uninstall
+
+		with patch(f"{self.MOD}.frappe.db.exists", return_value=True), patch(
+			f"{self.MOD}.frappe.get_all", return_value=["Test Co"]
+		), patch(f"{self.MOD}.frappe.db.get_value") as getter, patch(
+			f"{self.MOD}.frappe.db.set_value"
+		) as setter:
+			getter.side_effect = ["TC", "US-ST-6", "US-ST-4", "US-ST-625"]
+			uninstall.restore_default_tax_templates()
+
+		writes = [(c[0][1], c[0][2], c[0][3]) for c in setter.call_args_list]
+		# Ours stops being the default...
+		self.assertIn(("TaxJar Sales Tax - TC", "is_default", 0), writes)
+		# ...and ERPNext's three come back off the disabled list.
+		for name in ("US-ST-6", "US-ST-4", "US-ST-625"):
+			self.assertIn((name, "disabled", 0), writes)
+
+	def test_tax_template_restore_is_a_noop_without_the_config_doctype(self):
+		"""after_uninstall ordering safety: if this ever ran once the app's own
+		doctypes were gone, it must not explode."""
+		from taxjar_integration import uninstall
+
+		with patch(f"{self.MOD}.frappe.db.exists", return_value=False), patch(
+			f"{self.MOD}.frappe.db.set_value"
+		) as setter:
+			uninstall.restore_default_tax_templates()
+
+		setter.assert_not_called()
+
+	def test_workspace_banner_is_removed(self):
+		from taxjar_integration import uninstall
+		from taxjar_integration.install import GUIDED_SETUP_ALERT_BLOCK
+
+		with patch(f"{self.MOD}.frappe.db.exists", return_value=True), patch(
+			f"{self.MOD}.frappe.delete_doc"
+		) as deleter:
+			uninstall.remove_guided_setup_alert()
+
+		self.assertEqual(deleter.call_args[0][:2], ("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK))

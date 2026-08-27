@@ -92,8 +92,11 @@ after_migrate = ["taxjar_integration.install.after_migrate"]
 # Uninstallation
 # ------------
 
-# before_uninstall = "taxjar_integration.uninstall.before_uninstall"
-# after_uninstall = "taxjar_integration.uninstall.after_uninstall"
+# Split deliberately: before_uninstall still has this app's doctypes to read
+# (TaxJar Settings says which companies to hand the tax templates back to);
+# after_uninstall only touches core records. See uninstall.py.
+before_uninstall = "taxjar_integration.uninstall.before_uninstall"
+after_uninstall = "taxjar_integration.uninstall.after_uninstall"
 
 # Desk Notifications
 # ------------------
