@@ -6,10 +6,16 @@ frappe.provide("taxjar_integration");
 // user nothing about why. Disabled it explains itself instead: hovering or
 // focusing it says to select a record first.
 //
-// Disabled state is data-disabled + title, NOT pointer-events: none. The latter
-// suppresses the very tooltip that explains the disabled state, and takes the
-// button out of the keyboard path with it. The click handler guards instead.
-// Same approach frappe's own es-pill group uses.
+// Disabled state is data-disabled + title, NOT the button's native disabled
+// attribute - the latter would also drop it out of the keyboard tab order
+// and suppress the very title that explains why. A capture-phase click
+// listener swallows the click before frappe.ui.Dropdown's own (bubble-phase)
+// listener gets it, so an empty menu never opens.
+//
+// Public API (set_items, toggle_disabled, disabled_title) is unchanged from
+// this class's previous Bootstrap-dropdown implementation - only what's
+// underneath it changed, to frappe.ui.dropdown (the Espresso replacement for
+// bootstrap's data-toggle="dropdown", already used elsewhere in the desk).
 taxjar_integration.BulkActionButton = class BulkActionButton {
 	constructor(options) {
 		Object.assign(this, options);
@@ -20,28 +26,23 @@ taxjar_integration.BulkActionButton = class BulkActionButton {
 	}
 
 	render() {
-		this.$button_group = $(`
-			<div class="taxjar-bulk-action btn-group">
-				<button type="button" class="btn btn-default btn-sm dropdown-toggle" data-toggle="dropdown"
-					aria-haspopup="true" aria-expanded="false">
-					${frappe.utils.escape_html(this.label)}
-					<span class="caret"></span>
-				</button>
-				<ul class="dropdown-menu dropdown-menu-right"></ul>
-			</div>
-		`).appendTo(this.$wrapper);
+		this.dropdown = new frappe.ui.Dropdown({
+			button: { label: this.label, variant: "outline", css_class: "taxjar-bulk-action" },
+			options: [],
+			align: "end",
+		});
+		this.$toggle = this.dropdown.$trigger.appendTo(this.$wrapper);
 
-		this.$toggle = this.$button_group.find(".dropdown-toggle");
-		this.$menu = this.$button_group.find(".dropdown-menu");
-
-		// bootstrap opens the menu on its own; swallow the click while disabled
-		// so an empty menu never appears.
-		this.$toggle.on("click", (e) => {
+		// Runs before frappe.ui.Dropdown's own click handler (bound in its
+		// constructor, above), which only fires in the bubble phase - a
+		// capture-phase listener on the same element always runs first.
+		this.trigger_el = this.$toggle[0];
+		this.trigger_el.addEventListener("click", (e) => {
 			if (this.is_disabled()) {
 				e.preventDefault();
 				e.stopImmediatePropagation();
 			}
-		});
+		}, true);
 
 		this.set_items([]);
 	}
@@ -54,24 +55,11 @@ taxjar_integration.BulkActionButton = class BulkActionButton {
 	// the button - there is nothing meaningful to offer.
 	set_items(items) {
 		this.items = items || [];
-		this.$menu.empty();
-
-		this.items.forEach((item, index) => {
-			if (item.divider) {
-				$('<li class="dropdown-divider"></li>').appendTo(this.$menu);
-				return;
-			}
-
-			$(`<li><a class="dropdown-item" href="#" data-index="${index}">${frappe.utils.escape_html(
-				item.label
-			)}</a></li>`)
-				.appendTo(this.$menu)
-				.on("click", (e) => {
-					e.preventDefault();
-					item.action();
-				});
-		});
-
+		this.dropdown.set_options(
+			this.items.map((item) =>
+				item.divider ? { divider: true } : { label: item.label, onclick: item.action }
+			)
+		);
 		this.toggle_disabled(!this.items.some((item) => !item.divider));
 	}
 

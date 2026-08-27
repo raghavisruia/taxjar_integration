@@ -394,7 +394,7 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 				<td>${frappe.utils.escape_html(addr_parts)}</td>
 				<td>${frappe.utils.escape_html(addr.address_type || "")}</td>
 				<td style="text-align:center">
-					${addr.is_shipping_address ? '<span class="indicator-pill green">Yes</span>' : ""}
+					${addr.is_shipping_address ? frappe.ui.badge.html({ label: "Yes", theme: "green", size: "sm" }) : ""}
 				</td>
 			</tr>`;
 		})
@@ -612,12 +612,12 @@ taxjar_integration.render_status_cards = function (frm) {
 	const card1 = {
 		question: __("Do you have a nexus here?"),
 		answer: has_nexus ? __("Yes") : __("No"),
-		color: has_nexus ? "green" : "orange",
+		color: has_nexus ? "green" : "amber",
 	};
 
 	let card2, card3;
 
-	const skipped = { answer: __("Skipped"), color: "grey" };
+	const skipped = { answer: __("Skipped"), color: "gray" };
 
 	if (!has_nexus && frm.doc.taxjar_nexus_reason) {
 		// Nothing downstream is evaluated once there is no nexus.
@@ -626,30 +626,26 @@ taxjar_integration.render_status_cards = function (frm) {
 	} else {
 		let answer = __("Yes");
 		let color = "green";
-		// Only this one answer is a sentence; every other pill on these cards
-		// is a single word and keeps frappe's own shape untouched.
-		let wrap = false;
 
 		if (!customer_taxable) {
 			answer = __("No");
-			color = "orange";
+			color = "amber";
 		} else if (transaction_exempt) {
 			answer = __("Yes, but transaction is marked as exempt");
-			color = "orange";
-			wrap = true;
+			color = "amber";
 		}
 
-		card2 = { question: __("Is the customer taxable?"), answer, color, wrap };
+		card2 = { question: __("Is the customer taxable?"), answer, color };
 
 		// Product taxability is moot once the sale is exempt either way.
 		if (!customer_taxable || transaction_exempt) {
 			card3 = { question: __("Is the product taxable?"), ...skipped };
 		} else {
 			const prod = frm.doc.taxjar_product_taxable;
-			let prod_color = "grey";
+			let prod_color = "gray";
 			let prod_answer = __("Skipped");
 			if (prod === "Yes") { prod_color = "green"; prod_answer = __("Yes"); }
-			else if (prod === "No") { prod_color = "orange"; prod_answer = __("No"); }
+			else if (prod === "No") { prod_color = "amber"; prod_answer = __("No"); }
 			else if (prod === "Partially") { prod_color = "blue"; prod_answer = __("Partially"); }
 
 			card3 = {
@@ -665,11 +661,15 @@ taxjar_integration.render_status_cards = function (frm) {
 	const cards = [card1, card2, card3];
 	let html = '<div class="taxjar-status-cards">';
 	cards.forEach((card, i) => {
+		// frappe.ui.badge isn't built around a fixed height for one short
+		// word the way indicator-pill is, so "Yes, but transaction is marked
+		// as exempt" just wraps inside the card - no separate wrap-mode CSS
+		// needed the way indicator-pill required.
 		html += `
 			<div class="taxjar-status-card">
 				<div class="text-muted taxjar-status-card-q">${card.question}</div>
 				<div class="taxjar-status-card-a">
-					<span class="indicator-pill ${card.color}${card.wrap ? " taxjar-pill-wrap" : ""}">${card.answer}</span>
+					${frappe.ui.badge.html({ label: card.answer, theme: card.color })}
 				</div>
 			</div>
 			${i < 2 ? '<div class="taxjar-status-arrow">→</div>' : ""}`;
@@ -696,7 +696,7 @@ taxjar_integration._inject_status_card_styles = function () {
 		.taxjar-status-card {
 			flex: 1 1 200px;
 			border: 1px solid var(--border-color);
-			border-radius: var(--border-radius-lg);
+			border-radius: var(--radius-lg);
 			padding: 16px;
 			background: var(--fg-color);
 		}
@@ -709,33 +709,14 @@ taxjar_integration._inject_status_card_styles = function () {
 			font-size: var(--text-lg);
 			font-weight: 600;
 		}
-		/* .indicator-pill is built for one short word: a fixed 20px height, a
-		   fully round radius, and a dot centred on that fixed box
-		   (frappe/public/scss/common/indicator.scss). "Yes, but transaction is
-		   marked as exempt" wraps, so the height has to give and the dot has to
-		   sit on the first line instead of halfway down the block, and the full
-		   radius has to come down - it bows a two-line block out into a
-		   lozenge.
-
-		   Opt-in via .taxjar-pill-wrap rather than applied to every pill in
-		   these cards: a single-word pill under these rules sizes to its
-		   content instead of frappe's fixed 20px and lifts its dot off centre,
-		   so "Yes" and "Skipped" would drift out of step with pills elsewhere
-		   in the desk. */
-		.taxjar-status-card .indicator-pill.taxjar-pill-wrap {
-			height: auto;
-			min-height: 20px;
-			align-items: flex-start;
+		/* es-badge defaults to white-space: nowrap with a fit-content width -
+		   fine for "Yes"/"Skipped", but "Yes, but transaction is marked as
+		   exempt" needs to wrap inside the card instead of overflowing it.
+		   No dot to re-centre and no fixed height to fight, unlike
+		   indicator-pill's old wrap hack here - just let the text wrap. */
+		.taxjar-status-card-a .es-badge {
 			white-space: normal;
 			text-align: left;
-			/* --radius-full on a two-line block bows the sides out into a
-			   lozenge; a fixed radius keeps the corners round without the
-			   stretch. Single-word pills keep the inherited full radius. */
-			border-radius: 10px;
-		}
-		.taxjar-status-card .indicator-pill.taxjar-pill-wrap::before {
-			/* centres the 6px dot on the first line rather than the whole block */
-			margin-top: 6px;
 		}
 		.taxjar-status-arrow {
 			display: flex;
@@ -885,12 +866,12 @@ taxjar_integration.render_shipping_taxability = function (frm) {
 	}
 
 	const taxable = cint(frm.doc.taxjar_freight_taxable);
-	const color = taxable ? "green" : "grey";
 	const label = taxable ? __("Yes") : __("No");
+	const badge = frappe.ui.badge.html({ label, theme: taxable ? "green" : "gray" });
 	wrapper.show().html(`
-		<div style="margin-bottom: 10px; font-size: var(--text-md);">
+		<div style="margin-bottom: 10px; font-size: var(--text-md); display: flex; align-items: center; gap: 8px;">
 			<span class="text-muted">${__("Is shipping charges taxable?")}</span>
-			<span class="indicator-pill ${color}" style="margin-left: 6px; font-size: var(--text-md);">${label}</span>
+			${badge}
 		</div>
 	`);
 };
@@ -928,52 +909,21 @@ taxjar_integration.render_tax_breakdown = function (frm) {
 // sits below the doc id and above the Assign/Attachments/Tags/Share list -
 // its own border-bottom draws the line separating it from Assign below,
 // same as .sidebar-meta-details already does above it.
-// Same color mapping and hover-popover interaction as the Sync Status column
-// on the TaxJar Transaction Sync page (taxjar_transactions.js) - kept as its
-// own small copy here rather than shared, since that page's version is bound
-// to its own table/class instance and not meant to be called standalone.
+// Same color mapping as the Sync Status column on the TaxJar Transaction
+// Sync page (taxjar_transactions.js) - its hover/click detail now goes
+// through frappe.ui.popover, the same native component that page and the
+// Customers page use for their own Sync Status columns, rather than a
+// fourth hand-rolled copy of the same fixed-position popover.
 
 taxjar_integration.SYNC_STATUS_COLORS = {
 	Synced: "green",
 	Failed: "red",
 	Queued: "blue",
-	Excluded: "grey",
-};
-
-taxjar_integration._hide_sync_sidebar_pop = function () {
-	if (taxjar_integration._sync_sidebar_pop) {
-		taxjar_integration._sync_sidebar_pop.remove();
-		taxjar_integration._sync_sidebar_pop = null;
-	}
-	$(document).off("click.taxjarSyncSidebarPop");
-};
-
-taxjar_integration._show_sync_sidebar_pop = function ($trigger) {
-	taxjar_integration._hide_sync_sidebar_pop();
-	const text = $trigger.attr("data-info") || "";
-	if (!text) return;
-
-	const $pop = $(`
-		<div class="taxjar-sidebar-sync-pop" style="position: fixed; z-index: 1000; max-width: 280px; padding: 8px 12px; border-radius: var(--border-radius-md); background: var(--fg-color); border: 1px solid var(--border-color); box-shadow: var(--shadow-md); font-size: var(--text-sm); color: var(--text-color);">
-			${frappe.utils.escape_html(text)}
-		</div>
-	`).appendTo("body");
-
-	// position: fixed + getBoundingClientRect() are both viewport-relative,
-	// so no scroll-offset math is needed - same approach as the Transactions
-	// page's popover, clamped back on-screen for a pill near the sidebar edge.
-	const rect = $trigger[0].getBoundingClientRect();
-	const pop_width = $pop.outerWidth();
-	const left = Math.min(rect.left, window.innerWidth - pop_width - 12);
-	$pop.css({ top: rect.bottom + 6, left: Math.max(12, left) });
-
-	taxjar_integration._sync_sidebar_pop = $pop;
-	$(document).on("click.taxjarSyncSidebarPop", () => taxjar_integration._hide_sync_sidebar_pop());
+	Excluded: "gray",
 };
 
 taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 	$(document).find(".form-sidebar .taxjar-sync-sidebar-pill-section").remove();
-	taxjar_integration._hide_sync_sidebar_pop();
 
 	if (!frm.fields_dict.taxjar_sync_status || !frm.doc.company) return;
 
@@ -1026,14 +976,14 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 
 	if (frm.doc.docstatus === 0) {
 		label = __("Submit to Sync");
-		color = "yellow";
+		color = "amber";
 	} else if (status === "Queued") {
 		label = __("Queued");
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 		info_text = __("Queued for sync");
 	} else if (status === "Synced") {
 		label = cancelled ? __("Cancelled") : __("Synced");
-		color = cancelled ? "grey" : taxjar_integration.SYNC_STATUS_COLORS[status];
+		color = cancelled ? "gray" : taxjar_integration.SYNC_STATUS_COLORS[status];
 		if (frm.doc.taxjar_last_synced) {
 			info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(frm.doc.taxjar_last_synced)]);
 		}
@@ -1049,12 +999,8 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 	}
 
-	const $badge = $(`
-		<span
-			class="indicator-pill no-indicator-dot ${color}"
-			${info_text ? `data-info="${frappe.utils.escape_html(info_text)}" style="cursor:pointer;"` : ""}
-		>${label}</span>
-	`);
+	const $badge = frappe.ui.badge({ label, theme: color });
+	if (info_text) $badge.css("cursor", "pointer");
 
 	const $pill = $(`
 		<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
@@ -1065,13 +1011,11 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 
 	$(document).find(".form-sidebar .sidebar-meta-details").after($pill);
 
+	// frappe.ui.popover, not the hand-rolled hover/click popover this used to
+	// carry - the same native component the Customers/Transactions pages'
+	// own Sync Status columns already use for their Failed-reason detail.
 	if (info_text) {
-		$badge.on("mouseenter", (e) => taxjar_integration._show_sync_sidebar_pop($(e.currentTarget)));
-		$badge.on("mouseleave", () => taxjar_integration._hide_sync_sidebar_pop());
-		$badge.on("click", (e) => {
-			e.stopPropagation();
-			taxjar_integration._show_sync_sidebar_pop($(e.currentTarget));
-		});
+		frappe.ui.popover({ trigger: $badge, content: () => info_text, side: "bottom" });
 	}
 };
 
@@ -1080,17 +1024,18 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 // not_configured (the TaxJar custom fields do not exist yet). Replaces the table
 // area with a friendly call to action instead of an empty grid or a server error.
 taxjar_integration.render_not_configured_panel = function ($container) {
-	$container.html(`
-		<div class="text-center text-muted" style="padding: 60px 20px;">
-			<div style="font-size: var(--text-2xl); font-weight: 600; margin-bottom: 8px;">
-				${__("TaxJar is not set up yet")}
-			</div>
-			<p style="max-width: 480px; margin: 0 auto 16px;">
-				${__("Enable a TaxJar feature in TaxJar Settings to start configuring customers and syncing transactions.")}
-			</p>
-			<a class="btn btn-primary btn-sm" href="/app/taxjar-settings">
-				${__("Open TaxJar Settings")}
-			</a>
-		</div>
-	`);
+	$container.empty().append(frappe.ui.empty_state({
+		icon: "settings",
+		title: __("TaxJar is not set up yet"),
+		description: __("Enable a TaxJar feature in TaxJar Settings to start configuring customers and syncing transactions."),
+		// onclick + set_route, not href - href actions open in a new tab
+		// (empty_state.js's own behavior for external links); this is desk
+		// navigation to another doctype, which should stay in the same tab
+		// the way the plain <a> it replaces did.
+		actions: [{
+			label: __("Open TaxJar Settings"), variant: "solid",
+			onclick: () => frappe.set_route("Form", "TaxJar Settings"),
+		}],
+		css_class: "min-h-64",
+	}));
 };

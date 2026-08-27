@@ -29,11 +29,11 @@ const STATUS_COLORS = {
 // belongs in that color's group. "" (not configured) is neutral grey, not a
 // configured answer at all.
 const EXEMPTION_TYPE_COLORS = {
-	"": "grey",
+	"": "gray",
 	Wholesale: "blue",
 	Government: "blue",
 	Other: "blue",
-	"Non Exempt": "yellow",
+	"Non Exempt": "amber",
 };
 
 const SYNC_UPDATE_EVENT = "taxjar_customers_update";
@@ -75,7 +75,6 @@ class TaxJarCustomerConfig {
 		this.page_size = 20;
 		this.active_tab = ALL_TAB;
 		this.status_filter = null;
-		this.selected = new Set();
 
 		// Same reasoning as taxjar_transactions.js: one stable reference so
 		// off() can detach it, debounced so a bulk sync of N customers doesn't
@@ -128,38 +127,33 @@ class TaxJarCustomerConfig {
 		this.summary_area = $('<div class="taxjar-summary"></div>').appendTo(this.page.main);
 	}
 
+	// frappe.ui.tabs, not a frappe.ui.FieldGroup of Tab Break fields - the
+	// latter needed a form Layout to fight (hidden-field workarounds, an
+	// event-delegation dodge, see the pre-Espresso comments this replaced),
+	// none of which a real tabs component needs. Each tab's `content` is a
+	// function that builds and caches this page's own table wrapper div,
+	// mirroring the lazy build-once-per-tab pattern this page already used.
 	make_tabs() {
 		this.tabs_wrapper = $('<div class="taxjar-page-tabs"></div>').appendTo(this.page.main);
+		this.tab_content_wrappers = {};
 
-		// hidden: false and parent are both load-bearing here - see the comment
-		// on make_tabs() in taxjar_transactions.js for why a FieldGroup outside
-		// a form needs them.
-		const tab_fields = TABS.reduce(
-			(fields, tab) => [
-				...fields,
-				{
-					fieldtype: "Tab Break",
-					fieldname: `${tab.name}_tab`,
-					label: tab.label,
-					parent: "TaxJar Customer Configuration",
-					hidden: false,
-					active: tab.is_active ? 1 : 0,
+		this.tabsInstance = new frappe.ui.Tabs({
+			tabs: TABS.map((tab) => ({
+				label: tab.label,
+				content: () => {
+					const $wrapper = $('<div class="taxjar-tab-panel"></div>');
+					this.tab_content_wrappers[tab.name] = $wrapper;
+					return $wrapper;
 				},
-				{ fieldtype: "HTML", fieldname: `${tab.name}_html` },
-			],
-			[]
-		);
-
-		this.tab_group = new frappe.ui.FieldGroup({
-			fields: tab_fields,
-			body: this.tabs_wrapper,
+			})),
+			on_change: (index) => {
+				this.enter_tab(TABS[index].name);
+				this.refresh();
+			},
 		});
-		this.tab_group.make();
-
-		this.tabs = Object.fromEntries(this.tab_group.tabs.map((tab) => [tab.df.fieldname, tab]));
+		this.tabs_wrapper.append(this.tabsInstance.$el);
 
 		this.make_tab_actions();
-		this.setup_tab_change();
 
 		this.paginator = new taxjar_integration.Paginator({
 			$wrapper: $('<div class="taxjar-pagination"></div>').appendTo(this.page.main),
@@ -188,18 +182,6 @@ class TaxJarCustomerConfig {
 		});
 	}
 
-	// Bound per tab, directly on the nav-link - see setup_tab_change() in
-	// taxjar_transactions.js for why an ancestor delegate never fires.
-	setup_tab_change() {
-		TABS.forEach((tab) => {
-			this.tabs[`${tab.name}_tab`]?.tab_link.find(".nav-link").on("click", () => {
-				if (tab.name === this.active_tab) return;
-				this.enter_tab(tab.name);
-				this.refresh();
-			});
-		});
-	}
-
 	enter_tab(name) {
 		this.active_tab = name;
 		this.current_page = 1;
@@ -209,8 +191,11 @@ class TaxJarCustomerConfig {
 		this.summary?.set_active(name);
 	}
 
+	// silent: true - enter_tab() runs the state side of the switch itself,
+	// and every go_to_tab() caller already calls refresh() right after; without
+	// it, set_active()'s on_change would fire a second, redundant refresh.
 	go_to_tab(name) {
-		this.tabs[`${name}_tab`]?.set_active();
+		this.tabsInstance.set_active(TABS.findIndex((t) => t.name === name), { silent: true });
 		this.enter_tab(name);
 	}
 
@@ -414,8 +399,8 @@ class TaxJarCustomerConfig {
 
 	render_exemption_type_cell(value) {
 		const label = value || __("Not Configured");
-		const color = EXEMPTION_TYPE_COLORS[value || ""] || "grey";
-		return `<span class="indicator-pill ${color}">${__(label)}</span>`;
+		const color = EXEMPTION_TYPE_COLORS[value || ""] || "gray";
+		return frappe.ui.badge.html({ label: __(label), theme: color });
 	}
 
 	// The pencil is on every row, including rows with no exemption type - it
@@ -449,9 +434,9 @@ class TaxJarCustomerConfig {
 		// No exemption configured yet means no TaxJar customer has been
 		// created to sync in the first place - a state worth naming rather
 		// than an empty cell, same as the TaxJar Customer ID column above.
-		if (!color) return `<span class="indicator-pill grey">${__("NA")}</span>`;
+		if (!color) return frappe.ui.badge.html({ label: __("NA"), theme: "gray" });
 
-		const pill = `<span class="indicator-pill ${color}">${__(status)}</span>`;
+		const pill = frappe.ui.badge.html({ label: __(status), theme: color });
 		if (status !== "Failed") return pill;
 
 		const info_text = row.taxjar_customer_sync_error || __("Unknown error");
@@ -502,117 +487,59 @@ class TaxJarCustomerConfig {
 		$(document).off("click.taxjarCustomerSyncPop");
 	}
 
-	// One table per tab: the columns differ between them, and each tab has its
-	// own HTML field to render into.
+	// One DataTable per tab: the columns differ between them, and each tab
+	// has its own content wrapper (see make_tabs()) to render into. Brings
+	// this table to parity with the Transaction Sync page's own table, which
+	// already uses DataTableManager instead of a hand-rolled <table> -
+	// checkbox column, select-all, and inline filtering all come from
+	// frappe.DataTable itself rather than being re-implemented here.
 	render_table() {
-		this.table_wrappers = this.table_wrappers || {};
-		if (!this.table_wrappers[this.active_tab]) {
-			this.table_wrappers[this.active_tab] = this.make_table();
-		}
+		const $table_wrapper = this.tab_content_wrappers[this.active_tab];
+		const key = this.active_tab;
 
-		this.$table_wrapper = this.table_wrappers[this.active_tab];
-		this.render_rows();
+		if (!this.datatables) this.datatables = {};
+
+		if (!this.datatables[key]) {
+			this.datatables[key] = new taxjar_integration.DataTableManager({
+				$wrapper: $table_wrapper,
+				columns: this.get_columns(),
+				data: this.customers,
+				options: {
+					checkboxColumn: true,
+					// This page's search lives in the header fields
+					// (make_filters()), not a second, unwired inline filter
+					// row - DataTableManager's own on_filter_change wiring
+					// is what the Transaction Sync page uses instead, since
+					// it has no header search fields of its own.
+					inlineFilters: false,
+					noDataMessage: __("No customers found"),
+				},
+				on_check_row: () => this.update_bulk_state(),
+			});
+			this.bind_row_actions($table_wrapper);
+			this.bind_sync_popover($table_wrapper);
+		} else {
+			this.datatables[key].refresh(this.customers);
+		}
 
 		// Move rather than copy, so the one instance of each - handlers and all
 		// - follows whichever tab is showing. Both live inside the table
 		// wrapper so they share its padding and line up with the table's edges
 		// instead of merely happening to sit at the same inset.
-		this.$tab_actions.prependTo(this.$table_wrapper);
-		this.paginator.$wrapper.appendTo(this.$table_wrapper);
+		this.$tab_actions.prependTo($table_wrapper);
+		this.paginator.$wrapper.appendTo($table_wrapper);
 	}
 
-	make_table() {
-		const headers = this.get_columns()
-			.map((col) => {
-				const width = col.width ? ` style="width: ${col.width}px;"` : "";
-				const align = col.align === "center" ? ' class="text-center"' : "";
-				return `<th${align}${width}>${col.label}</th>`;
-			})
-			.join("");
-
-		const $table_wrapper = $(`
-			<div class="taxjar-table-wrapper">
-				<table class="table table-bordered taxjar-customers-table">
-					<thead>
-						<tr>
-							<th class="taxjar-check-cell">
-								<input type="checkbox" class="taxjar-select-all" title="${__("Select All")}">
-							</th>
-							${headers}
-						</tr>
-					</thead>
-					<tbody></tbody>
-				</table>
-			</div>
-		`).appendTo(this.tab_group.get_field(`${this.active_tab}_html`).$wrapper);
-
-		this.bind_row_actions($table_wrapper);
-		this.bind_sync_popover($table_wrapper);
-
-		return $table_wrapper;
+	get datatable() {
+		return this.datatables?.[this.active_tab];
 	}
 
-	render_rows() {
-		const columns = this.get_columns();
-		const $tbody = this.$table_wrapper.find("tbody").empty();
-
-		if (!this.customers?.length) {
-			$tbody.append(`
-				<tr>
-					<td colspan="${columns.length + 1}" class="taxjar-no-data text-muted text-center">
-						${__("No customers found")}
-					</td>
-				</tr>
-			`);
-			this.sync_select_all();
-			return;
-		}
-
-		for (const row of this.customers) {
-			const cells = columns
-				.map((col) => {
-					const value = row[col.fieldname];
-					const content = col._html
-						? col._html(value, row)
-						: frappe.utils.escape_html(value || "");
-					return `<td${col.align === "center" ? ' class="text-center"' : ""}>${content}</td>`;
-				})
-				.join("");
-
-			$tbody.append(`
-				<tr data-customer="${frappe.utils.escape_html(row.name)}">
-					<td class="taxjar-check-cell">
-						<input type="checkbox" class="taxjar-row-check"
-							${this.selected.has(row.name) ? "checked" : ""}>
-					</td>
-					${cells}
-				</tr>
-			`);
-		}
-
-		this.sync_select_all();
-	}
-
-	// Delegated once per table so they survive the tbody being re-rendered.
+	// Delegated once per tab wrapper so it survives every DataTable redraw.
 	// Exemption Type is read-only here - the pencil is the only way to change
 	// it, and it always opens the combined dialog so type and regions are
 	// applied together in one save.
-	bind_row_actions($table_wrapper) {
-		// .attr, not .data: jQuery coerces a numeric-looking data attribute to a
-		// Number, and a Customer named by a numeric series would stop matching.
-		const row_name = (el) => $(el).closest("tr").attr("data-customer");
-
-		$table_wrapper.on("change", ".taxjar-select-all", (e) => this.toggle_all(e.target.checked));
-
-		$table_wrapper.on("change", ".taxjar-row-check", (e) => {
-			const name = row_name(e.currentTarget);
-			if (e.currentTarget.checked) this.selected.add(name);
-			else this.selected.delete(name);
-			this.sync_select_all();
-			this.update_bulk_state();
-		});
-
-		$table_wrapper.on("click", ".taxjar-configure-link", (e) => {
+	bind_row_actions($wrapper) {
+		$wrapper.on("click", ".taxjar-configure-link", (e) => {
 			e.preventDefault();
 			const name = $(e.currentTarget).attr("data-customer");
 			const row = (this.customers || []).find((c) => c.name === name);
@@ -628,27 +555,11 @@ class TaxJarCustomerConfig {
 	// made on would leave the count claiming rows nobody can see, and the bulk
 	// actions acting on them - so every navigation clears it.
 	reset_selection() {
-		this.selected.clear();
+		this.datatable?.clear_checked_items();
 	}
 
 	get_checked() {
-		return (this.customers || []).filter((c) => this.selected.has(c.name));
-	}
-
-	toggle_all(checked) {
-		for (const c of this.customers || []) {
-			if (checked) this.selected.add(c.name);
-			else this.selected.delete(c.name);
-		}
-
-		this.$table_wrapper.find(".taxjar-row-check").prop("checked", checked);
-		this.update_bulk_state();
-	}
-
-	sync_select_all() {
-		const rows = this.customers || [];
-		const all = rows.length > 0 && rows.every((c) => this.selected.has(c.name));
-		this.$table_wrapper.find(".taxjar-select-all").prop("checked", all);
+		return this.datatable?.get_checked_items().filter(Boolean) || [];
 	}
 
 	// ── Bulk actions ──────────────────────────────────────────────────────

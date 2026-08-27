@@ -64,17 +64,6 @@
 	}
 }
 
-// The desk's own page padding is cancelled so the tab row and the table can
-// span the content column; the table's own wrapper (.taxjar-datatable, or
-// .taxjar-table-wrapper on the Customer page) puts that padding back around
-// the table itself.
-.taxjar-page-tabs .form-page,
-.taxjar-page-tabs .form-section,
-.taxjar-page-tabs .form-column {
-	padding-left: 0;
-	padding-right: 0;
-}
-
 // ── Summary strip ─────────────────────────────────────────────────────────
 
 .taxjar-summary-strip {
@@ -212,7 +201,7 @@
 // Disabled look without pointer-events: none - the title has to survive, and
 // so does tab focus. See bulk_action_button.js.
 
-.taxjar-bulk-action .dropdown-toggle[data-disabled] {
+.es-button.taxjar-bulk-action[data-disabled] {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
@@ -230,15 +219,13 @@
 }
 
 // ── Tab row ───────────────────────────────────────────────────────────────
-// frappe draws the tab titles in .form-tabs-list; the page hangs its own
-// controls (selection count, Bulk Action) on the right of the same row.
+// frappe.ui.tabs draws the tab bar itself (.es-tabs__list, already styled by
+// its own component CSS); only the left inset - lining the labels up with
+// the table's own padding below them - and the tab actions row need
+// anything here.
 
 .taxjar-page-tabs {
-	.form-tabs-list {
-		display: flex;
-		align-items: center;
-		position: inherit;
-		// Lines the tab labels up with the table's own padding below them.
+	.es-tabs__list {
 		padding-left: 15px;
 	}
 
@@ -257,12 +244,6 @@
 		color: var(--text-muted);
 		white-space: nowrap;
 	}
-
-	// the table area owns the full page width
-	.section-body {
-		margin-top: 0;
-		max-width: 100% !important;
-	}
 }
 
 // ── Paginator ─────────────────────────────────────────────────────────────
@@ -272,10 +253,10 @@
 	align-items: center;
 	justify-content: space-between;
 	gap: 12px;
-	// Horizontal inset comes from the table wrapper this now sits inside
-	// (.taxjar-datatable, or .taxjar-table-wrapper on the Customer page) -
-	// repeating it here would double it and push the controls off the table's
-	// right edge. Only the gap below the rows is set here.
+	// Horizontal inset comes from the .taxjar-datatable wrapper this now sits
+	// inside (both pages share it) - repeating it here would double it and
+	// push the controls off the table's right edge. Only the gap below the
+	// rows is set here.
 	padding: 14px 0 0;
 
 	.taxjar-paginator-size select {

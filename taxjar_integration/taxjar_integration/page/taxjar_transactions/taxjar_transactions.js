@@ -27,7 +27,7 @@ const STATUS_COLORS = {
 	Synced: "green",
 	Failed: "red",
 	Queued: "blue",
-	Excluded: "grey",
+	Excluded: "gray",
 };
 
 // Submitted is the normal resting state, so it stays quiet; Cancelled is the
@@ -158,52 +158,33 @@ class TaxJarTransactionSync {
 		this.summary_area = $('<div class="taxjar-summary"></div>').appendTo(this.page.main);
 	}
 
-	// frappe.ui.FieldGroup with Tab Break fields is how the desk draws tabs
-	// (same mechanism a Form uses); each tab gets an HTML field the data table
-	// mounts into.
+	// frappe.ui.tabs, not a frappe.ui.FieldGroup of Tab Break fields - the
+	// latter needed a form Layout to fight (hidden-field workarounds, an
+	// event-delegation dodge, see the pre-Espresso comments this replaced),
+	// none of which a real tabs component needs. Each tab's `content` is a
+	// function that builds and caches this page's own table wrapper div,
+	// mirroring the lazy build-once-per-tab pattern this page already used.
 	make_tabs() {
 		this.tabs_wrapper = $('<div class="taxjar-page-tabs"></div>').appendTo(this.page.main);
+		this.tab_content_wrappers = {};
 
-		// Two properties on the Tab Break fields are load-bearing, both because
-		// a FieldGroup outside a form has no frm:
-		//
-		//   hidden: false - Layout.render() decides whether to inject its own
-		//     "Details" tab by looking for the first field matching
-		//     `element.hidden == false`. An absent property is undefined, which
-		//     fails that check, so it would splice a tab of its own in front of
-		//     ours - and that one carries no parent, so it crashes below.
-		//   parent - Tab builds its DOM id from `frm.doctype ?? df.parent`, and
-		//     frappe.scrub() throws on undefined.
-		//
-		// No leading Section Break: make_tab() opens a section per tab already,
-		// and a Section Break first would itself become the "first visible
-		// field" and re-trigger the injected tab.
-		const tab_fields = TABS.reduce(
-			(fields, tab) => [
-				...fields,
-				{
-					fieldtype: "Tab Break",
-					fieldname: `${tab.name}_tab`,
-					label: tab.label,
-					parent: "TaxJar Transaction Sync",
-					hidden: false,
-					active: tab.is_active ? 1 : 0,
+		this.tabsInstance = new frappe.ui.Tabs({
+			tabs: TABS.map((tab) => ({
+				label: tab.label,
+				content: () => {
+					const $wrapper = $('<div class="taxjar-tab-panel"></div>');
+					this.tab_content_wrappers[tab.name] = $wrapper;
+					return $wrapper;
 				},
-				{ fieldtype: "HTML", fieldname: `${tab.name}_html` },
-			],
-			[]
-		);
-
-		this.tab_group = new frappe.ui.FieldGroup({
-			fields: tab_fields,
-			body: this.tabs_wrapper,
+			})),
+			on_change: (index) => {
+				this.enter_tab(TABS[index].name);
+				this.refresh();
+			},
 		});
-		this.tab_group.make();
-
-		this.tabs = Object.fromEntries(this.tab_group.tabs.map((tab) => [tab.df.fieldname, tab]));
+		this.tabs_wrapper.append(this.tabsInstance.$el);
 
 		this.make_tab_actions();
-		this.setup_tab_change();
 
 		this.paginator = new taxjar_integration.Paginator({
 			$wrapper: $('<div class="taxjar-pagination"></div>').appendTo(this.page.main),
@@ -233,24 +214,6 @@ class TaxJarTransactionSync {
 		});
 	}
 
-	// Bound per tab, directly on the nav-link element - NOT delegated from an
-	// ancestor. Layout.setup_events() puts its own delegated handler on the
-	// .form-tabs <ul> which calls e.stopImmediatePropagation(), so a handler on
-	// any ancestor of that <ul> (.form-tabs-list, say) never runs and the tab
-	// would switch panes without ever reloading its rows. A handler bound
-	// directly on the link fires in the target phase, before the ancestor
-	// delegate gets the chance to stop it. That same setup_events() also calls
-	// .off("click") on the <ul>, so binding there would just be erased.
-	setup_tab_change() {
-		TABS.forEach((tab) => {
-			this.tabs[`${tab.name}_tab`]?.tab_link.find(".nav-link").on("click", () => {
-				if (tab.name === this.active_tab) return;
-				this.enter_tab(tab.name);
-				this.refresh();
-			});
-		});
-	}
-
 	// State side of a tab switch, without touching frappe's tab UI - safe to
 	// call both from a user click (where frappe already switched) and from
 	// go_to_tab (which drives the UI first).
@@ -263,8 +226,11 @@ class TaxJarTransactionSync {
 		this.summary?.set_active(name === EXCLUDED_TAB ? EXCLUDED_TAB : null);
 	}
 
+	// silent: true - enter_tab() runs the state side of the switch itself,
+	// and every go_to_tab() caller already calls refresh() right after; without
+	// it, set_active()'s on_change would fire a second, redundant refresh.
 	go_to_tab(name) {
-		this.tabs[`${name}_tab`]?.set_active();
+		this.tabsInstance.set_active(TABS.findIndex((t) => t.name === name), { silent: true });
 		this.enter_tab(name);
 	}
 
@@ -459,9 +425,10 @@ class TaxJarTransactionSync {
 				fieldname: "doc_status",
 				resizable: false,
 				_html: (value) =>
-					`<span class="indicator-pill grey">${
-						value === "Draft" ? __("Draft") : __("Not Applicable")
-					}</span>`,
+					frappe.ui.badge.html({
+						label: value === "Draft" ? __("Draft") : __("Not Applicable"),
+						theme: "gray",
+					}),
 			});
 		}
 
@@ -473,7 +440,7 @@ class TaxJarTransactionSync {
 				fieldname: "doc_status",
 				_html: (value) =>
 					value
-						? `<span class="indicator-pill ${DOC_STATUS_COLORS[value] || "grey"}">${__(value)}</span>`
+						? frappe.ui.badge.html({ label: __(value), theme: DOC_STATUS_COLORS[value] || "gray" })
 						: "",
 			});
 			columns.push({
@@ -487,7 +454,7 @@ class TaxJarTransactionSync {
 	}
 
 	render_table() {
-		const $wrapper = this.tab_group.get_field(`${this.active_tab}_html`).$wrapper;
+		const $wrapper = this.tab_content_wrappers[this.active_tab];
 		const key = this.active_tab;
 
 		// Columns differ per tab, and so does checkboxColumn - both are fixed
@@ -538,20 +505,21 @@ class TaxJarTransactionSync {
 		const status = row.taxjar_sync_status;
 		if (!status) return "";
 
-		const color = STATUS_COLORS[status] || "grey";
+		const color = STATUS_COLORS[status] || "gray";
 		const label = __(status);
 
 		if (status === "Synced") {
 			if (!row.taxjar_last_synced) {
-				return `<span class="indicator-pill ${color}">${label}</span>`;
+				return frappe.ui.badge.html({ label, theme: color });
 			}
 			const info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(row.taxjar_last_synced)]);
-			return `<span class="indicator-pill ${color} taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
-				info_text
-			)}">${label}</span>`;
+			return frappe.ui.badge.html({
+				label, theme: color, css_class: "taxjar-sync-trigger",
+				attrs: { "data-info": info_text },
+			});
 		}
 
-		const pill = `<span class="indicator-pill ${color}">${label}</span>`;
+		const pill = frappe.ui.badge.html({ label, theme: color });
 
 		if (status !== "Failed") return pill;
 

@@ -1,44 +1,8 @@
-/* Shared page chrome (summary strip, bulk action button, paginator) lives in
+/* Shared page chrome (summary strip, bulk action button, paginator, and the
+   .taxjar-datatable table furniture this page now shares with the
+   Transaction Sync page's own DataTableManager-backed table) lives in
    public/scss/taxjar_integration.bundle.scss. Only what is specific to this
-   page stays here.
-
-   This page renders a plain bordered table rather than frappe.DataTable, so
-   the padding the shared .taxjar-datatable rule provides is repeated here on
-   its own wrapper - the tab actions above the rows and the paginator below
-   both sit inside it and take their inset from it. */
-
-.taxjar-table-wrapper {
-	padding: 12px 15px 15px;
-}
-
-.taxjar-customers-table {
-	margin-bottom: 0;
-}
-
-/* The same subtle grey the desk's own data tables give their header row
-   (--dt-header-cell-bg in frappe's frappe_datatable.scss), so this page reads
-   as the same furniture as the Transaction Sync one beside it. */
-.taxjar-customers-table thead th {
-	background-color: var(--subtle-fg);
-	color: var(--heading-color);
-	font-weight: 600;
-	vertical-align: middle;
-}
-
-.taxjar-customers-table td {
-	vertical-align: middle;
-}
-
-/* Just wide enough for the checkbox, so it never takes width from a column
-   that carries content. */
-.taxjar-check-cell {
-	width: 32px;
-	text-align: center;
-}
-
-.taxjar-no-data {
-	padding: 40px;
-}
+   page stays here. */
 
 /* The count and pencil read as one control, so the button carries no chrome of
    its own. --icon-stroke is set here rather than inherited: frappe only points
@@ -101,18 +65,22 @@
 	color: var(--text-color);
 }
 
-/* Appended to <body>, not .taxjar-table-wrapper - deliberately outside the
-   table's own scoping so it isn't clipped by the table/card's overflow, and
+/* Appended to <body>, not the table's own wrapper - deliberately outside its
+   scoping so it isn't clipped by the table/card's overflow, and
    position: fixed so its coordinates (from getBoundingClientRect(), viewport-
    relative) don't need scroll-offset math. Shown on hover AND click rather
    than the native title attribute, which both enforces its own show delay
-   and never responds to a click at all. */
+   and never responds to a click at all. Kept as its own hand-rolled popover
+   (not frappe.ui.popover) deliberately - it has to survive frappe.DataTable's
+   own row virtualization, which can recycle or redraw the underlying cell at
+   any time, and a real Popover instance is bound to one specific trigger
+   element rather than re-attachable like this delegated listener is. */
 .taxjar-sync-pop {
 	position: fixed;
 	z-index: 1000;
 	max-width: 280px;
 	padding: 8px 12px;
-	border-radius: var(--border-radius-md);
+	border-radius: var(--radius-md);
 	background: var(--fg-color);
 	border: 1px solid var(--border-color);
 	box-shadow: var(--shadow-md);

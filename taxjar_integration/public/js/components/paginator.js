@@ -47,13 +47,11 @@ taxjar_integration.Paginator = class Paginator {
 					$('<span class="taxjar-paginator-gap">…</span>').appendTo($pages);
 					continue;
 				}
-				$(`
-					<button class="btn btn-xs ${entry === state.page ? "btn-primary" : "btn-default"}">
-						${entry}
-					</button>
-				`)
-					.appendTo($pages)
-					.on("click", () => entry !== state.page && this.on_page(entry));
+				$pages.append(frappe.ui.button({
+					label: String(entry), size: "xs",
+					variant: entry === state.page ? "solid" : "subtle",
+					onclick: () => entry !== state.page && this.on_page(entry),
+				}));
 			}
 		}
 
@@ -76,9 +74,10 @@ taxjar_integration.Paginator = class Paginator {
 	}
 
 	add_step($pages, label, page, disabled) {
-		$(`<button class="btn btn-xs btn-default" ${disabled ? "disabled" : ""}>${label}</button>`)
-			.appendTo($pages)
-			.on("click", () => !disabled && this.on_page(page));
+		$pages.append(frappe.ui.button({
+			label, size: "xs", variant: "subtle", disabled,
+			onclick: () => this.on_page(page),
+		}));
 	}
 
 	// First, last, and the current page with a neighbour either side; ellipses

@@ -12,26 +12,57 @@ function _format_last_synced(value) {
 	return value ? frappe.datetime.str_to_user(value) : __('Never');
 }
 
+// Espresso's own component CSS (.es-badge, and the shared radius/spacing
+// tokens the classes below key off) is already loaded on every desk page -
+// only the card/table layout specific to this grouped-by-company list needs
+// injecting, same pattern as taxjar_utils.js's _inject_status_card_styles().
+function _inject_nexus_table_styles() {
+	if (document.getElementById('taxjar-nexus-table-styles')) return;
+	const style = document.createElement('style');
+	style.id = 'taxjar-nexus-table-styles';
+	style.textContent = `
+		.taxjar-nexus-card {
+			border: 1px solid var(--border-color);
+			border-radius: var(--radius-md);
+			margin-bottom: 16px;
+			overflow: hidden;
+		}
+		.taxjar-nexus-card-h {
+			display: flex; align-items: center; gap: 8px;
+			background: var(--subtle-fg);
+			padding: 10px 16px;
+			font-weight: 600;
+			font-size: 13px;
+			color: var(--heading-color);
+			border-bottom: 1px solid var(--border-color);
+		}
+		.taxjar-nexus-table-wrap { overflow-x: auto; }
+		.taxjar-nexus-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+		.taxjar-nexus-table th {
+			text-align: left; padding: 8px 16px; color: var(--text-muted);
+			font-weight: 500; border-bottom: 1px solid var(--border-color); white-space: nowrap;
+		}
+		.taxjar-nexus-table td { padding: 8px 16px; white-space: nowrap; }
+		.taxjar-nexus-table tr:not(:last-child) td { border-bottom: 1px solid var(--border-color); }
+	`;
+	document.head.appendChild(style);
+}
+
 function _render_nexus_html(frm) {
 	const wrapper = frm.fields_dict.nexus_html.$wrapper;
 	const rows = frm.doc.nexus || [];
 
 	if (!rows.length) {
-		wrapper.html(`
-			<div style="
-				padding: 24px;
-				text-align: center;
-				color: var(--text-muted);
-				font-size: 13px;
-				border: 1px dashed var(--border-color);
-				border-radius: var(--border-radius-md);
-				margin: 8px 0;
-			">
-				No nexus regions loaded.
-			</div>
-		`);
+		wrapper.empty().append(frappe.ui.empty_state({
+			icon: 'map-pin',
+			title: __('No nexus regions loaded'),
+			description: __('Use "Update Nexus List" above to fetch them from TaxJar.'),
+			css_class: 'my-2',
+		}));
 		return;
 	}
+
+	_inject_nexus_table_styles();
 
 	// Group rows by company
 	const by_company = {};
@@ -41,89 +72,39 @@ function _render_nexus_html(frm) {
 		by_company[key].push(row);
 	}
 
-	const card_style = `
-		border: 1px solid var(--border-color);
-		border-radius: var(--border-radius-md);
-		margin-bottom: 16px;
-		overflow: hidden;
-	`;
-	const header_style = `
-		background: var(--subtle-fg);
-		padding: 10px 16px;
-		font-weight: 600;
-		font-size: 13px;
-		color: var(--heading-color);
-		border-bottom: 1px solid var(--border-color);
-	`;
-	const table_wrap_style = `overflow-x: auto;`;
-	const table_style = `
-		width: 100%;
-		border-collapse: collapse;
-		font-size: 12px;
-	`;
-	const th_style = `
-		text-align: left;
-		padding: 8px 16px;
-		color: var(--text-muted);
-		font-weight: 500;
-		border-bottom: 1px solid var(--border-color);
-		white-space: nowrap;
-	`;
-	const td_style = `
-		padding: 8px 16px;
-		border-bottom: 1px solid var(--border-color);
-		white-space: nowrap;
-	`;
-	const td_last_style = `
-		padding: 8px 16px;
-		white-space: nowrap;
-	`;
-
-	let html = '';
+	wrapper.empty();
 	for (const [company, company_rows] of Object.entries(by_company)) {
-		const badge = `<span style="
-			background: var(--bg-blue);
-			color: var(--text-on-blue);
-			border-radius: 10px;
-			padding: 1px 8px;
-			font-size: 11px;
-			font-weight: 500;
-			margin-left: 8px;
-			vertical-align: middle;
-		">${company_rows.length}</span>`;
+		const rows_html = company_rows.map((r) => `
+			<tr>
+				<td>${frappe.utils.escape_html(r.region || '—')}</td>
+				<td><code>${frappe.utils.escape_html(r.region_code || '—')}</code></td>
+				<td>${frappe.utils.escape_html(r.country || '—')}</td>
+				<td><code>${frappe.utils.escape_html(r.country_code || '—')}</code></td>
+			</tr>`).join('');
 
-		const rows_html = company_rows.map((r, idx) => {
-			const is_last = idx === company_rows.length - 1;
-			const cell = is_last ? td_last_style : td_style;
-			return `
-				<tr>
-					<td style="${cell}">${frappe.utils.escape_html(r.region || '—')}</td>
-					<td style="${cell}"><code>${frappe.utils.escape_html(r.region_code || '—')}</code></td>
-					<td style="${cell}">${frappe.utils.escape_html(r.country || '—')}</td>
-					<td style="${cell}"><code>${frappe.utils.escape_html(r.country_code || '—')}</code></td>
-				</tr>`;
-		}).join('');
-
-		html += `
-			<div style="${card_style}">
-				<div style="${header_style}">${frappe.utils.escape_html(company)}${badge}</div>
-				<div style="${table_wrap_style}">
-					<table style="${table_style}">
+		const $card = $(`
+			<div class="taxjar-nexus-card">
+				<div class="taxjar-nexus-card-h">${frappe.utils.escape_html(company)}</div>
+				<div class="taxjar-nexus-table-wrap">
+					<table class="taxjar-nexus-table">
 						<thead>
 							<tr>
-								<th style="${th_style}">Region</th>
-								<th style="${th_style}">Code</th>
-								<th style="${th_style}">Country</th>
-								<th style="${th_style}">Country Code</th>
+								<th>${__('Region')}</th>
+								<th>${__('Code')}</th>
+								<th>${__('Country')}</th>
+								<th>${__('Country Code')}</th>
 							</tr>
 						</thead>
 						<tbody>${rows_html}</tbody>
 					</table>
 				</div>
-			</div>`;
-	}
+			</div>
+		`).appendTo(wrapper);
 
-	wrapper.html(html);
+		$card.find('.taxjar-nexus-card-h').append(
+			frappe.ui.badge({ label: String(company_rows.length), theme: 'blue', size: 'sm' })
+		);
+	}
 }
 
 function _render_product_tax_category_html(frm) {
@@ -137,19 +118,12 @@ function _render_product_tax_category_html(frm) {
 			const count = summary.count || 0;
 
 			if (!count) {
-				wrapper.html(`
-					<div style="
-						padding: 24px;
-						text-align: center;
-						color: var(--text-muted);
-						font-size: 13px;
-						border: 1px dashed var(--border-color);
-						border-radius: var(--border-radius-md);
-						margin: 8px 0 16px;
-					">
-						No product tax categories loaded.
-					</div>
-				`);
+				wrapper.empty().append(frappe.ui.empty_state({
+					icon: 'tag',
+					title: __('No product tax categories loaded'),
+					description: __('Use "Update Product Tax Category List" above to fetch them from TaxJar.'),
+					css_class: 'my-2',
+				}));
 				return;
 			}
 
@@ -158,7 +132,7 @@ function _render_product_tax_category_html(frm) {
 			wrapper.html(`
 				<div style="
 					border: 1px solid var(--border-color);
-					border-radius: var(--border-radius-md);
+					border-radius: var(--radius-md);
 					padding: 16px;
 					text-align: center;
 					/* Last thing in the section - without this the box's border

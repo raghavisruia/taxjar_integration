@@ -42,18 +42,23 @@
 	color: var(--text-color);
 }
 
-/* Appended to <body>, not .taxjar-table-wrapper - deliberately outside the
-   table's own scoping so it isn't clipped by the table/card's overflow, and
+/* Appended to <body>, not the table's own wrapper - deliberately outside its
+   scoping so it isn't clipped by the table/card's overflow, and
    position: fixed so its coordinates (from getBoundingClientRect(), viewport-
    relative) don't need scroll-offset math. Shown on hover AND click (see
    _show_sync_popover) rather than the native title attribute, which both
-   enforces its own show delay and never responds to a click at all. */
+   enforces its own show delay and never responds to a click at all. Kept as
+   its own hand-rolled popover (not frappe.ui.popover) deliberately - it has
+   to survive frappe.DataTable's own row virtualization, which can recycle or
+   redraw the underlying cell at any time, and a real Popover instance is
+   bound to one specific trigger element rather than re-attachable like this
+   delegated listener is. */
 .taxjar-sync-pop {
 	position: fixed;
 	z-index: 1000;
 	max-width: 280px;
 	padding: 8px 12px;
-	border-radius: var(--border-radius-md);
+	border-radius: var(--radius-md);
 	background: var(--fg-color);
 	border: 1px solid var(--border-color);
 	box-shadow: var(--shadow-md);
