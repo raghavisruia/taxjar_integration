@@ -3,16 +3,21 @@
 // Layout: a single-step panel that swaps its entire content on Save & continue —
 // only one step is ever shown at a time, rendered as plain page flow (no card/box
 // around it) rather than a widget embedded in the desk. Each step's own header
-// opens with the progress rail, the step's heading sitting below it — frappe-ui's
-// <Progress :intervals="true"> internals, one segment per step, each with a
-// clickable trailing caption that doubles as navigation.
+// opens with the progress rail — frappe's own Espresso Progress component
+// (intervals form), one segment per step — with a clickable caption per step
+// underneath doubling as navigation (the one thing the stock component doesn't do).
 //
-// Every data field is a real Frappe control (frappe.ui.form.make_control) so
-// Link search, get_query filtering and desk-consistent styling come for free —
-// only the shell (rail, progress, cards, status chips) is custom CSS. Connect,
-// Accounts and Features persist per step (Continue = collect -> save API ->
-// reload state -> advance), so the guide is resumable; Nexus persists via its
-// own Fetch action instead of a Continue save. See docs/guided-setup-plan.md.
+// Every data field is a real Frappe control (frappe.ui.form.make_control), and
+// every other piece of chrome — buttons, status badges, the Sandbox/Live toggle,
+// the nexus banner, empty/loading states — is frappe's Espresso desk component
+// library (frappe.ui.button/.badge/.tab_buttons/.alert/.empty_state/.skeleton,
+// demoed live in Component Explorer, /app/component-explorer). A connection
+// failure surfaces as the token field's own error text (df.invalid +
+// set_description — frappe's native invalid-field primitive), not a popover.
+// Only the card layout around all of this is custom CSS. Connect, Accounts and Features
+// persist per step (Continue = collect -> save API -> reload state -> advance),
+// so the guide is resumable; Nexus persists via its own Fetch action instead of
+// a Continue save. See docs/guided-setup-plan.md.
 
 const SETUP_MODULE = "taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup";
 
@@ -66,73 +71,50 @@ class TaxJarSetup {
 			<div class="taxjar-setup">
 				<section class="ts-panel">
 					<header class="ts-head">
-						<ol class="ts-progress ts-intervals" role="progressbar" aria-valuemin="1" aria-valuemax="${SETUP_STEPS.length}"></ol>
+						<div class="ts-rail"></div>
+						<ol class="ts-steps"></ol>
 					</header>
 					<h2 class="ts-title"></h2>
 					<div class="ts-body"></div>
 					<footer class="ts-foot">
-						<button class="btn btn-default ts-back">${__("Back")}</button>
+						<div class="ts-back-mount"></div>
 						<span class="ts-grow"></span>
-						<button class="btn btn-dark ts-next"></button>
+						<div class="ts-next-mount"></div>
 					</footer>
 				</section>
 			</div>
 		`).appendTo(this.page.main);
 
-		this.$intervals = this.$root.find(".ts-intervals");
+		this.$steps = this.$root.find(".ts-steps");
 		this.$body = this.$root.find(".ts-body");
-		this.$root.find(".ts-back").on("click", () => this._go(this.cur - 1));
-		this.$root.find(".ts-next").on("click", () => this._on_next());
 
-		// The progress rail is the only navigation element — frappe-ui's <Progress
-		// intervals> segments (one per step), each with a clickable trailing caption
-		// standing in for the step it represents.
-		this.$intervals.html(SETUP_STEPS.map((s, i) => `
-			<li class="ts-interval" data-i="${i}">
-				<button class="ts-interval-btn">
-					<span class="ts-interval-bar"></span>
-					<span class="ts-interval-label">${frappe.utils.escape_html(s.label)}</span>
-				</button>
-			</li>
+		// The bar itself is frappe's own Espresso Progress (intervals form) —
+		// .es-progress ships its own CSS already loaded on every desk page.
+		// No label/hint here - the step captions below it already say which
+		// step is current, so a "Features / Step 4 of 6" header on top would
+		// just repeat that. The clickable captions are this wizard's own
+		// addition, the one thing the stock component doesn't do.
+		this.progress = new frappe.ui.Progress({
+			intervals: true,
+			interval_count: SETUP_STEPS.length,
+		});
+		this.$root.find(".ts-rail").append(this.progress.$el);
+
+		this.$steps.html(SETUP_STEPS.map((s, i) => `
+			<li><button type="button" class="ts-step-btn" data-i="${i}">${frappe.utils.escape_html(s.label)}</button></li>
 		`).join(""));
-		this.$intervals.find(".ts-interval-btn").on("click", (e) => {
-			this._go(+$(e.currentTarget).closest(".ts-interval").data("i"));
+		this.$steps.find(".ts-step-btn").on("click", (e) => {
+			this._go(+$(e.currentTarget).data("i"));
 		});
 
-		// Delegated once here (rather than rebound per step render) so it
-		// keeps working for any .ts-info-btn added later by any step, without
-		// needing to re-wire it every time this.$body.html() replaces its contents.
-		this.$root.on("click", ".ts-info-btn", (e) => {
-			e.stopPropagation(); // don't also trigger whatever the button sits inside (a pill, a heading)
-			this._toggle_info_popover($(e.currentTarget));
-		});
-	}
-
-	// Click-to-show popover for the Retry pill's failure reason - no backing
-	// form field to hang frappe's native InfoCard off of here (Enable API logs
-	// is a real control and uses df.show_description_on_click instead), so this
-	// one spot stays hand-rolled.
-	_info_btn_html(text) {
-		return `<button type="button" class="ts-info-btn" data-info="${frappe.utils.escape_html(text)}">${frappe.utils.icon("triangle-alert", "md")}</button>`;
-	}
-
-	_toggle_info_popover($trigger) {
-		const reopening = $trigger.hasClass("ts-info-btn-active");
-		$(".ts-info-pop").remove();
-		this.$root.find(".ts-info-btn").removeClass("ts-info-btn-active");
-		$(document).off("click.tsInfoPop");
-		if (reopening) return;
-
-		$trigger.addClass("ts-info-btn-active");
-		const $pop = $(`<div class="ts-info-pop">${frappe.utils.escape_html($trigger.attr("data-info") || "")}</div>`).appendTo("body");
-		// position: fixed + getBoundingClientRect() are both viewport-relative,
-		// so no scroll-offset math is needed here.
-		const rect = $trigger[0].getBoundingClientRect();
-		$pop.css({ top: rect.bottom + 6, left: rect.left });
-		$(document).on("click.tsInfoPop", () => {
-			$pop.remove();
-			$trigger.removeClass("ts-info-btn-active");
-		});
+		this.$root.find(".ts-back-mount").append(frappe.ui.button({
+			label: __("Back"), variant: "outline", css_class: "ts-back",
+			onclick: () => this._go(this.cur - 1),
+		}));
+		this.$root.find(".ts-next-mount").append(frappe.ui.button({
+			label: __("Continue"), variant: "solid", css_class: "ts-next",
+			onclick: () => this._on_next(),
+		}));
 	}
 
 	// ── server calls ────────────────────────────────────────────────
@@ -145,7 +127,11 @@ class TaxJarSetup {
 	}
 
 	_load_state() {
-		this.$body.html(`<div class="ts-loading text-muted">${__("Loading…")}</div>`);
+		this.$body.html(`<div class="ts-skeleton"></div>`);
+		const $sk = this.$body.find(".ts-skeleton");
+		$sk.append(frappe.ui.skeleton({ width: "45%", height: "14px" }));
+		$sk.append(frappe.ui.skeleton({ width: "100%", height: "72px" }));
+		$sk.append(frappe.ui.skeleton({ width: "100%", height: "72px" }));
 		this._reload_state().then(() => this._render());
 	}
 
@@ -207,21 +193,24 @@ class TaxJarSetup {
 		const step = SETUP_STEPS[this.cur];
 
 		// Panel shows exactly one step's content, swapped in full on navigate.
-		this.$root.find(".ts-title").text(step.title);
+		// Nexus renders its own title inline (beside "Synced ...") instead of
+		// using the shared heading above the body.
+		this.$root.find(".ts-title").toggleClass("hide", step.key === "nexus").text(step.title);
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		const nextLabel = this.cur === SETUP_STEPS.length - 1
 			? __("Activate")
 			: (step.nextLabel || __("Save & continue"));
-		this.$root.find(".ts-next").text(nextLabel).prop("disabled", false);
+		this.$root.find(".ts-next .es-button__label").text(nextLabel);
+		this.$root.find(".ts-next").prop("disabled", false);
 		this._set_next_gated(false);
 
-		// Rail: pure navigation — filled up to and including the current step,
-		// each segment's caption clickable once reached.
-		this.$intervals.attr("aria-valuenow", this.cur + 1);
-		this.$intervals.find(".ts-interval").each((i, el) => {
+		// Bar fills up to and including the current step; the caption row
+		// below is pure navigation, clickable once a step's been reached.
+		this.progress.set_value(((this.cur + 1) / SETUP_STEPS.length) * 100);
+		this.$steps.find(".ts-step-btn").each((i, el) => {
 			const $el = $(el);
 			$el.toggleClass("filled", i <= this.cur).toggleClass("active", i === this.cur);
-			$el.find(".ts-interval-btn").prop("disabled", i > this.reached);
+			$el.prop("disabled", i > this.reached);
 		});
 
 		this.$body.empty();
@@ -270,38 +259,24 @@ class TaxJarSetup {
 		`);
 	}
 
-	// Two-button pill toggle (Sandbox | Live), a stand-in for a real frappe
-	// control - exposes only the get_value/set_value subset the rest of this
-	// file actually calls on this.controls.mode, and calls _on_mode_change()
-	// itself on a real click rather than needing a $input "change" event.
+	// Sandbox/Live as a segmented single-select (frappe.ui.tab_buttons) rather
+	// than a closed dropdown - it's a binary choice, worth showing both sides
+	// of at once. Wrapped in the same get_value/set_value shape the rest of
+	// this file already calls on this.controls.mode.
 	_render_mode_toggle($parent, initial) {
-		const $wrap = $(`
-			<div class="ts-segmented">
-				<button type="button" class="ts-seg-btn" data-value="Sandbox">${__("Sandbox")}</button>
-				<button type="button" class="ts-seg-btn" data-value="Live">${__("Live")}</button>
-			</div>
-		`).appendTo($parent);
+		const $el = frappe.ui.tab_buttons({
+			options: [
+				{ label: __("Sandbox"), value: "Sandbox" },
+				{ label: __("Live"), value: "Live" },
+			],
+			value: initial,
+			on_change: () => this._on_mode_change(),
+		}).appendTo($parent);
 
-		let value = initial;
-		const setActive = () => {
-			$wrap.find(".ts-seg-btn").each((_, el) => {
-				const isActive = $(el).data("value") === value;
-				$(el).toggleClass("ts-seg-active", isActive).attr("aria-pressed", isActive);
-			});
-		};
-		setActive();
-
-		$wrap.find(".ts-seg-btn").on("click", (e) => {
-			const next = $(e.currentTarget).data("value");
-			if (next === value) return;
-			value = next;
-			setActive();
-			this._on_mode_change();
-		});
-
+		const tabButtons = $el.data("es-tab-buttons");
 		return {
-			get_value: () => value,
-			set_value: (v) => { value = v; setActive(); },
+			get_value: () => tabButtons.get_value(),
+			set_value: (v) => tabButtons.set_value(v, { silent: true }),
 		};
 	}
 
@@ -326,9 +301,7 @@ class TaxJarSetup {
 					<b>${__("API Credentials")}</b>
 				</div>
 				<div class="ts-card-b ts-cred-rows"></div>
-				<div class="ts-card-b ts-cred-add-row">
-					<button class="btn btn-default btn-sm ts-add-cred">${__("+ Add another company")}</button>
-				</div>
+				<div class="ts-card-b ts-cred-add-row"></div>
 			</div>
 
 			<div class="ts-card ts-logtoggle" style="margin-top:20px">
@@ -376,9 +349,10 @@ class TaxJarSetup {
 		// clickable heading, so it's only ever visible/reachable while already
 		// expanded - no need to force-expand or guard against also toggling
 		// the heading's own collapse.
-		this.$body.find(".ts-add-cred").on("click", () => {
-			this._add_credential_card({ company: null, token_last4: null });
-		});
+		this.$body.find(".ts-cred-add-row").append(frappe.ui.button({
+			label: __("Add another company"), icon: "plus", variant: "outline", size: "sm",
+			onclick: () => this._add_credential_card({ company: null, token_last4: null }),
+		}));
 
 		// fieldtype "Switch" (frappe.ui.form.ControlSwitch, controls/switch.js)
 		// is a real pill toggle already shipped and styled in frappe core
@@ -595,30 +569,67 @@ class TaxJarSetup {
 	}
 
 	// The action slot cycles through three states: an idle "Connect" button,
-	// a transient "testing…" state (see _test_connection), and a result pill
-	// (green Success / yellow Retry) that replaces the button once tested —
-	// clicking the pill re-tests. Centralised here since every entry point
-	// that can invalidate a previous test (edit company, edit token, switch
-	// mode) needs to fall back to the same idle button.
+	// a transient "testing…" state (see _test_connection), a green check
+	// badge once verified (a status, so a badge - clicking it re-tests), and
+	// a red Retry button on failure (an action, so a real button, unlike the
+	// status it sits next to). The failure reason itself isn't shown here at
+	// all — it lives as the token field's own error text (see
+	// _set_token_error), frappe's native invalid-field primitive rather than
+	// a bespoke popover. Centralised here since every entry point that can
+	// invalidate a previous test (edit company, edit token, switch mode)
+	// needs to fall back to the same idle button.
 	_render_cred_action(entry) {
-		const $action = entry.$card.find(".ts-cred-action");
+		const $action = entry.$card.find(".ts-cred-action").empty();
+		this._set_token_error(entry, entry.lastError);
 		if (entry.tested) {
-			$action.html(`<span class="ts-chip ok ts-cred-pill"><span class="ts-chip-dot"></span> ${__("Success")}</span>`);
+			$action.append(this._build_status_badge(entry, {
+				theme: "green", icon: "check", size: "lg", title: __("Verified. Click to test again."),
+			}));
 		} else if (entry.lastError) {
-			// The warning icon sits outside the pill (not nested inside it, and
-			// not routed through the pill's own click handler at all - they're
-			// siblings, so clicking the icon can never also trigger a retry).
-			// No native InfoCard here: it's not a real form field, so there's
-			// no df/label for frappe's own control code to hang one off of -
-			// this is the one spot still using the hand-rolled popover.
-			$action.html(`
-				${this._info_btn_html(entry.lastError)}
-				<span class="ts-chip retry ts-cred-pill">${__("Retry")}</span>
-			`);
+			$action.append(frappe.ui.button({
+				icon: "refresh-cw", variant: "outline", theme: "red",
+				tooltip: __("Retry"),
+				onclick: () => this._test_connection(entry),
+			}));
 		} else {
-			$action.html(`<button type="button" class="btn btn-default ts-test">${__("Connect")}</button>`);
+			$action.append(frappe.ui.button({
+				label: __("Connect"), variant: "outline",
+				onclick: () => this._test_connection(entry),
+			}));
 		}
-		$action.find(".ts-test, .ts-cred-pill").on("click", () => this._test_connection(entry));
+	}
+
+	// An icon-only status badge doubling as a re-test trigger - frappe.ui.badge
+	// itself is deliberately non-interactive markup, so the click/keyboard
+	// wiring that makes it re-testable lives here instead. No visible label:
+	// the title (and the aria-label badge.js derives from it on an icon-only
+	// badge) carries the meaning instead of a "Verified" word. Only the
+	// success state still uses this - a failure is an actionable Retry
+	// button instead (see _render_cred_action), not a badge.
+	_build_status_badge(entry, opts) {
+		const $badge = frappe.ui.badge(opts);
+		$badge.attr({ role: "button", tabindex: 0 }).css("cursor", "pointer");
+		$badge.on("click", () => this._test_connection(entry));
+		$badge.on("keydown", (e) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				this._test_connection(entry);
+			}
+		});
+		return $badge;
+	}
+
+	// Failure reason as the token field's own error, not a separate popover -
+	// df.invalid + set_invalid() is frappe's native invalid-field primitive
+	// (the same one a required/malformed field uses; see base_input.js), and
+	// set_description() is the same help-text slot every other field on this
+	// page already uses - .taxjar-setup .has-error .help-box (see the CSS)
+	// is what turns it red.
+	_set_token_error(entry, message) {
+		const tokenCtrl = entry.controls.token;
+		tokenCtrl.df.invalid = !!message;
+		tokenCtrl.set_invalid();
+		tokenCtrl.set_description(message || "");
 	}
 
 	_remove_credential_card(entry, cred) {
@@ -679,14 +690,13 @@ class TaxJarSetup {
 		}
 		// Transient state, not routed through _render_cred_action - nothing
 		// about entry.tested/lastError has changed yet, this is just what the
-		// action slot looks like while the request is in flight. Deliberately
-		// still the same disabled .ts-test button rather than a chip: the
-		// action column is a fixed width (see the CSS), and a chip carrying
-		// "Contacting TaxJar…" is far wider than any steady state, so it would
-		// need the column sized around a string only ever shown mid-request.
-		entry.$card.find(".ts-cred-action").html(
-			`<button type="button" class="btn btn-default ts-test" disabled>
-				<span class="ts-spin"></span> ${__("Connecting…")}</button>`
+		// action slot looks like while the request is in flight. Espresso's
+		// spinner (.es-spinner - the same primitive a button shows for its
+		// own loading state) stands in on its own here rather than inside a
+		// button, since there's no button label worth keeping around for the
+		// half-second the request takes.
+		entry.$card.find(".ts-cred-action").empty().append(
+			$(`<span class="es-spinner" role="status"></span>`).attr("aria-label", __("Connecting…"))
 		);
 
 		this._call("test_connection", {
@@ -764,7 +774,15 @@ class TaxJarSetup {
 		const creds = s.credentials || [];
 
 		if (!creds.length) {
-			this.$body.html(`<div class="ts-placeholder text-muted">${__("Add a company on the Connect step first.")}</div>`);
+			this.$body.append(frappe.ui.empty_state({
+				icon: "inbox",
+				title: __("No companies connected yet"),
+				description: __("Add a company on the Connect step first."),
+				actions: [{
+					label: __("Go to Connect"), variant: "outline",
+					onclick: () => this._go(SETUP_STEPS.findIndex((step) => step.key === "connect")),
+				}],
+			}));
 			this._accountCards = [];
 			return;
 		}
@@ -863,18 +881,22 @@ class TaxJarSetup {
 		const s = this.state || {};
 		const companies = s.companies || [];
 
-		this.$body.html(`
-			<div class="ts-cardgrid ts-feature-cards"></div>
-		`);
-
 		this._featureCards = [];
 		if (!companies.length) {
-			this.$body.find(".ts-feature-cards").html(
-				`<div class="ts-placeholder text-muted">${__("Add company accounts first.")}</div>`
-			);
-		} else {
-			companies.forEach((c) => this._add_feature_card(c));
+			this.$body.append(frappe.ui.empty_state({
+				icon: "settings",
+				title: __("No company accounts yet"),
+				description: __("Add company accounts first."),
+				actions: [{
+					label: __("Go to Map Ledgers"), variant: "outline",
+					onclick: () => this._go(SETUP_STEPS.findIndex((step) => step.key === "accounts")),
+				}],
+			}));
+			return;
 		}
+
+		this.$body.html(`<div class="ts-cardgrid ts-feature-cards"></div>`);
+		companies.forEach((c) => this._add_feature_card(c));
 	}
 
 	_add_feature_card(c) {
@@ -932,26 +954,37 @@ class TaxJarSetup {
 		const nexusByCompany = s.nexus_by_company || {};
 
 		this.$body.html(`
-			<div class="alert alert-warning ts-nexusnote" role="alert">
-				${frappe.utils.icon("info", "sm")}
-				<span>${__("Nexus regions are fetched from TaxJar, and are updated automatically everyday at midnight. {0}", [`<a href="${TAXJAR_NEXUS_URL}" target="_blank" rel="noopener noreferrer">${__("Manage Nexus")}</a>`])}</span>
-			</div>
+			<div class="ts-nexusnote-mount"></div>
 			<div class="ts-nexusaction">
-				<button class="btn btn-default ts-fetch">${
-					frappe.utils.icon("refresh-cw", "sm")
-				}<span>${__("Fetch from TaxJar")}</span></button>
-				<span class="ts-chip idle ts-fetchstatus">${__("Not fetched yet")}</span>
+				<h2 class="ts-nexustitle">${frappe.utils.escape_html(SETUP_STEPS[this.cur].title)}</h2>
+				<span class="ts-fetchstatus"></span>
 				<span class="ts-lastsync"></span>
+				<div class="ts-fetch-mount"></div>
 			</div>
-			<div class="ts-nexusresult"></div>
+			<div class="ts-cardgrid ts-nexusresult"></div>
 		`);
+
+		this.$body.find(".ts-nexusnote-mount").append(frappe.ui.alert({
+			theme: "blue",
+			title: __("Nexus regions are fetched daily at midnight from TaxJar"),
+			footer: () => frappe.ui.button({
+				label: __("Manage TaxJar Nexus"), variant: "outline", size: "xs", icon_right: "external-link",
+				onclick: () => window.open(TAXJAR_NEXUS_URL, "_blank", "noopener,noreferrer"),
+			}),
+		}));
+
+		this.$body.find(".ts-fetch-mount").append(frappe.ui.button({
+			icon: "refresh-cw", variant: "outline",
+			title: __("Fetch from TaxJar"),
+			onclick: () => this._fetch_nexus(),
+		}));
+		this.$body.find(".ts-fetchstatus").append(frappe.ui.badge({ label: __("Not fetched yet") }));
 
 		this._render_nexus_groups(nexusByCompany);
 		this._render_last_sync(s.nexus_last_synced);
-		this.$body.find(".ts-fetch").on("click", () => this._fetch_nexus());
 
 		// Opening this step always pulls the latest — no need to remember to
-		// click Fetch just to see current nexus. The status chip above is
+		// click Fetch just to see current nexus. The status badge above is
 		// overwritten immediately by _fetch_nexus()'s own in-progress state.
 		this._fetch_nexus();
 	}
@@ -969,43 +1002,33 @@ class TaxJarSetup {
 			`).join("");
 			return `
 				<div class="ts-card">
-					<div class="ts-card-h"><b>${frappe.utils.escape_html(company)}</b>
-						<span class="ts-cardcount">${regions.length} ${
-							regions.length === 1 ? __("region") : __("regions")
-						}</span></div>
+					<div class="ts-card-h"><b>${frappe.utils.escape_html(company)}</b></div>
 					<div class="ts-card-b"><div class="ts-pills">${pills}</div></div>
 				</div>
 			`;
 		}).join(""));
 	}
 
-	// Blank until a sync has actually happened - "Last synced never" is noise on
-	// a first run, and the status chip beside it already says "Not fetched yet".
+	// Blank until a sync has actually happened - "Synced never" is noise on
+	// a first run, and the status badge beside it already says "Not fetched yet".
 	_render_last_sync(when) {
 		this.$body.find(".ts-lastsync").html(
-			when ? __("Last synced {0}", [frappe.datetime.comment_when(when)]) : ""
+			when ? __("Synced {0}", [frappe.datetime.comment_when(when)]) : ""
 		);
 	}
 
 	_fetch_nexus() {
-		const $status = this.$body.find(".ts-fetchstatus");
-		const $btn = this.$body.find(".ts-fetch").prop("disabled", true);
-		$status.attr("class", "ts-chip warn ts-fetchstatus").html(`<span class="ts-spin"></span> ${__("Fetching from TaxJar…")}`);
+		const $status = this.$body.find(".ts-fetchstatus").empty();
+		const $btn = this.$body.find(".ts-fetch-mount .es-button").attr("aria-busy", "true");
 
 		this._call("fetch_nexus", {}).then((res) => {
 			this.state.nexus_by_company = res.nexus_by_company;
-			const companiesN = Object.keys(res.nexus_by_company).length;
-			const total = Object.values(res.nexus_by_company).reduce((n, arr) => n + arr.length, 0);
-			const regionWord = total === 1 ? __("region") : __("regions");
-			const companyWord = companiesN === 1 ? __("company") : __("companies");
-			$status.attr("class", "ts-chip ok ts-fetchstatus")
-				.html(`<span class="ts-chip-dot"></span> ${__("Fetched {0} {1} across {2} {3}", [total, regionWord, companiesN, companyWord])}`);
 			this._render_nexus_groups(res.nexus_by_company);
 			this.state.nexus_last_synced = res.nexus_last_synced;
 			this._render_last_sync(res.nexus_last_synced);
 		}).catch(() => {
-			$status.attr("class", "ts-chip err ts-fetchstatus").text(__("Could not fetch nexus."));
-		}).finally(() => $btn.prop("disabled", false));
+			$status.append(frappe.ui.badge({ label: __("Could not fetch nexus."), theme: "red" }));
+		}).finally(() => $btn.removeAttr("aria-busy"));
 	}
 
 	// ── Step 6: Review ──────────────────────────────────────────────
@@ -1031,7 +1054,7 @@ class TaxJarSetup {
 
 		const featureRows = companies.map((c) => `
 			<div class="ts-kv ts-kv-company"><span>${frappe.utils.escape_html(c.company)}</span>
-				<span>${c.calculate && c.file ? __("Compute Sales Tax · Sync Transactions") : c.calculate ? __("Compute Sales Tax") : c.file ? __("Sync Transactions") : __("Off")}</span></div>
+				<span>${c.calculate && c.file ? __("Sales Tax · Transactions Sync") : c.calculate ? __("Compute Sales Tax") : c.file ? __("Sync Transactions") : __("Off")}</span></div>
 		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;
 
 		const mode = s.api_mode || "—";
@@ -1041,10 +1064,7 @@ class TaxJarSetup {
 
 		const retentionDays = s.log_retention_days;
 		const logsDisplay = s.enable_taxjar_logging
-			? `<span style="display:inline-flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-					<span class="indicator-pill green no-indicator-dot">${__("Enabled")}</span>
-					<span class="indicator-pill green no-indicator-dot">${__("{0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])}</span>
-				</span>`
+			? __("Enabled · {0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])
 			: __("Off");
 
 		this.$body.html(`
@@ -1052,12 +1072,12 @@ class TaxJarSetup {
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Connection")}</b></div>
 					<div class="ts-card-b" style="gap:0">
 						<div class="ts-kv"><span>${__("Mode")}</span><span>${modeDisplay}</span></div>
-						<div class="ts-kv"><span>${__("API Logs")}</span><span>${logsDisplay}</span></div>
+						<div class="ts-kv"><span>${__("API Logs")}</span><span class="ts-kv-plain">${logsDisplay}</span></div>
 					</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Nexus")}</b></div>
 					<div class="ts-card-b" style="gap:0">
-						<div class="ts-kv"><span>${__("Regions")}</span><span>${__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])}</span></div>
-						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span><span class="indicator-pill green no-indicator-dot">${__("Daily at midnight")}</span></span></div>
+						<div class="ts-kv"><span>${__("Regions")}</span><span class="ts-kv-plain">${__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])}</span></div>
+						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span></div>
 					</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Accounts")}</b></div>
 					<div class="ts-card-b" style="gap:0">${accountRows}</div></div>

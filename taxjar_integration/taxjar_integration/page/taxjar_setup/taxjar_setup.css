@@ -2,55 +2,39 @@
    Layout: a single-step panel whose entire content swaps on Save & continue,
    rendered as plain page flow (no card/box) — it should read as a first-party
    desk page, not a widget embedded in one. The rail sits at the very top, above
-   the divider, with each step's heading and description below it — frappe-ui's
-   <Progress :intervals="true"> internals, one segment per step, each with a
-   clickable trailing caption that doubles as navigation. Uses Frappe desk CSS
-   variables so it follows the active (light/dark) theme; ink (--text-color)
-   is the structural accent. */
+   the divider: frappe's own Espresso Progress component (intervals form), with
+   a clickable caption per step underneath doubling as navigation. Buttons,
+   status badges, the Sandbox/Live toggle, the nexus banner and empty/loading
+   states are all Espresso components too (.es-button/.es-badge/.es-tab-buttons/
+   .es-alert/.es-popover/.es-skeleton) — their CSS ships with frappe core, so
+   only the surrounding card layout lives in this file. Uses Frappe desk CSS
+   variables so that layout follows the active (light/dark) theme; ink
+   (--text-color) is the structural accent. */
 
 .taxjar-setup {
 	max-width: 880px;
 	margin: 8px auto 40px;
 }
 
-/* frappe-ui's `flex space-x-1` row of equal segments, each `bg-surface-gray-7`
-   once filled or `bg-surface-gray-2` while unfilled — mapped here onto our own
-   desk theme tokens since this page has no Tailwind runtime. Extended past the
-   stock component with a clickable trailing caption under each segment (that
-   step's name) instead of a single overall value/hint, since every segment
-   already corresponds 1:1 with a named step — this rail is the only navigation
-   element on the page. */
-/* No top margin: the rail is .ts-head's only child now, so the header's own
-   padding is what spaces it. The 24px here used to separate it from the
-   heading that sat above it. */
-.taxjar-setup .ts-progress {
+/* The bar itself is frappe's own Espresso Progress (intervals form, size xl) —
+   .es-progress ships its own CSS already loaded on every desk page, so no
+   rule for it lives here. .ts-steps below is this wizard's own addition: a
+   clickable caption per step, the one thing the stock component doesn't do. */
+.taxjar-setup .ts-rail { margin-bottom: 14px; }
+.taxjar-setup .ts-steps {
 	list-style: none; margin: 0; padding: 0;
 	display: flex; gap: 4px;
 }
-.taxjar-setup .ts-interval { flex: 1 1 0; min-width: 0; }
-.taxjar-setup .ts-interval-btn {
-	display: flex; flex-direction: column; align-items: center; gap: 8px;
-	width: 100%; border: 0; background: none; padding: 0; cursor: pointer; text-align: center;
-}
-.taxjar-setup .ts-interval-btn:disabled { cursor: default; }
-
-/* size="xl" per frappe-ui's Progress size map (sm=2px, md=4px, lg=8px, xl=12px). */
-.taxjar-setup .ts-interval-bar {
-	display: block; width: 100%; height: 12px; border-radius: 12px;
-	background: var(--control-bg);
-	transition: background 0.2s ease;
-}
-.taxjar-setup .ts-interval.filled .ts-interval-bar { background: var(--text-color); }
-
-.taxjar-setup .ts-interval-label {
-	display: block; text-align: center;
-	font-size: 12.5px; color: var(--text-muted);
+.taxjar-setup .ts-steps li { flex: 1 1 0; min-width: 0; }
+.taxjar-setup .ts-step-btn {
+	display: block; width: 100%; border: 0; background: none; padding: 2px 0; cursor: pointer;
+	text-align: center; font-size: 12.5px; color: var(--ink-gray-5, var(--text-muted));
 	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.taxjar-setup .ts-interval.filled .ts-interval-label { color: var(--text-color); }
-.taxjar-setup .ts-interval.active .ts-interval-label { font-weight: 700; }
-.taxjar-setup .ts-interval-btn:disabled .ts-interval-label { opacity: 0.6; }
-.taxjar-setup .ts-interval-btn:not(:disabled):hover .ts-interval-label { color: var(--text-color); }
+.taxjar-setup .ts-step-btn:disabled { cursor: default; opacity: 0.6; }
+.taxjar-setup .ts-step-btn.filled { color: var(--ink-gray-8, var(--text-color)); }
+.taxjar-setup .ts-step-btn.active { font-weight: 700; }
+.taxjar-setup .ts-step-btn:not(:disabled):hover { color: var(--ink-gray-8, var(--text-color)); }
 
 /* ── panel: single step at a time, rendered as plain page flow (no card) ── */
 .taxjar-setup .ts-panel {
@@ -76,13 +60,11 @@
 	padding: 18px 0; border-top: 1px solid var(--border-color);
 }
 .taxjar-setup .ts-grow { flex: 1; }
-.taxjar-setup .ts-next.btn-dark { background: var(--text-color); border-color: var(--text-color); color: var(--card-bg); }
-.taxjar-setup .ts-next.btn-dark:hover { opacity: 0.9; }
 /* Looks disabled but stays a real button — clicking it while gated still
    fires, so _on_next() can explain what's missing instead of the click
    silently doing nothing (which is what a native `disabled` button does). */
-.taxjar-setup .ts-next.ts-next-gated { opacity: 0.45; }
-.taxjar-setup .ts-next.ts-next-gated:hover { opacity: 0.45; }
+.taxjar-setup .es-button.ts-next-gated { opacity: 0.45; }
+.taxjar-setup .es-button.ts-next-gated:hover { opacity: 0.45; }
 .taxjar-setup .hide { display: none !important; }
 
 /* step bodies */
@@ -94,7 +76,7 @@
    and Freight Income) are nested two levels inside a top-level card's <li> too,
    so a plain descendant selector would wrongly card-ify them as well. */
 .taxjar-setup .ts-check > li {
-	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
+	border: 1px solid var(--border-color); border-radius: var(--radius-lg, 12px);
 	font-size: var(--text-sm); color: var(--text-muted);
 	overflow: hidden;
 }
@@ -124,7 +106,7 @@
 .taxjar-setup .ts-check-sub li::before { content: "–"; position: absolute; left: 0; }
 
 .taxjar-setup .ts-card {
-	border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
+	border: 1px solid var(--border-color); border-radius: var(--radius-lg, 12px);
 	/* No overflow:hidden here — it was clipping Link controls' search dropdown,
 	   which renders as an absolutely-positioned child that can extend past the
 	   card's own box. Rounded corners on the header below handle the visual
@@ -133,7 +115,7 @@
 .taxjar-setup .ts-card-h {
 	display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
 	padding: 11px 14px; border-bottom: 1px solid var(--border-color); background: var(--subtle-fg, var(--fg-color));
-	border-radius: var(--border-radius-md) var(--border-radius-md) 0 0;
+	border-radius: var(--radius-lg, 12px) var(--radius-lg, 12px) 0 0;
 }
 .taxjar-setup .ts-card-h b { font-size: var(--text-md); }
 .taxjar-setup .ts-card-h-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -154,23 +136,6 @@
    should be the only source of spacing here. */
 .taxjar-setup .ts-card-b .form-group { margin-bottom: 0; }
 
-/* Test connection is the one action per credential card that actually matters
-   before Continue unlocks, so it gets a bolder weight than a plain
-   .btn-default — but a --text-color border read as a second black CTA next to
-   "Save & continue". --border-color is the same edge the Company/Live token
-   inputs it sits beside already use, which is the row it belongs to.
-   Explicit padding/line-height rather than relying on .btn-sm (too short) or
-   plain .btn (its padding alone still doesn't match a frappe-control input's
-   height) — sitting inline next to those inputs, it needs to match them.
-   inline-flex (not the default inline-block) so the in-flight state's spinner
-   sits on the label's centre line without vertical-align fudging. */
-.taxjar-setup .ts-test {
-	display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-	border: 1px solid var(--border-color); color: var(--text-color); font-weight: 600;
-	background: var(--card-bg); padding: 6px 16px; line-height: 1.4;
-}
-.taxjar-setup .ts-test:hover { background: var(--control-bg); }
-.taxjar-setup .ts-test:disabled { opacity: 0.6; cursor: default; }
 /* Cards with no header AND no body wrapper (flat content straight inside
    .ts-card) fall back to plain padding. Excludes cards that do have a
    .ts-card-b (e.g. Connect's headerless API Mode card) — that div already
@@ -187,6 +152,11 @@
 }
 .taxjar-setup .ts-cardgrid:last-child { margin-bottom: 0; }
 
+/* Nexus cards hold a variable, potentially long list of region pills, so
+   unlike the other card grids they should stretch to fill the row (half the
+   width each, not a fixed max) and simply grow taller as pills wrap. */
+.taxjar-setup .ts-nexusresult { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+
 .taxjar-setup .ts-kv {
 	display: flex; justify-content: space-between; gap: 12px;
 	padding: 10px 0; font-size: var(--text-sm); border-bottom: 1px solid var(--border-color);
@@ -199,6 +169,7 @@
    label/value spans. */
 .taxjar-setup .ts-kv > span:first-child { color: var(--text-muted); }
 .taxjar-setup .ts-kv > span:last-child { font-weight: 600; }
+.taxjar-setup .ts-kv > span:last-child.ts-kv-plain { font-weight: 400; }
 /* Features rows are keyed by company, not by a field label, so the emphasis
    flips: the company reads as the heading (matching .ts-acc-company on the
    Accounts card beside it) and the feature list as its value. */
@@ -212,11 +183,7 @@
 .taxjar-setup .ts-acc-company { font-weight: 600; color: var(--text-color); }
 .taxjar-setup .ts-acc-detail { margin-top: 2px; color: var(--text-muted); }
 
-.taxjar-setup .ts-placeholder,
-.taxjar-setup .ts-loading {
-	border: 1px dashed var(--border-color); border-radius: var(--border-radius-md);
-	padding: 48px; text-align: center; font-size: var(--text-sm);
-}
+.taxjar-setup .ts-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 8px 0; }
 
 /* form fields — the control itself is a native Frappe control; these just
    provide the stacking rhythm around it inside a card or plain flow. */
@@ -243,7 +210,7 @@
    flex-direction: row since this sits on .ts-card-b, whose own base rule
    sets flex-direction: column. */
 .taxjar-setup .ts-mode-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 24px; }
-.taxjar-setup .ts-reqd { color: var(--text-danger, #d1242f); }
+.taxjar-setup .ts-reqd { color: var(--text-danger); }
 
 /* API Mode / Enable API logs / Retention read as section-level settings, not
    ordinary field labels (Company, Live token) - bolded to stand apart from
@@ -269,28 +236,6 @@
 	margin: 2px 0 0; font-size: var(--text-sm); line-height: 1.4;
 	color: var(--ink-gray-5);
 }
-
-/* Sandbox/Live as a two-button pill toggle rather than a closed dropdown -
-   it's a binary choice, worth showing both sides of at once. */
-.taxjar-setup .ts-segmented {
-	display: inline-flex; flex: none; padding: 3px; gap: 2px;
-	border: 1px solid var(--border-color); border-radius: 999px; background: var(--control-bg);
-}
-.taxjar-setup .ts-seg-btn {
-	border: none; background: none; padding: 6px 18px; border-radius: 999px;
-	font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); cursor: pointer;
-	transition: background 0.15s ease, color 0.15s ease;
-}
-/* A raised card-bg thumb on the grey track, NOT a filled --text-color pill:
-   that is exactly the solid ink of .ts-next (Save & continue), and a segment
-   of a toggle reading as the page's primary CTA invited clicking "Live" as if
-   it were the way forward. Selection here is conveyed by lift and contrast
-   against the track instead of by the CTA's colour. */
-.taxjar-setup .ts-seg-btn.ts-seg-active {
-	background: var(--card-bg); color: var(--text-color);
-	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-.taxjar-setup .ts-seg-btn:not(.ts-seg-active):hover { color: var(--text-color); }
 
 /* Enable API logs: one card, two stacked rows divided by a border - top row
    is fieldtype "Switch" (frappe.ui.form.ControlSwitch), a real pill toggle
@@ -327,28 +272,6 @@
 .taxjar-setup .ts-retention-wrap { display: flex; align-items: center; gap: 6px; }
 .taxjar-setup .ts-retention-wrap .ts-field-retention { width: 60px; }
 .taxjar-setup .ts-retention-unit { color: var(--text-muted); font-size: var(--text-sm); white-space: nowrap; }
-
-/* Click-to-show popover for the Retry pill's failure reason - the one
-   remaining spot with no backing form field to hang frappe's own InfoCard
-   off of (see _info_btn_html's comment). */
-.taxjar-setup .ts-info-btn {
-	display: inline-flex; align-items: center; justify-content: center;
-	width: 26px; height: 26px; padding: 0; vertical-align: -7px;
-	border: none; background: none; color: var(--yellow-500); cursor: pointer; border-radius: 50%;
-}
-.taxjar-setup .ts-info-btn:hover,
-.taxjar-setup .ts-info-btn.ts-info-btn-active { background: var(--control-bg); }
-/* Appended to <body>, not .taxjar-setup - deliberately outside the page's own
-   scoping so it can sit above any card regardless of which one triggered it,
-   without needing every card to be a positioned ancestor. position: fixed so
-   its coordinates (from getBoundingClientRect(), viewport-relative) don't
-   need scroll-offset math. */
-.ts-info-pop {
-	position: fixed; z-index: 1000; max-width: 280px;
-	background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius-md);
-	box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
-	padding: 8px 12px; font-size: var(--text-sm); color: var(--text-color);
-}
 
 /* API Credentials: one section, collapsible as a whole (not per-row like the
    old per-company accordion) - the heading just carries the chevron + label.
@@ -390,78 +313,39 @@
 .taxjar-setup .ts-cred-row + .ts-cred-row { padding-top: 12px; border-top: 1px solid var(--border-color); }
 .taxjar-setup .ts-cred-row .ts-field-company,
 .taxjar-setup .ts-cred-row .ts-field-token { flex: 1; min-width: 0; }
-/* flex here too: the Failed state puts a warning icon and the Retry pill
-   side by side as two separate elements (not one nested inside the other).
-   Fixed basis, NOT flex: none - the slot's contents change per state (Connect
-   button / Connecting… / Success / warning icon + Retry), and a content-sized
+/* Fixed basis, NOT flex: none - the slot's contents change per state (Connect
+   button / Connecting… / a single check-or-retry icon), and a content-sized
    slot hands a different width to the two flex: 1 fields in every state. That
    made Company/Live token columns not line up between rows sitting in
    different states, and made a row's own inputs resize mid-request on
    Connect. A reserved column keeps both stable; the width is sized for the
-   longest steady-state label with headroom for translations. */
+   widest steady-state content (the idle "Connect" button). */
 /* Action slot and remove button share one bottom-aligned wrapper rather than
    each carrying align-self: flex-end of their own. Bottom-aligning them
    separately lined up their bottom EDGES, and they are different heights - the
-   22px circle against a ~28px pill/button - so their centres sat a few px
-   apart and the x read as sagging below the pill. Centring inside a wrapper
+   22px circle against a ~28px button - so their centres sat a few px
+   apart and the x read as sagging below it. Centring inside a wrapper
    whose own bottom is the anchor keeps the slot flush with the inputs while
    the x tracks whatever the slot currently holds, which matters because that
-   height changes per state (Connect button / Connecting… / Success pill /
-   icon + Retry). A margin nudge on the button would have to be re-guessed for
-   each of those, and again for any font or translation change. */
+   height changes per state (Connect button / Connecting… / a status icon).
+   A margin nudge on the button would have to be re-guessed for each of
+   those, and again for any font or translation change. */
 .taxjar-setup .ts-cred-row .ts-cred-tail {
 	flex: none; display: flex; align-items: center; gap: 12px; align-self: flex-end;
 }
 .taxjar-setup .ts-cred-row .ts-cred-action {
-	flex: 0 0 140px; display: flex; align-items: center; gap: 6px;
+	flex: 0 0 84px; display: flex; align-items: center; gap: 6px;
 }
-/* The button/pill fills whatever the icon doesn't, so every state's control
-   spans the same reserved column rather than floating at its left edge. */
-.taxjar-setup .ts-cred-action > .ts-chip,
-.taxjar-setup .ts-cred-action > .ts-test { flex: 1; min-width: 0; }
-.taxjar-setup .ts-cred-action > .ts-info-btn { flex: none; }
-/* Overrides .ts-chip's wrapping (which exists for long error text elsewhere) -
-   inside a fixed-width column a wrapped label would grow the row's height
-   instead of its width, which is the same jump in the other axis. */
-.taxjar-setup .ts-cred-action > .ts-chip,
-.taxjar-setup .ts-cred-action > .ts-test { white-space: nowrap; overflow: hidden; }
-.taxjar-setup .ts-cred-action > .ts-chip { justify-content: center; }
-/* .ts-card-b's default align-items: stretch would otherwise stretch this
-   button to the card's full width, since it's the row's only child. */
+/* Composes two of frappe's own primitives rather than inventing an error
+   style of our own: has-error/has-error-invalid (set via df.invalid +
+   set_invalid(), see _set_token_error) already turns the input's border red
+   (controls.scss); this just carries that same signal onto the description
+   text (.help-box) that set_description() renders below it. */
+.taxjar-setup .frappe-control.has-error .help-box { color: var(--error-color); }
+/* .ts-card-b's default align-items: stretch would otherwise stretch the
+   "Add another company" button to the card's full width, since it's the
+   row's only child. */
 .taxjar-setup .ts-cred-add-row { align-items: flex-start; }
-/* .ts-cred-pill (the Success/Failed replacement for the button) stays
-   clickable to re-test, so it needs the same pointer affordance. */
-.taxjar-setup .ts-cred-pill { cursor: pointer; }
-
-/* status chips — wraps rather than overflows, since error/status text (e.g.
-   "Invalid token (401). Check you copied…") can run much longer than "OK". */
-.taxjar-setup .ts-chip {
-	display: inline-flex; align-items: center; gap: 6px;
-	font-size: 12px; font-weight: 600; border-radius: 100px; padding: 4px 10px;
-	border: 1px solid transparent; white-space: normal; text-align: left; max-width: 100%;
-}
-.taxjar-setup .ts-chip.idle { background: var(--control-bg); color: var(--text-muted); }
-/* .warn is the neutral "in progress" state (Connect/Nexus fetch spinners) -
-   .retry is the distinct, actually-yellow state for a failed connection that
-   needs the user to act, so the two must not share a class. */
-.taxjar-setup .ts-chip.warn { border-color: var(--border-color); color: var(--text-muted); }
-.taxjar-setup .ts-chip.retry { background: var(--yellow-100); color: var(--yellow-700, #9a6304); }
-.taxjar-setup .ts-chip.err { border-color: var(--text-color); color: var(--text-color); }
-/* Success gets the same tinted-fill treatment as .retry's yellow, just green -
-   the dot is darkened a shade past the plain --green-600 used elsewhere so it
-   still stands out against the now-green (not neutral) chip background. */
-.taxjar-setup .ts-chip.ok { background: var(--green-100); color: var(--green-700, #218358); }
-.taxjar-setup .ts-chip-dot {
-	width: 7px; height: 7px; border-radius: 50%; flex: none;
-	background: var(--green-700, #218358);
-}
-.taxjar-setup .ts-spin {
-	display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-	border: 1.5px solid currentColor; border-right-color: transparent;
-	animation: ts-spin 0.7s linear infinite;
-}
-@keyframes ts-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .taxjar-setup .ts-spin { animation: none; } }
 
 /* toggle rows (Features step) — native Check control + our own label/description */
 .taxjar-setup .ts-togrow {
@@ -480,33 +364,22 @@
    the start of the lower row's box), pushing the line off-centre. */
 .taxjar-setup .ts-cotog { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0; }
 
-/* nexus */
+/* nexus - the banner is frappe.ui.alert and the fetch control frappe.ui.button
+   / frappe.ui.badge, all styled by their own already-loaded component CSS;
+   only the layout around them lives here. */
+.taxjar-setup .ts-nexusnote-mount { margin-bottom: 18px; }
 .taxjar-setup .ts-nexusaction { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
-/* An inline <svg> sits on the text baseline, so a 16px icon next to the label
-   hangs low and the only gap is an accidental whitespace node. Same
-   flex/align/gap treatment .ts-check-link and .ts-nexusnote already use. */
-.taxjar-setup .ts-fetch { display: inline-flex; align-items: center; gap: 6px; }
+.taxjar-setup .ts-nexustitle { margin: 0 auto 0 0; font-size: 24px; font-weight: 700; line-height: 1; }
 .taxjar-setup .ts-lastsync {
-	margin-left: auto; font-size: var(--text-sm); color: var(--text-muted); white-space: nowrap;
+	font-size: var(--text-sm); color: var(--text-muted); white-space: nowrap;
 }
-.taxjar-setup .ts-cardcount { font-size: var(--text-sm); color: var(--text-muted); }
+/* The icon-only fetch button has no loading_label span, so the framework's
+   own aria-busy rule (which only hides the icon alongside that span) never
+   fires here - hide it ourselves or the icon and spinner show together. */
+.taxjar-setup .ts-fetch-mount .es-button[aria-busy="true"] > svg { display: none; }
 .taxjar-setup .ts-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .taxjar-setup .ts-pill {
 	font-size: 12.5px; border: 1px solid var(--border-color); border-radius: 100px;
 	padding: 4px 11px; display: inline-flex; gap: 7px;
 }
 .taxjar-setup .ts-pillcode { font-family: var(--font-family-monospace, monospace); color: var(--text-muted); }
-/* Color/background/border come from the framework's .alert.alert-warning
-   (see frappe/public/scss/common/alert.scss) - same component used for e.g.
-   the doctype permissions "customized" banner - so this only lays out the
-   icon + text row and matches every other themed alert in the desk instead
-   of a bespoke, locally-invented banner style. */
-.taxjar-setup .ts-nexusnote { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
-/* .icon carries `margin: 0 auto` (icons.scss) for its centred-in-a-box uses.
-   As a flex item those auto margins soak up every pixel of free space in the
-   row, pushing the icon and the text after it toward the middle. */
-.taxjar-setup .ts-nexusnote > .icon { margin: 0; flex: none; }
-/* An <a> would otherwise take the desk's own link colour and read as dark text
-   on the amber fill. Inheriting the alert's colour keeps it in the banner's
-   palette; the underline is what marks it as a link. */
-.taxjar-setup .ts-nexusnote a { color: inherit; text-decoration: underline; }
