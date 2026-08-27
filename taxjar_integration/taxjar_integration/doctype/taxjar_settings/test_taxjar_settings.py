@@ -4219,6 +4219,17 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		fn = js.split("taxjar_integration.show_no_address_tax_message = function (frm) {")[1].split("\n};")[0]
 		self.assertNotIn("frm.layout.show_message(", fn)
 
+	def test_no_address_message_has_a_create_address_link(self):
+		"""The "no address" warning must give the user a way out, not just
+		state the problem - a hyperlink straight into a prefilled Address
+		form, linked to this customer via the same helper the shipping-
+		address picker's own "Add New Address" action already uses."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration.show_no_address_tax_message = function (frm) {")[1].split("\n};")[0]
+		self.assertIn("Customer Address is not set, hence taxes are not calculated.", fn)
+		self.assertIn('class="taxjar-create-address-link"', fn)
+		self.assertIn("taxjar_integration._open_new_address(frm)", fn)
+
 	def test_setup_appears_before_refresh_in_customer(self):
 		js = self._read_js("customer.js")
 		self.assertLess(js.index("setup(frm) {"), js.index("refresh(frm) {"))

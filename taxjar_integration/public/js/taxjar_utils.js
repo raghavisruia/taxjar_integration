@@ -499,9 +499,20 @@ taxjar_integration.show_no_address_tax_message = function (frm) {
 		if (party_name) {
 			taxjar_integration._set_tax_message(
 				frm,
-				__("Taxes are not calculated, as address is not set to assess nexus."),
+				__('Customer Address is not set, hence taxes are not calculated. <a href="#" class="taxjar-create-address-link">{0}</a>', [
+					__("Create Address"),
+				]),
 				"orange"
 			);
+			// The link's target (a prefilled, linked-to-this-customer Address
+			// form) only exists as a client-side frappe.new_doc() call, not a
+			// real URL - reuse the exact same helper the shipping-address
+			// picker's own "Add New Address" action already calls, so both
+			// entry points prefill identically.
+			frm.layout.message.find(".taxjar-create-address-link").on("click", function (e) {
+				e.preventDefault();
+				taxjar_integration._open_new_address(frm);
+			});
 			return;
 		}
 	}
