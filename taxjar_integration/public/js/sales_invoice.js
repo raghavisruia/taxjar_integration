@@ -28,7 +28,9 @@ frappe.ui.form.on("Sales Invoice", {
 	},
 
 	validate(frm) {
-		return taxjar_integration.check_shipping_address(frm);
+		return taxjar_integration
+			.confirm_foreign_tax_rows(frm)
+			.then(() => taxjar_integration.check_shipping_address(frm));
 	},
 
 	shipping_address_name(frm) {

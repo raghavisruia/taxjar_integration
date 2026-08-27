@@ -264,6 +264,116 @@ taxjar_integration.check_shipping_address = function (frm) {
 	});
 };
 
+// A foreign Sales Taxes and Charges row (a handling fee, a manual
+// "Loyalty Discount" row, etc - anything that isn't our own tax row or the
+// configured shipping row) is otherwise invisible to TaxJar. This gates
+// save with a dialog showing exactly how each one will be treated, built
+// from the same classifier get_tax_data() itself uses server-side (design
+// doc §5) - what the dialog shows is guaranteed to match what gets sent.
+taxjar_integration.confirm_foreign_tax_rows = function (frm) {
+	return frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.preview_foreign_tax_rows", {
+			doc_json: JSON.stringify(frm.doc),
+		})
+		.then(function (result) {
+			let rows = (result && result.foreign_rows) || [];
+			if (!rows.length) {
+				return;
+			}
+
+			// Only re-prompt when the foreign-row set has actually changed
+			// since the last "Proceed" - otherwise every unrelated resave of
+			// a draft carrying a foreign row would re-block on this dialog.
+			let ack_hash = taxjar_integration._hash_foreign_rows(rows);
+			if (frm._taxjar_foreign_rows_ack === ack_hash) {
+				return;
+			}
+
+			return new Promise(function (resolve) {
+				taxjar_integration._show_foreign_tax_rows_dialog(frm, rows, ack_hash, resolve);
+			});
+		});
+};
+
+taxjar_integration._hash_foreign_rows = function (rows) {
+	// affected_item_count is part of the fingerprint too - a negative row's
+	// rendered sentence ("...across {0} line item(s)...") changes when the
+	// item set it's distributed across changes, even if the row's own
+	// account_head/amount/treatment stay the same.
+	return JSON.stringify(
+		rows.map((row) => [row.account_head, row.amount, row.treatment, row.affected_item_count])
+	);
+};
+
+taxjar_integration._show_foreign_tax_rows_dialog = function (frm, rows, ack_hash, resolve) {
+	let resolved = false;
+	let settle = function (proceed) {
+		if (resolved) return;
+		resolved = true;
+		if (!proceed) frappe.validated = false;
+		resolve();
+	};
+
+	let table_rows = rows
+		.map((row) => {
+			let treatment =
+				row.treatment === "taxable_line_item"
+					? __("Added as an additional taxable line item: {0}", [
+							frappe.utils.escape_html(row.description || ""),
+					  ])
+					: __("Applied as a discount across {0} line item(s) - consider using Additional Discount instead", [
+							row.affected_item_count || 0,
+					  ]);
+
+			return `<tr>
+				<td>${frappe.utils.escape_html(row.account_head)}</td>
+				<td>${frappe.utils.escape_html(row.description || "")}</td>
+				<td class="text-right">${format_currency(row.amount, frm.doc.currency)}</td>
+				<td>${treatment}</td>
+			</tr>`;
+		})
+		.join("");
+
+	let html = `
+		<p class="text-muted">${__("This document has Sales Taxes and Charges rows TaxJar doesn't already recognize as tax or shipping. Here's how they'll be treated for tax calculation:")}</p>
+		<div style="max-height:300px;overflow-y:auto;margin-top:10px">
+			<table class="table table-bordered table-hover">
+				<thead style="background-color:var(--subtle-fg)">
+					<tr>
+						<th>${__("Ledger")}</th>
+						<th>${__("Description")}</th>
+						<th class="text-right">${__("Amount")}</th>
+						<th>${__("Treatment")}</th>
+					</tr>
+				</thead>
+				<tbody>${table_rows}</tbody>
+			</table>
+		</div>
+	`;
+
+	let d = new frappe.ui.Dialog({
+		title: __("Confirm Tax Treatment for Extra Charges"),
+		fields: [{ fieldtype: "HTML", fieldname: "foreign_rows_table", options: html }],
+		primary_action_label: __("Proceed"),
+		primary_action() {
+			frm._taxjar_foreign_rows_ack = ack_hash;
+			d.hide();
+			settle(true);
+		},
+		secondary_action_label: __("Cancel"),
+		secondary_action() {
+			d.hide();
+			settle(false);
+		},
+		on_hide() {
+			// Dismissed via Escape/backdrop click, not a button - treat like
+			// Cancel rather than silently letting the save through.
+			settle(false);
+		},
+	});
+	d.show();
+};
+
 taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 	let selected = null;
 

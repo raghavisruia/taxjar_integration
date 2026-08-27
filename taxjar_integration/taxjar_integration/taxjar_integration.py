@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import traceback
+from types import SimpleNamespace
 
 import frappe
 import taxjar
@@ -589,6 +590,14 @@ def get_tax_data(doc):
 
 	line_items = [get_line_item_dict(item, doc.docstatus) for item in doc.items]
 
+	# Foreign Sales Taxes and Charges rows (design doc §4) - a handling fee,
+	# a manual "Loyalty Discount", etc - must be folded in before the
+	# currency-conversion loop below so they convert identically to real
+	# items.
+	foreign_rows = _classify_foreign_tax_rows(doc, company_config)
+	_apply_item_discounts(line_items, foreign_rows["item_discounts"])
+	line_items.extend(foreign_rows["synthetic_items"])
+
 	if from_shipping_state not in SUPPORTED_STATE_CODES:
 		from_shipping_state = get_state_code(from_address, "Company")
 
@@ -605,6 +614,19 @@ def get_tax_data(doc):
 			if "sales_tax" in li:
 				li["sales_tax"] = flt(li["sales_tax"] * usd_rate, 2)
 
+	# TaxJar's own validation requires "amount" to equal the sum of line
+	# items (unit_price × quantity − discount) plus shipping, excluding
+	# sales tax - confirmed live against a real "amount must be equal to
+	# the sum of line items and shipping" rejection (design doc §2 had this
+	# backwards, describing amount as excluding shipping). Deriving it
+	# directly from the final line_items/shipping - already currency-
+	# converted above - keeps this invariant correct by construction,
+	# rather than by coincidence with doc.net_total.
+	amount = shipping + sum(
+		flt(li.get("unit_price")) * flt(li.get("quantity")) - flt(li.get("discount", 0))
+		for li in line_items
+	)
+
 	tax_dict = {
 		"from_country": from_country_code,
 		"from_zip": from_address.pincode,
@@ -617,7 +639,7 @@ def get_tax_data(doc):
 		"to_street": to_address.address_line1,
 		"to_state": to_shipping_state,
 		"shipping": shipping,
-		"amount": flt(doc.net_total * usd_rate, 2) if usd_rate else doc.net_total,
+		"amount": flt(amount, 2),
 		"plugin": "erpnext",
 		"line_items": line_items,
 	}
@@ -662,8 +684,24 @@ def _get_item_product_tax_category(item):
 def get_line_item_dict(item, docstatus):
 	product_tax_code = _get_item_product_tax_category(item)
 
-	unit_price = flt(item.get("rate"))
-	price_list_rate = flt(item.get("price_list_rate"))
+	# list_rate is the pre-discount unit price - the max of rate_with_margin,
+	# price_list_rate, and rate, so that whichever field actually reflects
+	# the highest price this line was offered at wins. max() rather than an
+	# "or" fallback chain matters for a line with rate typed directly above a
+	# stale/lower price_list_rate and no margin fields populated (e.g. a
+	# programmatically created document that bypassed ERPNext's client-side
+	# margin auto-set) - an "or" chain would pick the lower price_list_rate,
+	# clamp the resulting negative discount to 0, and silently under-report
+	# the amount actually charged.
+	# discount is sourced from net_amount, ERPNext's own final chargeable
+	# amount for the line - it already folds in both item-level discount and
+	# this line's proportional share of any document-level Additional
+	# Discount (except the Grand Total + cash/non-trade mode, where net_amount
+	# is deliberately left untouched and discount correctly computes to 0).
+	list_rate = max(flt(item.get("rate_with_margin")), flt(item.get("price_list_rate")), flt(item.get("rate")))
+	list_amount = list_rate * flt(item.get("qty"))
+	discount = list_amount - flt(item.get("net_amount"))
+	discount = min(max(discount, 0), list_amount)
 
 	# product_identifier is the Item master's own name - item_code is what
 	# the row is fetched from and, by this app's autoname convention
@@ -686,18 +724,153 @@ def get_line_item_dict(item, docstatus):
 		product_tax_code=product_tax_code,
 		product_identifier=item_code,
 		description=full_description,
+		unit_price=list_rate,
 	)
 
-	if price_list_rate and price_list_rate > unit_price:
-		tax_dict["unit_price"] = price_list_rate
-		tax_dict["discount"] = price_list_rate - unit_price
-	else:
-		tax_dict["unit_price"] = unit_price
+	if discount > 0:
+		tax_dict["discount"] = discount
 
 	if docstatus == 1:
 		tax_dict.update({"sales_tax": item.get("tax_collectable")})
 
 	return tax_dict
+
+
+# Offset for synthetic charge-line ids (design doc §4.4) - Sales Taxes and
+# Charges rows are single-digit counts in practice, so a fixed high offset
+# can never collide with a real item's idx, without needing to know
+# len(doc.items) at every call site that builds or reads one.
+_SYNTHETIC_LINE_ID_OFFSET = 1000
+
+
+def _classify_foreign_tax_rows(doc, company_config):
+	"""Classify Sales Taxes and Charges rows that are neither our own tax row
+	nor the configured shipping row - a handling fee, a manually entered
+	"Loyalty Discount" row, etc (design doc §4.1). These are otherwise
+	invisible to TaxJar: they move doc.grand_total but never doc.net_total,
+	the taxable base we send.
+
+	A positive row becomes a synthetic taxable line item (§4.2); a negative
+	row is distributed as a line-item discount, proportional to net_amount -
+	the same math ERPNext's own apply_discount_amount() uses (§4.3).
+
+	Shared by get_tax_data() (the real payload) and the client confirmation
+	dialog's preview endpoint, so what the dialog shows is exactly what gets
+	sent (§5.3).
+	"""
+	known_heads = {company_config.tax_account_head, company_config.shipping_account_head}
+	foreign_rows = [
+		tax for tax in (doc.taxes or [])
+		if tax.account_head not in known_heads and flt(tax.tax_amount) != 0
+	]
+
+	synthetic_items = [
+		_build_synthetic_line_item(row) for row in foreign_rows if flt(row.tax_amount) > 0
+	]
+	negative_total = sum(-flt(row.tax_amount) for row in foreign_rows if flt(row.tax_amount) < 0)
+
+	return {
+		"foreign_rows": foreign_rows,
+		"synthetic_items": synthetic_items,
+		"item_discounts": _distribute_negative_total(doc, negative_total) if negative_total else {},
+	}
+
+
+def _build_synthetic_line_item(row):
+	account_name = frappe.db.get_value("Account", row.account_head, "account_name", cache=True)
+	description = f"{account_name or row.account_head} - {row.description}" if row.description \
+		else (account_name or row.account_head)
+	return dict(
+		id=_SYNTHETIC_LINE_ID_OFFSET + row.idx,
+		quantity=1,
+		product_tax_code=None,
+		product_identifier=row.account_head,
+		description=description,
+		unit_price=flt(row.tax_amount),
+	)
+
+
+def _distribute_negative_total(doc, negative_total):
+	"""Spread a foreign negative row's amount across real line items,
+	proportional to net_amount - mirrors apply_discount_amount()'s own
+	distributed_amount math (design doc §3.1/§4.3)."""
+	total_net_amount = sum(flt(item.get("net_amount")) for item in doc.items)
+	if not total_net_amount:
+		return {}
+	return {
+		item.get("idx"): flt(negative_total * flt(item.get("net_amount")) / total_net_amount)
+		for item in doc.items
+	}
+
+
+def _apply_item_discounts(line_items, item_discounts):
+	for line_item in line_items:
+		extra_discount = item_discounts.get(line_item.get("id"))
+		if extra_discount:
+			# Clamp to the line's own price, same as get_line_item_dict()'s own
+			# discount - otherwise a large foreign discount row distributed
+			# onto a line that already carries a big item-level discount could
+			# push the combined discount above unit_price × quantity, sending
+			# TaxJar a negative effective taxable amount for that line.
+			max_discount = flt(line_item.get("unit_price")) * flt(line_item.get("quantity"))
+			total_discount = flt(line_item.get("discount", 0) + extra_discount)
+			line_item["discount"] = min(total_discount, max_discount)
+
+
+@frappe.whitelist()
+def preview_foreign_tax_rows(doc_json):
+	"""Classify a document's foreign Sales Taxes and Charges rows for the
+	client confirmation dialog (design doc §5) - built on the exact same
+	_classify_foreign_tax_rows() get_tax_data() itself uses, so what the
+	dialog shows is guaranteed to match what actually gets sent.
+
+	Takes the client's current (possibly unsaved) doc state as JSON rather
+	than a docname - the dialog must reflect in-progress edits before save,
+	not what is already in the database.
+	"""
+	doc_data = json.loads(doc_json) if isinstance(doc_json, str) else doc_json
+	frappe.has_permission(doc_data.get("doctype"), "read", throw=True)
+
+	company = doc_data.get("company")
+	if not company_calculates_tax(company) or get_region(company) != "United States":
+		return {"foreign_rows": []}
+
+	company_config = get_company_config(company)
+	if not company_config:
+		return {"foreign_rows": []}
+
+	# Not frappe._dict for the top-level container: dict.items is a real
+	# bound method, so a "doc.items" attribute lookup would silently return
+	# that method instead of the items list. SimpleNamespace has no such
+	# collision; the nested tax rows still use frappe._dict for the
+	# attribute-style access _classify_foreign_tax_rows() expects.
+	doc = SimpleNamespace(
+		taxes=[frappe._dict(row) for row in (doc_data.get("taxes") or [])],
+		items=doc_data.get("items") or [],
+	)
+
+	classification = _classify_foreign_tax_rows(doc, company_config)
+	affected_item_count = sum(1 for amount in classification["item_discounts"].values() if amount)
+
+	rows = []
+	for row in classification["foreign_rows"]:
+		if flt(row.tax_amount) > 0:
+			rows.append(dict(
+				account_head=row.account_head,
+				amount=flt(row.tax_amount),
+				treatment="taxable_line_item",
+				description=_build_synthetic_line_item(row)["description"],
+			))
+		else:
+			rows.append(dict(
+				account_head=row.account_head,
+				amount=flt(row.tax_amount),
+				treatment="discount",
+				description=row.description,
+				affected_item_count=affected_item_count,
+			))
+
+	return {"foreign_rows": rows}
 
 
 def set_sales_tax(doc, method):

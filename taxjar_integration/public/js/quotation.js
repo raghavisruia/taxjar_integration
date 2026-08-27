@@ -19,6 +19,8 @@ frappe.ui.form.on("Quotation", {
 	},
 
 	validate(frm) {
-		return taxjar_integration.check_shipping_address(frm);
+		return taxjar_integration
+			.confirm_foreign_tax_rows(frm)
+			.then(() => taxjar_integration.check_shipping_address(frm));
 	},
 });

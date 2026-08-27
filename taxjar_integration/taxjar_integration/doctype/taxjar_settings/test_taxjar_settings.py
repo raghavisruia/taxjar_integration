@@ -11,7 +11,11 @@ from frappe.tests import UnitTestCase
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
 	TAXJAR_ROW_DESCRIPTION,
+	_apply_item_discounts,
+	_build_synthetic_line_item,
+	_classify_foreign_tax_rows,
 	_clear_breakdown_data,
+	_distribute_negative_total,
 	_compute_product_taxable,
 	_convert_breakdown_amounts,
 	_extract_breakdown_data,
@@ -48,6 +52,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	on_customer_delete,
 	on_customer_update,
 	on_customer_validate,
+	preview_foreign_tax_rows,
 	_validate_exempt_regions,
 	_EXEMPTION_TYPES_REQUIRING_REGIONS,
 	retry_all_failed_syncs,
@@ -95,23 +100,28 @@ def _make_settings(company="Test Co", tax_head="Sales Tax - TC", shipping_head="
 
 class _TaxRow:
 	"""Minimal stand-in for a Sales Taxes and Charges row."""
-	def __init__(self, account_head, description="", tax_amount=100.0):
+	def __init__(self, account_head, description="", tax_amount=100.0, idx=1):
 		self.account_head = account_head
 		self.description = description
 		self.tax_amount = tax_amount
+		self.idx = idx
 
 
-def _make_tax_row(account_head, description="", tax_amount=100.0):
-	return _TaxRow(account_head, description, tax_amount)
+def _make_tax_row(account_head, description="", tax_amount=100.0, idx=1):
+	return _TaxRow(account_head, description, tax_amount, idx)
 
 
 class _FakeItem:
-	def __init__(self):
-		self.idx = 1
-		self.qty = 1
-		self.rate = 100.0
+	def __init__(self, idx=1, qty=1, rate=100.0, net_amount=None):
+		self.idx = idx
+		self.qty = qty
+		self.rate = rate
 		self.product_tax_category = None
 		self.tax_collectable = 0.0
+		self.price_list_rate = None
+		self.rate_with_margin = None
+		# no discount happened by default - matches _make_item()'s baseline.
+		self.net_amount = rate * qty if net_amount is None else net_amount
 
 	def get(self, field):
 		return getattr(self, field, None)
@@ -136,7 +146,7 @@ class _FakeMeta:
 
 class _FakeDoc:
 	"""Minimal stand-in for a Frappe document that supports append() on taxes."""
-	def __init__(self, company="Test Co", taxes=None, currency="USD"):
+	def __init__(self, company="Test Co", taxes=None, currency="USD", items=None):
 		self.company = company
 		self.doctype = "Sales Invoice"
 		self.name = "SINV-TEST-001"
@@ -152,7 +162,7 @@ class _FakeDoc:
 		self.shipping_address_name = "Test Address"
 		self.customer_address = None
 		self.currency = currency
-		self.items = [_FakeItem()]   # must be non-empty to pass the early-return guard
+		self.items = items if items is not None else [_FakeItem()]   # must be non-empty to pass the early-return guard
 		self.taxes = list(taxes) if taxes else []
 		self.taxjar_breakdown_json = None
 		self.taxjar_has_nexus = 0
@@ -191,8 +201,8 @@ class _FakeDoc:
 		return self._onload[key] if key else self._onload
 
 
-def _make_doc(company="Test Co", taxes=None, currency="USD"):
-	return _FakeDoc(company=company, taxes=taxes, currency=currency)
+def _make_doc(company="Test Co", taxes=None, currency="USD", items=None):
+	return _FakeDoc(company=company, taxes=taxes, currency=currency, items=items)
 
 
 # ── Phase 1: Schema & Validation ──────────────────────────────────────────────
@@ -519,6 +529,408 @@ class TestRemoveTaxjarRows(UnitTestCase):
 		self.assertEqual(len(doc.taxes), 0)
 
 
+# ── Part B: _classify_foreign_tax_rows (design doc §4) ────────────────────────
+
+class TestClassifyForeignTaxRows(UnitTestCase):
+
+	def _config(self, tax_head="Sales Tax - TC", shipping_head="Freight - TC"):
+		return MagicMock(tax_account_head=tax_head, shipping_account_head=shipping_head)
+
+	def test_no_foreign_rows_baseline_unchanged(self):
+		doc = _make_doc(taxes=[
+			_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 80.0),
+			_make_tax_row("Freight - TC", "Shipping", 20.0),
+		])
+		result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["foreign_rows"], [])
+		self.assertEqual(result["synthetic_items"], [])
+		self.assertEqual(result["item_discounts"], {})
+
+	def test_zero_amount_row_excluded(self):
+		doc = _make_doc(taxes=[_make_tax_row("Handling - TC", "Handling Fee", 0.0)])
+		result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["foreign_rows"], [])
+
+	def test_row_matching_tax_account_excluded(self):
+		"""This is our own inserted row - never foreign, by construction."""
+		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Our own row", 80.0)])
+		result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["foreign_rows"], [])
+
+	def test_row_matching_shipping_account_excluded(self):
+		doc = _make_doc(taxes=[_make_tax_row("Freight - TC", "Shipping", 20.0)])
+		result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["foreign_rows"], [])
+
+	def test_positive_row_becomes_synthetic_line_item(self):
+		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "Handling Fee", 20.0, idx=2)])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="Handling Charges",
+		):
+			result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(len(result["synthetic_items"]), 1)
+		synthetic = result["synthetic_items"][0]
+		self.assertEqual(synthetic["id"], 1002)  # 1000 + idx(2)
+		self.assertEqual(synthetic["quantity"], 1)
+		self.assertIsNone(synthetic["product_tax_code"])
+		self.assertEqual(synthetic["product_identifier"], "5210 - Handling - TC")
+		self.assertEqual(synthetic["description"], "Handling Charges - Handling Fee")
+		self.assertEqual(synthetic["unit_price"], 20.0)
+		self.assertEqual(result["item_discounts"], {})
+
+	def test_synthetic_description_falls_back_to_account_head_when_no_account_name(self):
+		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "Handling Fee", 20.0, idx=1)])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value=None,
+		):
+			result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["synthetic_items"][0]["description"], "5210 - Handling - TC - Handling Fee")
+
+	def test_synthetic_description_omits_dangling_separator_when_row_description_blank(self):
+		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "", 20.0, idx=1)])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="Handling Charges",
+		):
+			result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["synthetic_items"][0]["description"], "Handling Charges")
+
+	def test_negative_row_distributes_proportionally_by_net_amount(self):
+		"""Mirrors apply_discount_amount()'s own distributed_amount math
+		(design doc §3.1/§4.3) - a 3:1 net_amount split gets a 3:1 discount
+		split."""
+		items = [
+			_FakeItem(idx=1, qty=1, rate=100.0, net_amount=750.0),
+			_FakeItem(idx=2, qty=1, rate=100.0, net_amount=250.0),
+		]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Loyalty Discount - TC", "Loyalty", -100.0, idx=3)])
+		result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["synthetic_items"], [])
+		self.assertAlmostEqual(result["item_discounts"][1], 75.0)
+		self.assertAlmostEqual(result["item_discounts"][2], 25.0)
+
+	def test_mixed_positive_and_negative_rows(self):
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, taxes=[
+			_make_tax_row("Handling - TC", "Handling Fee", 20.0, idx=1),
+			_make_tax_row("Loyalty Discount - TC", "Loyalty", -30.0, idx=2),
+		])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="Handling",
+		):
+			result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(len(result["synthetic_items"]), 1)
+		self.assertEqual(result["item_discounts"][1], 30.0)
+
+	def test_no_negative_total_yields_empty_discount_map_even_with_zero_net_amount_items(self):
+		"""Guard against a divide-by-zero when every item has net_amount == 0."""
+		items = [_FakeItem(idx=1, qty=1, rate=0.0, net_amount=0.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Loyalty Discount - TC", "Loyalty", -30.0, idx=1)])
+		result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["item_discounts"], {})
+
+	def test_synthetic_id_never_collides_with_a_real_item_idx(self):
+		doc = _make_doc(taxes=[_make_tax_row("Handling - TC", "Fee", 5.0, idx=5)])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="Handling",
+		):
+			result = _classify_foreign_tax_rows(doc, self._config())
+		self.assertEqual(result["synthetic_items"][0]["id"], 1005)
+
+	def test_unconfigured_shipping_account_treats_freight_row_as_foreign(self):
+		"""Design doc §4.6: with no shipping_account_head configured, a real
+		Freight row is intentionally classified as foreign, not silently
+		dropped - TaxJar has no way to know it was shipping."""
+		doc = _make_doc(taxes=[_make_tax_row("Freight - TC", "Freight", 15.0, idx=1)])
+		config = self._config(shipping_head=None)
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="Freight",
+		):
+			result = _classify_foreign_tax_rows(doc, config)
+		self.assertEqual(len(result["synthetic_items"]), 1)
+
+
+class TestApplyItemDiscounts(UnitTestCase):
+
+	def test_adds_discount_key_when_absent(self):
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": 1}]
+		_apply_item_discounts(line_items, {1: 25.0})
+		self.assertEqual(line_items[0]["discount"], 25.0)
+
+	def test_adds_on_top_of_existing_discount(self):
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": 1, "discount": 10.0}]
+		_apply_item_discounts(line_items, {1: 25.0})
+		self.assertEqual(line_items[0]["discount"], 35.0)
+
+	def test_zero_extra_discount_leaves_line_item_untouched(self):
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": 1}]
+		_apply_item_discounts(line_items, {1: 0.0})
+		self.assertNotIn("discount", line_items[0])
+
+	def test_ignores_ids_with_no_matching_line_item(self):
+		"""An item removed after distribution was computed must not raise."""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": 1}]
+		_apply_item_discounts(line_items, {99: 25.0})
+		self.assertNotIn("discount", line_items[0])
+
+	def test_clamps_combined_discount_to_the_lines_own_price(self):
+		"""A large foreign discount row distributed onto a line that already
+		carries a big item-level discount must not push the combined
+		discount above unit_price × quantity - that would be a negative
+		effective taxable amount for the line."""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": 2, "discount": 150.0}]
+		_apply_item_discounts(line_items, {1: 100.0})
+		self.assertEqual(line_items[0]["discount"], 200.0)  # 100 * 2, not 250
+
+	def test_clamp_uses_quantity_scaled_price_not_just_unit_price(self):
+		line_items = [{"id": 1, "unit_price": 50.0, "quantity": 3}]
+		_apply_item_discounts(line_items, {1: 1000.0})
+		self.assertEqual(line_items[0]["discount"], 150.0)  # 50 * 3, not 1000
+
+
+class TestGetTaxDataForeignRows(UnitTestCase):
+	"""Integration-level: foreign rows wired into get_tax_data()'s actual
+	line_items list, including the multi-currency conversion loop."""
+
+	def _call(self, doc, usd_rate=None):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_tax_data
+
+		mock_company_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+		mock_address = MagicMock(pincode="78701", city="Austin", address_line1="123 Main St",
+			country="United States", state="TX")
+		mock_address.get.return_value = "TX"
+
+		def fake_get_value(doctype, name=None, fieldname=None, **kwargs):
+			if doctype == "Account":
+				return "Handling Charges"
+			return "us"
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_company_config), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_address_details", return_value=mock_address), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_shipping_address_details", return_value=mock_address), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=fake_get_value), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_usd_exchange_rate", return_value=usd_rate):
+			return get_tax_data(doc)
+
+	def test_synthetic_line_item_appended_after_real_items(self):
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Handling - TC", "Handling Fee", 20.0, idx=2)])
+		result = self._call(doc)
+		self.assertEqual(len(result["line_items"]), 2)
+		self.assertEqual(result["line_items"][0]["id"], 1)
+		self.assertEqual(result["line_items"][1]["id"], 1002)
+		self.assertEqual(result["line_items"][1]["unit_price"], 20.0)
+
+	def test_positive_foreign_row_amount_added_to_top_level_amount(self):
+		"""TaxJar's live validation rejects a request where "amount" doesn't
+		equal the sum of line items plus shipping - a synthetic line item's
+		contribution must be reflected in "amount" too."""
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Handling - TC", "Handling Fee", 20.0, idx=2)])
+		result = self._call(doc)
+		self.assertEqual(result["amount"], 120.0)  # 100 (item) + 20 (synthetic charge)
+
+	def test_negative_row_discount_merged_into_real_item(self):
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Loyalty Discount - TC", "Loyalty", -10.0, idx=2)])
+		result = self._call(doc)
+		self.assertEqual(len(result["line_items"]), 1)
+		self.assertEqual(result["line_items"][0]["discount"], 10.0)
+
+	def test_negative_foreign_row_amount_subtracted_from_top_level_amount(self):
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Loyalty Discount - TC", "Loyalty", -10.0, idx=2)])
+		result = self._call(doc)
+		self.assertEqual(result["amount"], 90.0)  # 100 (item) - 10 (distributed discount)
+
+	def test_amount_equals_line_items_plus_shipping_with_no_foreign_rows(self):
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Freight - TC", "Shipping", 15.0, idx=1)])
+		result = self._call(doc)
+		self.assertEqual(result["amount"], 115.0)  # 100 (item) + 15 (shipping)
+
+	def test_multi_currency_conversion_applies_to_synthetic_line_identically(self):
+		items = [_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)]
+		doc = _make_doc(items=items, currency="EUR", taxes=[_make_tax_row("Handling - TC", "Handling Fee", 20.0, idx=2)])
+		result = self._call(doc, usd_rate=1.1)
+		synthetic = result["line_items"][1]
+		self.assertAlmostEqual(synthetic["unit_price"], 22.0)
+
+
+# ── Part C: preview_foreign_tax_rows (design doc §5) ──────────────────────────
+
+class TestPreviewForeignTaxRows(UnitTestCase):
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _doc_data(self, taxes=None, items=None, company="Test Co", currency="USD"):
+		return {
+			"doctype": "Sales Invoice",
+			"company": company,
+			"currency": currency,
+			"taxes": taxes or [],
+			"items": items or [{"idx": 1, "qty": 1, "rate": 100.0, "net_amount": 100.0}],
+		}
+
+	def _call(self, doc_data, calculates_tax=True, region="United States"):
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+		with patch(f"{self.MOD}.frappe.has_permission"), \
+		     patch(f"{self.MOD}.company_calculates_tax", return_value=calculates_tax), \
+		     patch(f"{self.MOD}.get_region", return_value=region), \
+		     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
+		     patch(f"{self.MOD}.frappe.db.get_value", return_value="Handling Charges"):
+			return preview_foreign_tax_rows(doc_data)
+
+	def test_returns_empty_for_no_foreign_rows(self):
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Sales Tax - TC", "description": "Sales Tax", "tax_amount": 80.0, "idx": 1},
+			{"account_head": "Freight - TC", "description": "Shipping", "tax_amount": 20.0, "idx": 2},
+		])
+		self.assertEqual(self._call(doc_data), {"foreign_rows": []})
+
+	def test_returns_empty_when_feature_disabled(self):
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Handling - TC", "description": "Fee", "tax_amount": 20.0, "idx": 1},
+		])
+		self.assertEqual(self._call(doc_data, calculates_tax=False), {"foreign_rows": []})
+
+	def test_returns_empty_for_non_us_region(self):
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Handling - TC", "description": "Fee", "tax_amount": 20.0, "idx": 1},
+		])
+		self.assertEqual(self._call(doc_data, region="Canada"), {"foreign_rows": []})
+
+	def test_positive_row_returns_taxable_line_item_treatment(self):
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Handling - TC", "description": "Handling Fee", "tax_amount": 20.0, "idx": 1},
+		])
+		result = self._call(doc_data)
+		self.assertEqual(len(result["foreign_rows"]), 1)
+		row = result["foreign_rows"][0]
+		self.assertEqual(row["treatment"], "taxable_line_item")
+		self.assertEqual(row["amount"], 20.0)
+		self.assertEqual(row["description"], "Handling Charges - Handling Fee")
+
+	def test_negative_row_returns_discount_treatment_with_affected_item_count(self):
+		doc_data = self._doc_data(
+			items=[
+				{"idx": 1, "qty": 1, "rate": 100.0, "net_amount": 75.0},
+				{"idx": 2, "qty": 1, "rate": 100.0, "net_amount": 25.0},
+			],
+			taxes=[{"account_head": "Loyalty Discount - TC", "description": "Loyalty", "tax_amount": -10.0, "idx": 1}],
+		)
+		result = self._call(doc_data)
+		self.assertEqual(len(result["foreign_rows"]), 1)
+		row = result["foreign_rows"][0]
+		self.assertEqual(row["treatment"], "discount")
+		self.assertEqual(row["amount"], -10.0)
+		self.assertEqual(row["affected_item_count"], 2)
+
+	def test_mixed_rows_returns_both_treatments(self):
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Handling - TC", "description": "Fee", "tax_amount": 20.0, "idx": 1},
+			{"account_head": "Loyalty Discount - TC", "description": "Loyalty", "tax_amount": -10.0, "idx": 2},
+		])
+		result = self._call(doc_data)
+		treatments = {row["treatment"] for row in result["foreign_rows"]}
+		self.assertEqual(treatments, {"taxable_line_item", "discount"})
+
+	def test_no_company_config_returns_empty(self):
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Handling - TC", "description": "Fee", "tax_amount": 20.0, "idx": 1},
+		])
+		with patch(f"{self.MOD}.frappe.has_permission"), \
+		     patch(f"{self.MOD}.company_calculates_tax", return_value=True), \
+		     patch(f"{self.MOD}.get_region", return_value="United States"), \
+		     patch(f"{self.MOD}.get_company_config", return_value=None):
+			result = preview_foreign_tax_rows(doc_data)
+		self.assertEqual(result, {"foreign_rows": []})
+
+	def test_checks_read_permission_on_the_document_doctype(self):
+		doc_data = self._doc_data()
+		with patch(f"{self.MOD}.frappe.has_permission") as mock_perm, \
+		     patch(f"{self.MOD}.company_calculates_tax", return_value=True), \
+		     patch(f"{self.MOD}.get_region", return_value="United States"), \
+		     patch(f"{self.MOD}.get_company_config", return_value=MagicMock()):
+			preview_foreign_tax_rows(doc_data)
+		mock_perm.assert_called_once_with("Sales Invoice", "read", throw=True)
+
+	def test_accepts_a_json_string_as_well_as_a_dict(self):
+		"""frappe.xcall may deliver the form field as a raw JSON string rather
+		than an already-parsed dict, depending on request encoding."""
+		doc_data = self._doc_data(taxes=[
+			{"account_head": "Handling - TC", "description": "Fee", "tax_amount": 20.0, "idx": 1},
+		])
+		result = self._call(json.dumps(doc_data))
+		self.assertEqual(len(result["foreign_rows"]), 1)
+
+
+class TestConfirmForeignTaxRowsJS(UnitTestCase):
+
+	def _js_dir(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "public", "js"))
+
+	def _read_js(self, filename):
+		import os
+		with open(os.path.join(self._js_dir(), filename)) as f:
+			return f.read()
+
+	def _validate_fn(self, filename):
+		js = self._read_js(filename)
+		return js.split("validate(frm) {")[1].split("\n\t},")[0]
+
+	def _confirm_fn_section(self):
+		"""The confirm_foreign_tax_rows()/_show_foreign_tax_rows_dialog() block
+		in taxjar_utils.js, up to the next top-level function definition."""
+		js = self._read_js("taxjar_utils.js")
+		return js.split("taxjar_integration.confirm_foreign_tax_rows = function")[1].split(
+			"taxjar_integration.show_address_picker_dialog"
+		)[0]
+
+	def test_confirm_foreign_tax_rows_runs_before_check_shipping_address(self):
+		"""Design doc §5.3/§6: the foreign-row dialog must resolve before the
+		existing shipping-address check runs."""
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			validate_fn = self._validate_fn(filename)
+			self.assertLess(
+				validate_fn.index("confirm_foreign_tax_rows"),
+				validate_fn.index("check_shipping_address"),
+				f"{filename}: confirm_foreign_tax_rows must run before check_shipping_address",
+			)
+
+	def test_all_three_doctypes_wire_up_the_new_check(self):
+		for filename in ("quotation.js", "sales_order.js", "sales_invoice.js"):
+			self.assertIn(".confirm_foreign_tax_rows(frm)", self._validate_fn(filename))
+
+	def test_calls_preview_endpoint(self):
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn(
+			'"taxjar_integration.taxjar_integration.taxjar_integration.preview_foreign_tax_rows"',
+			js,
+		)
+
+	def test_cancel_sets_frappe_validated_false(self):
+		"""Aborting the dialog must gate save the same way check_shipping_address's
+		own abort path does."""
+		self.assertIn("frappe.validated = false", self._confirm_fn_section())
+
+	def test_reprompt_is_skipped_when_the_foreign_row_set_is_unchanged(self):
+		"""§5.4: caching an acknowledgment hash avoids re-blocking save on
+		every unrelated resave of a draft that already carries the same
+		foreign rows."""
+		self.assertIn("_taxjar_foreign_rows_ack", self._confirm_fn_section())
+
+	def test_dialog_handles_dismiss_without_a_button_as_cancel(self):
+		"""Escape/backdrop dismiss must not silently let the save through."""
+		self.assertIn("on_hide()", self._confirm_fn_section())
+
+
 # ── Phase 2: check_for_nexus ─────────────────────────────────────────────────
 
 class TestCheckForNexus(UnitTestCase):
@@ -797,16 +1209,25 @@ class TestSetSalesTaxCache(UnitTestCase):
 
 class TestGetLineItemDict(UnitTestCase):
 
-	def _make_item(self, item_code=None, product_tax_category=None, item_name=None, description=None):
+	def _make_item(self, item_code=None, product_tax_category=None, item_name=None, description=None,
+			qty=2, rate=100.0, price_list_rate=None, rate_with_margin=None, net_amount=None):
+		# net_amount defaults to rate * qty (i.e. "no discount happened") so
+		# every test not focused on the discount formula gets a neutral
+		# baseline rather than an implicit 100%-off line.
+		if net_amount is None:
+			net_amount = rate * qty
 		item = MagicMock()
 		item.get = lambda key, default=None: {
 			"idx": 1,
-			"qty": 2,
-			"rate": 100.0,
+			"qty": qty,
+			"rate": rate,
 			"item_code": item_code,
 			"product_tax_category": product_tax_category,
 			"item_name": item_name,
 			"description": description,
+			"price_list_rate": price_list_rate,
+			"rate_with_margin": rate_with_margin,
+			"net_amount": net_amount,
 		}.get(key, default)
 		return item
 
@@ -899,6 +1320,91 @@ class TestGetLineItemDict(UnitTestCase):
 		item = self._make_item(item_code=None, item_name=None, description=None)
 		result = self._call(item)
 		self.assertEqual(result["description"], "")
+
+	# discount formula (design doc §3.2) — sourced from net_amount, not
+	# price_list_rate vs rate, so it survives Margin and picks up both
+	# item-level and document-level Additional Discount for free.
+
+	def test_item_level_discount_only(self):
+		"""No document-level discount: net_amount is just this line's own
+		post-item-discount amount (rate * qty, no distribution applied)."""
+		item = self._make_item(qty=1, rate=800.0, price_list_rate=1000.0, net_amount=800.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 1000.0)
+		self.assertEqual(result["discount"], 200.0)
+
+	def test_document_level_discount_only_net_total_mode(self):
+		"""No item-level discount (price_list_rate == rate); net_amount is
+		reduced only by this line's share of Additional Discount, as
+		apply_discount_amount() computes in "Net Total" mode."""
+		item = self._make_item(qty=2, rate=500.0, price_list_rate=500.0, net_amount=900.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 500.0)
+		self.assertEqual(result["discount"], 100.0)
+
+	def test_document_level_discount_only_grand_total_mode(self):
+		"""Same shape as Net Total mode from get_line_item_dict's point of
+		view - apply_discount_amount() distributes into net_amount
+		identically in both non-cash modes."""
+		item = self._make_item(qty=1, rate=300.0, price_list_rate=300.0, net_amount=270.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 300.0)
+		self.assertEqual(result["discount"], 30.0)
+
+	def test_item_and_document_level_discount_combined(self):
+		"""Live-verified against ACC-SINV-2026-00069 (design doc §3.2.1):
+		Margin pushes list_rate to rate_with_margin (price_list_rate alone
+		would understate it), an item-level discount and a distributed
+		Additional Discount are both already folded into net_amount."""
+		shoes = self._make_item(qty=1, rate=1800.0, price_list_rate=1000.0,
+			rate_with_margin=2000.0, net_amount=1523.08)
+		result = self._call(shoes)
+		self.assertEqual(result["unit_price"], 2000.0)
+		self.assertAlmostEqual(result["discount"], 476.92)
+
+		sandwich = self._make_item(qty=1, rate=150.0, price_list_rate=120.0,
+			rate_with_margin=200.0, net_amount=126.92)
+		result = self._call(sandwich)
+		self.assertEqual(result["unit_price"], 200.0)
+		self.assertAlmostEqual(result["discount"], 73.08)
+
+	def test_grand_total_cash_or_non_trade_discount_yields_zero_discount(self):
+		"""ERPNext leaves net_amount untouched for this one mode (the
+		discount is subtracted from grand_total after tax, not before) -
+		so the formula must compute zero discount by construction, with
+		no special-casing of the mode itself."""
+		item = self._make_item(qty=2, rate=500.0, price_list_rate=500.0, net_amount=1000.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 500.0)
+		self.assertNotIn("discount", result)
+
+	def test_no_price_list_configured_falls_back_to_rate(self):
+		"""A row with rate typed directly and no Price List still picks up
+		a document-level discount via net_amount, using rate as the base."""
+		item = self._make_item(qty=1, rate=300.0, price_list_rate=None, net_amount=250.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 300.0)
+		self.assertEqual(result["discount"], 50.0)
+
+	def test_rate_above_stale_price_list_rate_with_no_margin_uses_the_higher_rate(self):
+		"""A line whose rate is typed above price_list_rate with no margin
+		fields populated (e.g. a stale/lower Price List, or a document
+		created via API that bypassed ERPNext's client-side margin auto-set)
+		must still send the actual higher amount charged, not silently
+		understate it by falling back to the lower list price."""
+		item = self._make_item(qty=1, rate=150.0, price_list_rate=100.0, net_amount=150.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 150.0)
+		self.assertNotIn("discount", result)
+
+	def test_discount_never_goes_negative_on_rounding_noise(self):
+		"""net_amount fractionally exceeding list_amount (rounding noise
+		from ERPNext's own distributed_discount_amount math) must clamp to
+		zero, not surface a negative discount."""
+		item = self._make_item(qty=1, rate=100.0, price_list_rate=100.0, net_amount=100.005)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 100.0)
+		self.assertNotIn("discount", result)
 
 
 # ── Phase 2: sync_transaction_to_taxjar row detection ────────────────────────
@@ -4435,37 +4941,12 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 # ── Phase 2: Payload Enrichment (Items 7, 8) ────────────────────────────────
 
 
-class TestGetLineItemDiscount(UnitTestCase):
-
-	def test_discount_when_price_list_rate_higher(self):
-		item = MagicMock()
-		item.get.side_effect = lambda f, d=None: {
-			"idx": 1, "qty": 2, "rate": 80.0, "price_list_rate": 100.0,
-			"product_tax_category": None, "item_code": None, "tax_collectable": 0,
-		}.get(f, d)
-		result = get_line_item_dict(item, 0)
-		self.assertEqual(result["unit_price"], 100.0)
-		self.assertEqual(result["discount"], 20.0)
-
-	def test_no_discount_when_no_price_list(self):
-		item = MagicMock()
-		item.get.side_effect = lambda f, d=None: {
-			"idx": 1, "qty": 1, "rate": 50.0, "price_list_rate": 0,
-			"product_tax_category": None, "item_code": None, "tax_collectable": 0,
-		}.get(f, d)
-		result = get_line_item_dict(item, 0)
-		self.assertEqual(result["unit_price"], 50.0)
-		self.assertNotIn("discount", result)
-
-	def test_no_discount_when_same_rate(self):
-		item = MagicMock()
-		item.get.side_effect = lambda f, d=None: {
-			"idx": 1, "qty": 1, "rate": 100.0, "price_list_rate": 100.0,
-			"product_tax_category": None, "item_code": None, "tax_collectable": 0,
-		}.get(f, d)
-		result = get_line_item_dict(item, 0)
-		self.assertEqual(result["unit_price"], 100.0)
-		self.assertNotIn("discount", result)
+# NOTE: the price_list_rate-vs-rate discount formula this class used to cover
+# (TestGetLineItemDiscount) was replaced by the net_amount-sourced formula in
+# TestGetLineItemDict above (design doc §3.2) - that comparison didn't scale
+# with quantity and went blind the moment Margin was in play. See
+# docs/discount-and-non-tax-rows-design.md §3.2.1 for the live-verified bug
+# this fix addresses.
 
 
 # ── Phase 3: Token Validation (Item 5) ──────────────────────────────────────
