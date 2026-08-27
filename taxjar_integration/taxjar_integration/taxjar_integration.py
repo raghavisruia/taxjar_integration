@@ -314,7 +314,13 @@ def sync_transaction_to_taxjar(invoice_name):
 	tax_dict["transaction_id"] = doc.name
 	tax_dict["transaction_date"] = str(doc.posting_date)
 	tax_dict["sales_tax"] = sales_tax
-	tax_dict["amount"] = doc.total + tax_dict["shipping"]
+	# get_tax_data() already derives "amount" correctly from the actual
+	# line_items + shipping being sent (see its own comment) - overriding it
+	# with doc.total here was wrong on two counts: doc.total excludes any
+	# document-level Additional Discount, and adding tax_dict["shipping"]
+	# on top double-counted shipping, which get_tax_data() already folds in.
+	# This was a real, live-verified TaxJar rejection ("amount must be equal
+	# to the sum of line items and shipping"), not a hypothetical.
 	tax_dict["provider"] = TAXJAR_PROVIDER
 
 	if doc.is_return and doc.return_against:

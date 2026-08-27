@@ -1453,6 +1453,30 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_client.create_order.assert_called_once()
 		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 95.0)
 
+	def test_does_not_override_get_tax_datas_amount_with_doc_total(self):
+		"""Regression guard: get_tax_data() already derives "amount" correctly
+		from the actual line_items + shipping being sent. This function used
+		to clobber it with doc.total + shipping, which excludes any
+		document-level Additional Discount and double-counts shipping - a
+		real, live-verified TaxJar "amount must be equal to the sum of line
+		items and shipping" rejection, not a hypothetical."""
+		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 95.0)])
+		doc.docstatus = 1
+		doc.total = 1950.0  # pre-Additional-Discount total - must NOT end up in the payload
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0, "amount": 1650.0}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		self.assertEqual(mock_client.create_order.call_args[0][0]["amount"], 1650.0)
+
 	def test_row_description_does_not_affect_sales_tax_match(self):
 		"""A user retitling the row's description before submit must not
 		change what gets reported to TaxJar - only account_head matters."""
