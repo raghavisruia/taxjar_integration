@@ -7249,12 +7249,23 @@ class TestGuidedSetupAlert(UnitTestCase):
 	top of the workspace nudging first-time users toward the guided setup wizard."""
 
 	def setUp(self):
-		from taxjar_integration.install import GUIDED_SETUP_ALERT_BLOCK
+		from taxjar_integration.install import GUIDED_SETUP_ALERT_BLOCK, add_guided_setup_alert
 		self.block_name = GUIDED_SETUP_ALERT_BLOCK
 		frappe.db.delete("Custom HTML Block", {"name": self.block_name})
 		self._reset_workspace_content()
-		self.addCleanup(frappe.db.delete, "Custom HTML Block", {"name": self.block_name})
-		self.addCleanup(self._reset_workspace_content)
+		# This runs against the real site DB, not a rolled-back sandbox - a
+		# cleanup that only deletes (as this used to) leaves a live site's
+		# desk workspace permanently missing its guided-setup banner block
+		# (a real incident: the workspace page rendered "undefined" where
+		# the banner should have been, and every other test that calls the
+		# real sync_taxjar_workspace_sidebar()/setup_taxjar() afterward
+		# failed with a LinkValidationError against the now-missing block).
+		# add_guided_setup_alert() is idempotent (see
+		# test_idempotent_on_repeated_calls below), so calling it once more
+		# here unconditionally restores the same valid state a real
+		# `bench migrate` would leave, regardless of what an individual
+		# test method did to it.
+		self.addCleanup(add_guided_setup_alert)
 
 	def _reset_workspace_content(self):
 		"""Strip any guided-setup-alert content block and custom_blocks child row
