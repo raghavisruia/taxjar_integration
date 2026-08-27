@@ -1840,8 +1840,16 @@ def _validate_address_with_taxjar(doc):
 
 
 def _throw_invalid_address():
+	"""TaxJar found no real-world match for this address. Its "no match"
+	response carries no further reason to pass on.
+
+	Not reusing _describe_response_error()/classify_taxjar_error() here:
+	their 404 wording ("Transaction not found in TaxJar") is specific to the
+	transaction-sync endpoints and would be actively misleading for an
+	address that was simply never found, not a transaction gone missing.
+	"""
 	frappe.throw(
-		_("This is not a valid address. Please enter a valid address."),
+		_("The given address is not valid, please reverify the street, city, state, or postal code."),
 		title=_("Invalid Address"),
 	)
 

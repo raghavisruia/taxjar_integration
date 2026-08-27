@@ -5135,6 +5135,7 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 		doc.name = "ADDR-001"
 		doc.country = "United States" if country_code == "US" else "Germany"
 		doc.state = "Texas"
+		doc.taxjar_state_code = "TX"
 		doc.city = "Austin"
 		doc.pincode = "78701"
 		doc.address_line1 = "123 Main St"
@@ -5169,6 +5170,21 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
 			with self.assertRaises(frappe.exceptions.ValidationError):
 				_validate_address_with_taxjar(doc)
+
+	def test_address_not_found_error_message(self):
+		mock_client = MagicMock()
+		mock_client.validate_address.return_value = []
+		doc = self._make_address_doc()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			with self.assertRaises(frappe.exceptions.ValidationError) as ctx:
+				_validate_address_with_taxjar(doc)
+
+		self.assertEqual(
+			str(ctx.exception),
+			"The given address is not valid, please reverify the street, city, state, or postal code.",
+		)
 
 	def test_connection_error_does_not_block_save(self):
 		import taxjar.exceptions
