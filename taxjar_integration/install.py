@@ -125,7 +125,25 @@ def add_guided_setup_alert():
 	on every call (the app is the source of truth here, same convention as
 	create_custom_fields(update=True) - a copy/style/layout edit in this file
 	should reach already-migrated sites, not just fresh installs).
+
+	This only runs on install/migrate. `keep_guided_setup_alert` below re-applies
+	the same self-heal on every save of the workspace itself, so an in-desk layout
+	edit (reordering cards, etc.) can't silently drop the block until the next
+	migrate happens to run.
 	"""
+	_ensure_guided_setup_alert_block()
+
+	if not frappe.db.exists("Workspace", WORKSPACE):
+		return
+
+	ws = frappe.get_doc("Workspace", WORKSPACE)
+	if _splice_guided_setup_alert_into_content(ws):
+		ws.save(ignore_permissions=True)
+
+
+def _ensure_guided_setup_alert_block():
+	"""Create the guided-setup alert's Custom HTML Block if missing, or bring its
+	html/script back in line with the constants above."""
 	if frappe.db.exists("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK):
 		block = frappe.get_doc("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK)
 		if block.html != GUIDED_SETUP_ALERT_HTML or block.script:
@@ -140,10 +158,11 @@ def add_guided_setup_alert():
 			"private": 0,
 		}).insert(ignore_permissions=True)
 
-	if not frappe.db.exists("Workspace", WORKSPACE):
-		return
 
-	ws = frappe.get_doc("Workspace", WORKSPACE)
+def _splice_guided_setup_alert_into_content(ws):
+	"""Ensure `ws` (a Workspace doc, mutated in place) has the guided-setup alert
+	wired into both `custom_blocks` and `content`. Returns True if it changed
+	anything, so callers know whether a save is needed."""
 	dirty = False
 
 	# The `custom_blocks` child table is what the block editor actually looks up by
@@ -188,8 +207,24 @@ def add_guided_setup_alert():
 		ws.content = frappe.as_json(content)
 		dirty = True
 
-	if dirty:
-		ws.save(ignore_permissions=True)
+	return dirty
+
+
+def keep_guided_setup_alert(doc, method):
+	"""Workspace `validate` hook, scoped to the TaxJar Integration workspace: re-splice
+	the guided-setup alert into `doc` before every save of it, not just install/migrate.
+
+	Without this, saving the workspace from the desk block editor - reordering cards,
+	adding a link, anything - re-serializes `content`/`custom_blocks` from whatever the
+	editor currently has rendered. If the block failed to render in that session (it
+	lives in a Shadow DOM - see docs/config-banners-and-dialogs-audit.md Finding #3) or
+	was otherwise not present, the save silently drops the banner, and nothing put it
+	back until the next `bench migrate`.
+	"""
+	if doc.name != WORKSPACE:
+		return
+	_ensure_guided_setup_alert_block()
+	_splice_guided_setup_alert_into_content(doc)
 
 
 def sync_taxjar_workspace_sidebar():

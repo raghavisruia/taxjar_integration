@@ -72,18 +72,10 @@ taxjar_integration.build_region_multicheck_fields = function (selected) {
 
 	return [
 		// Named so update_visibility can hide the section itself (not just
-		// its individual fields) for a type like Non Exempt that shows
-		// neither the hint nor the grid - otherwise the section's own
-		// divider and padding are left behind as bare whitespace with
-		// nothing inside it.
+		// its individual fields) whenever the grid has nothing to show -
+		// otherwise the section's own divider and padding are left behind as
+		// bare whitespace with nothing inside it.
 		{ fieldtype: "Section Break", fieldname: "taxjar_regions_section" },
-		{
-			fieldtype: "HTML",
-			fieldname: "taxjar_regions_hint",
-			options: `<p class="text-muted small">${__(
-				"Choose an exemption type to select exempt regions."
-			)}</p>`,
-		},
 		{
 			fieldtype: "MultiCheck",
 			fieldname: "taxjar_us_states",
@@ -147,11 +139,11 @@ taxjar_integration.get_selected_regions = function (dialog) {
 // not a replacement for it.
 const EXEMPTION_TYPES_REQUIRING_REGIONS = new Set(["Wholesale", "Government", "Other"]);
 
-// Wires a dialog built from build_region_multicheck_fields: hides the region
-// fields (showing the hint instead) until a type is chosen, and disables the
-// primary action with a warning while a region-scoped type has no regions
-// checked. Returns an `update()` function the caller invokes on
-// exemption_type change and once after dialog.show().
+// Wires a dialog built from build_region_multicheck_fields: shows the region
+// fields only once a region-scoped type is chosen, and disables the primary
+// action with a warning while such a type has no regions checked. Returns an
+// `update()` function the caller invokes on exemption_type change and once
+// after dialog.show().
 taxjar_integration.wire_exemption_dialog = function (dialog) {
 	const $warning = dialog.fields_dict.taxjar_regions_warning.$wrapper.find(
 		".taxjar-region-requirement-warning"
@@ -168,23 +160,13 @@ taxjar_integration.wire_exemption_dialog = function (dialog) {
 		const type = dialog.get_value("exemption_type");
 		const enabled = EXEMPTION_TYPES_REQUIRING_REGIONS.has(type);
 
-		// Blank has something to say ("choose a type"); Non Exempt has
-		// nothing useful to add once the grid is hidden - showing
-		// not-a-real-instruction text there would read as a leftover rather
-		// than a considered "nothing to select" state. Safe to touch on
-		// every call: a plain HTML field, not a MultiCheck one, so toggling
-		// it carries none of the destructive-refresh risk guarded against
-		// below.
-		dialog.fields_dict.taxjar_regions_hint.toggle(!type);
-
 		// The section itself (its divider + padding) must disappear along
-		// with its contents for a type like Non Exempt that shows neither
-		// the hint nor the grid - otherwise it's left behind as bare
+		// with its contents for blank or Non Exempt, both of which have
+		// nothing to show here - otherwise it's left behind as bare
 		// whitespace between Exemption Type and Apply. Section isn't a
-		// Control subclass (no .toggle()) - .show()/.hide() are its own
-		// API, and - like the hint above - a plain class toggle, not the
-		// MultiCheck-specific refresh() risk below.
-		if (!type || enabled) {
+		// Control subclass - .show()/.hide() are its own API, not the
+		// MultiCheck-specific toggle()-driven refresh() risk below.
+		if (enabled) {
 			dialog.fields_dict.taxjar_regions_section.show();
 		} else {
 			dialog.fields_dict.taxjar_regions_section.hide();

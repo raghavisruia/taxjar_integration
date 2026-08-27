@@ -14,14 +14,16 @@ from taxjar_integration.taxjar_integration.taxjar_integration import _publish_cu
 # never created, so reads would hit MySQLdb (1054) Unknown column.
 _TAXJAR_CUSTOMER_COLUMN = "taxjar_exemption_type"
 
-# The page's three tabs. Whether an exemption is configured is the tab's job,
+# The page's four tabs. Whether an exemption is configured is the tab's job,
 # not a filter - which is why there is no "__not_set" exemption filter value.
 ALL_SCOPE = "all"
 EXEMPT_SCOPE = "exempt"
+NON_EXEMPT_SCOPE = "non_exempt"
 NOT_CONFIGURED_SCOPE = "not_configured"
 
 # "Non Exempt" is a configured answer, not an exemption - _customer_master_exemption()
-# reads it the same way - so it belongs to neither tab.
+# reads it the same way - so it gets its own tab rather than folding into
+# Exempted or Not Configured.
 _NON_EXEMPT = "Non Exempt"
 
 # NOT the tempting ("not in", ("", None)) / ("in", ("", None)) pair. SQL
@@ -36,6 +38,7 @@ _EXEMPT = ("not in", ("", _NON_EXEMPT))
 _SCOPE_CONDITIONS = {
 	ALL_SCOPE: {},
 	EXEMPT_SCOPE: {"taxjar_exemption_type": _EXEMPT},
+	NON_EXEMPT_SCOPE: {"taxjar_exemption_type": _NON_EXEMPT},
 	NOT_CONFIGURED_SCOPE: {"taxjar_exemption_type": _NOT_SET},
 }
 
@@ -106,7 +109,7 @@ def get_customers(filters=None, page=1, scope=ALL_SCOPE, page_size=PAGE_SIZE):
 		fields=[
 			"name", "customer_name", "customer_group",
 			"taxjar_exemption_type", "taxjar_customer_id",
-			"taxjar_customer_sync_status",
+			"taxjar_customer_sync_status", "taxjar_customer_sync_error",
 		],
 		order_by="customer_name asc",
 		start=(page - 1) * page_size,
@@ -169,6 +172,7 @@ def get_summary(filters=None):
 			"queued": by_status.get("Queued", 0),
 			"failed": by_status.get("Failed", 0),
 		},
+		"non_exempt": frappe.db.count("Customer", _build_conditions(filters, NON_EXEMPT_SCOPE)),
 		"not_configured": frappe.db.count(
 			"Customer", _build_conditions(filters, NOT_CONFIGURED_SCOPE)
 		),
@@ -221,31 +225,6 @@ def configure_exemption(customers, exemption_type, regions=None):
 		doc.save()
 
 	return {"updated": len(customers)}
-
-
-@frappe.whitelist()
-def set_exemption_type(customer, exemption_type):
-	"""Change only the exemption type, from the inline cell on the list.
-
-	Deliberately NOT configure_exemption, which rewrites the region table:
-	routing an inline type change through it would silently destroy every
-	exempt region a customer has the moment someone switched Wholesale to
-	Government from the grid.
-
-	Regions survive a change between two real types. They are only dropped when
-	the type is cleared, because a region with no exemption type behind it is
-	orphaned - unreachable from the UI and meaningless to TaxJar.
-	"""
-	frappe.has_permission("Customer", "write", throw=True)
-	_ensure_taxjar_customer_fields()
-
-	doc = frappe.get_doc("Customer", customer)
-	doc.taxjar_exemption_type = exemption_type or ""
-	if not exemption_type:
-		doc.set("taxjar_exempt_regions", [])
-	doc.save()
-
-	return {"ok": True}
 
 
 @frappe.whitelist()

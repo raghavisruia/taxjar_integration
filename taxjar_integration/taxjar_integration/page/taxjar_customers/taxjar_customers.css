@@ -66,16 +66,6 @@
 	color: var(--text-on-light-gray);
 }
 
-/* Regions need an exemption type behind them. The pencil stays put - removing
-   it would read as "nothing to configure here" - but it greys out and the
-   cursor says the click will not open anything. The tooltip and the click cue
-   both explain why. */
-.taxjar-configure-link--blocked,
-.taxjar-configure-link--blocked:hover {
-	color: var(--text-light);
-	cursor: not-allowed;
-}
-
 /* An external identifier, not prose - monospace so a mistyped or truncated id
    is spottable at a glance. */
 .taxjar-customer-id {
@@ -86,3 +76,46 @@
 /* The Configure Exemption dialog's region pickers are frappe.ui.form
    MultiCheck fields now - styled by desk's own control CSS plus
    taxjar_integration._inject_multicheck_column_styles(), not this file. */
+
+/* Sync Status column popover trigger - same pattern as the Transaction Sync
+   page's own copy (taxjar_transactions.css). Failed pairs the pill with a
+   separate small info icon carrying the error; cursor: pointer, not help -
+   "help" draws the browser's own "?" glyph next to the pointer. */
+.taxjar-sync-trigger {
+	cursor: pointer;
+}
+
+.taxjar-sync-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	margin-left: 6px;
+	padding: 0;
+	border: none;
+	background: none;
+	color: var(--text-muted);
+	vertical-align: middle;
+}
+
+.taxjar-sync-icon:hover {
+	color: var(--text-color);
+}
+
+/* Appended to <body>, not .taxjar-table-wrapper - deliberately outside the
+   table's own scoping so it isn't clipped by the table/card's overflow, and
+   position: fixed so its coordinates (from getBoundingClientRect(), viewport-
+   relative) don't need scroll-offset math. Shown on hover AND click rather
+   than the native title attribute, which both enforces its own show delay
+   and never responds to a click at all. */
+.taxjar-sync-pop {
+	position: fixed;
+	z-index: 1000;
+	max-width: 280px;
+	padding: 8px 12px;
+	border-radius: var(--border-radius-md);
+	background: var(--fg-color);
+	border: 1px solid var(--border-color);
+	box-shadow: var(--shadow-md);
+	font-size: var(--text-sm);
+	color: var(--text-color);
+}

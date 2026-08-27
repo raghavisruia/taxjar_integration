@@ -24,20 +24,34 @@ const STATUS_COLORS = {
 	Queued: "blue",
 };
 
+// A region-scoped exemption (Wholesale/Government/Other) shares one color;
+// Non Exempt gets its own - neither is a region-scoped exemption, so neither
+// belongs in that color's group. "" (not configured) is neutral grey, not a
+// configured answer at all.
+const EXEMPTION_TYPE_COLORS = {
+	"": "grey",
+	Wholesale: "blue",
+	Government: "blue",
+	Other: "blue",
+	"Non Exempt": "yellow",
+};
+
 const SYNC_UPDATE_EVENT = "taxjar_customers_update";
 
-const REGIONS_BLOCKED_MESSAGE = __("Set an exemption type first, then pick its exempt regions.");
-
 // Whether an exemption is configured is the tab, not a filter - so there is
-// only ever one way to express it.
+// only ever one way to express it. "Non Exempt" is a configured answer, not
+// an exemption, so it gets its own tab rather than folding into Exempted or
+// Not Configured - see _NON_EXEMPT on the server.
 const ALL_TAB = "all";
 const EXEMPT_TAB = "exempt";
+const NON_EXEMPT_TAB = "non_exempt";
 const NOT_CONFIGURED_TAB = "not_configured";
 
 const TABS = [
 	{ name: ALL_TAB, label: __("All"), is_active: true },
-	{ name: EXEMPT_TAB, label: __("Exempted Customers") },
-	{ name: NOT_CONFIGURED_TAB, label: __("Exemption Not Configured") },
+	{ name: EXEMPT_TAB, label: __("Exempted") },
+	{ name: NON_EXEMPT_TAB, label: __("Non-Exempted") },
+	{ name: NOT_CONFIGURED_TAB, label: __("Not Configured") },
 ];
 
 // Header search fields. Every one is a LIKE term the server resolves against
@@ -51,7 +65,7 @@ const SEARCH_FIELDS = [
 		fieldtype: "Link",
 		options: "Customer Group",
 	},
-	{ fieldname: "taxjar_customer_id", label: __("Customer ID (TaxJar)"), fieldtype: "Data" },
+	{ fieldname: "taxjar_customer_id", label: __("TaxJar Customer ID"), fieldtype: "Data" },
 ];
 
 class TaxJarCustomerConfig {
@@ -86,6 +100,7 @@ class TaxJarCustomerConfig {
 	on_hide() {
 		frappe.realtime.off(SYNC_UPDATE_EVENT, this._on_sync_update);
 		this._on_sync_update.cancel();
+		this._hide_sync_popover();
 	}
 
 	// ── Shell ─────────────────────────────────────────────────────────────
@@ -275,7 +290,7 @@ class TaxJarCustomerConfig {
 		});
 	}
 
-	// The three group captions are the three tabs, so clicking one switches
+	// The four group captions are the four tabs, so clicking one switches
 	// tab; the sync statuses inside the Exemptions group filter within it.
 	render_summary(summary) {
 		const groups = [
@@ -286,15 +301,17 @@ class TaxJarCustomerConfig {
 			{
 				label: __("Exemptions"),
 				cards: [
-					{ label: __("Total"), value: summary.exempt.total, value_key: EXEMPT_TAB },
-					{ divider: true },
 					{ label: __("Synced"), value: summary.exempt.synced, value_key: "Synced", indicator: "green" },
 					{ label: __("Queued"), value: summary.exempt.queued, value_key: "Queued", indicator: "blue" },
 					{ label: __("Failed"), value: summary.exempt.failed, value_key: "Failed", indicator: "red" },
 				],
 			},
 			{
-				label: __("No exemption configured"),
+				label: __("Non-Exempted"),
+				cards: [{ value: summary.non_exempt, value_key: NON_EXEMPT_TAB }],
+			},
+			{
+				label: __("Not Configured"),
 				cards: [
 					{ value: summary.not_configured, value_key: NOT_CONFIGURED_TAB },
 				],
@@ -339,6 +356,17 @@ class TaxJarCustomerConfig {
 	get_columns() {
 		const columns = [
 			{
+				label: __("TaxJar Customer ID"),
+				fieldname: "taxjar_customer_id",
+				width: 170,
+				// Empty means no successful create in TaxJar yet, which is a
+				// state worth naming rather than an empty cell.
+				_html: (value) =>
+					value
+						? `<span class="taxjar-customer-id">${frappe.utils.escape_html(value)}</span>`
+						: `<span class="text-muted">${__("NA")}</span>`,
+			},
+			{
 				label: __("Customer Name"),
 				fieldname: "customer_name",
 				_html: (value, row) =>
@@ -347,87 +375,127 @@ class TaxJarCustomerConfig {
 					)}</a>`,
 			},
 			{ label: __("Customer Group"), fieldname: "customer_group", width: 160 },
-			{
-				label: __("Customer ID (TaxJar)"),
-				fieldname: "taxjar_customer_id",
-				width: 170,
-				// Empty means no successful create in TaxJar yet, which is a
-				// state worth naming rather than an empty cell.
-				_html: (value) =>
-					value
-						? `<span class="taxjar-customer-id">${frappe.utils.escape_html(value)}</span>`
-						: `<span class="text-muted">${__("Not synced yet")}</span>`,
-			},
 		];
 
-		// Both columns would read "Not set" / "—" on every row of the
-		// not-configured tab, so they only earn their width elsewhere.
-		if (this.active_tab !== NOT_CONFIGURED_TAB) {
-			columns.push(
-				{
-					label: __("Exemption Type"),
-					fieldname: "taxjar_exemption_type",
-					width: 180,
-					// An always-visible Select rather than a read-only cell:
-					// this page exists to change exemptions, and a cell you
-					// have to discover is clickable makes it look like a report
-					// you can only look at.
-					_html: (value) => this.render_exemption_select(value),
-				},
-				{
-					label: __("Regions"),
-					fieldname: "exempt_region_count",
-					width: 110,
-					align: "center",
-					_html: (value, row) => this.render_regions_cell(row),
-				}
-			);
-		}
+		columns.push({
+			label: __("Exemption Type"),
+			fieldname: "taxjar_exemption_type",
+			width: 180,
+			// Read-only: a region-scoped exemption type needs at least
+			// one exempt region to be a valid save (see
+			// _validate_exempt_regions on the server), so type can no
+			// longer be set on its own here. The pencil in the
+			// Configure cell is the only way to change it, since that's
+			// the one path that carries both fields into one Apply.
+			_html: (value) => this.render_exemption_type_cell(value),
+		});
 
 		columns.push({
 			label: __("Sync Status"),
 			fieldname: "taxjar_customer_sync_status",
 			width: 120,
-			_html: (value) => {
-				const color = STATUS_COLORS[value];
-				return color ? `<span class="indicator-pill ${color}">${__(value)}</span>` : "";
-			},
+			_html: (value, row) => this.render_sync_status_cell(row),
+		});
+
+		// Kept after Sync Status: sync state describes what's already been
+		// sent, so it reads before the control that changes what's sent next.
+		// This is the one path that lets a not-configured row be configured
+		// without first selecting it for the bulk action.
+		columns.push({
+			label: __("Configure"),
+			fieldname: "exempt_region_count",
+			width: 110,
+			align: "center",
+			_html: (value, row) => this.render_regions_cell(row),
 		});
 
 		return columns;
 	}
 
-	render_exemption_select(value) {
-		const options = EXEMPTION_OPTIONS.map((opt) => {
-			const selected = (value || "") === opt ? "selected" : "";
-			const label = opt || __("(Not Set)");
-			return `<option value="${frappe.utils.escape_html(opt)}" ${selected}>${frappe.utils.escape_html(
-				label
-			)}</option>`;
-		}).join("");
-
-		return `<select class="form-control input-xs taxjar-exemption-select">${options}</select>`;
+	render_exemption_type_cell(value) {
+		const label = value || __("Not Configured");
+		const color = EXEMPTION_TYPE_COLORS[value || ""] || "grey";
+		return `<span class="indicator-pill ${color}">${__(label)}</span>`;
 	}
 
-	// The pencil is on every row, including rows with no exemption type. An
-	// affordance that disappears reads as "there is nothing to do here", when
-	// the truth is "not yet" - so the blocked rows keep it and say why on
-	// hover, and again on click (see bind_row_actions).
-	//
-	// The desk's own icon rather than a text glyph, whose size and baseline
-	// shift from platform to platform. "square-pen", not "edit":
+	// The pencil is on every row, including rows with no exemption type - it
+	// is the only way to set one, so it can never read as "nothing to do
+	// here". The desk's own icon rather than a text glyph, whose size and
+	// baseline shift from platform to platform. "square-pen", not "edit":
 	// frappe.utils.icon() builds a <use href="#icon-{name}">, and an unknown
 	// name resolves to nothing and renders blank rather than failing loudly -
 	// which is exactly what "edit", absent from frappe's sprite, did here.
 	render_regions_cell(row) {
-		const configured = Boolean(row.taxjar_exemption_type);
-		const title = configured ? __("Edit exempt regions") : REGIONS_BLOCKED_MESSAGE;
+		const count = row.exempt_region_count || 0;
 
 		return `<button type="button"
-			class="taxjar-configure-link${configured ? "" : " taxjar-configure-link--blocked"}"
+			class="taxjar-configure-link"
 			data-customer="${frappe.utils.escape_html(row.name)}"
-			title="${title}"
-			>${configured ? row.exempt_region_count || 0 : ""}${frappe.utils.icon("square-pen", "sm")}</button>`;
+			title="${__("Configure exemption")}"
+			>${count || ""}${frappe.utils.icon("square-pen", "sm")}</button>`;
+	}
+
+	// Failed pairs the pill with a separate info icon (never nested inside the
+	// pill) carrying the error, since the pill text alone doesn't say why -
+	// same split as the Sync Status column on the Transaction Sync page.
+	// Queued and Synced say all they have to say in the pill itself.
+	render_sync_status_cell(row) {
+		const status = row.taxjar_customer_sync_status;
+		const color = STATUS_COLORS[status];
+		// No exemption configured yet means no TaxJar customer has been
+		// created to sync in the first place - a state worth naming rather
+		// than an empty cell, same as the TaxJar Customer ID column above.
+		if (!color) return `<span class="indicator-pill grey">${__("NA")}</span>`;
+
+		const pill = `<span class="indicator-pill ${color}">${__(status)}</span>`;
+		if (status !== "Failed") return pill;
+
+		const info_text = row.taxjar_customer_sync_error || __("Unknown error");
+		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
+			info_text
+		)}">${frappe.utils.icon("info", "sm")}</button>`;
+		return `${pill}${icon}`;
+	}
+
+	// Delegated once per table (rather than rebound on every render) so it
+	// keeps working across re-renders. Shows immediately on hover - no
+	// native-tooltip delay - and also toggles on click, since hover never
+	// fires on touch devices. Own small copy rather than shared with the
+	// Transaction Sync page's identical pattern - see the note on
+	// taxjar_integration.render_sync_status_sidebar_pill for why.
+	bind_sync_popover($wrapper) {
+		$wrapper.on("mouseenter", ".taxjar-sync-trigger", (e) =>
+			this._show_sync_popover($(e.currentTarget))
+		);
+		$wrapper.on("mouseleave", ".taxjar-sync-trigger", () => this._hide_sync_popover());
+		$wrapper.on("click", ".taxjar-sync-trigger", (e) => {
+			e.stopPropagation();
+			this._show_sync_popover($(e.currentTarget));
+		});
+	}
+
+	_show_sync_popover($trigger) {
+		this._hide_sync_popover();
+		const text = $trigger.attr("data-info") || "";
+		const $pop = $(`<div class="taxjar-sync-pop">${frappe.utils.escape_html(text)}</div>`).appendTo("body");
+		// position: fixed + getBoundingClientRect() are both viewport-relative,
+		// so no scroll-offset math is needed here. Sync Status is the table's
+		// last column, right up against the viewport edge, so the popover's
+		// own width is clamped back on-screen rather than just using rect.left.
+		const rect = $trigger[0].getBoundingClientRect();
+		const pop_width = $pop.outerWidth();
+		const left = Math.min(rect.left, window.innerWidth - pop_width - 12);
+		$pop.css({ top: rect.bottom + 6, left: Math.max(12, left) });
+		this._active_pop = $pop;
+		$(document).on("click.taxjarCustomerSyncPop", () => this._hide_sync_popover());
+	}
+
+	_hide_sync_popover() {
+		if (this._active_pop) {
+			this._active_pop.remove();
+			this._active_pop = null;
+		}
+		$(document).off("click.taxjarCustomerSyncPop");
 	}
 
 	// One table per tab: the columns differ between them, and each tab has its
@@ -475,6 +543,7 @@ class TaxJarCustomerConfig {
 		`).appendTo(this.tab_group.get_field(`${this.active_tab}_html`).$wrapper);
 
 		this.bind_row_actions($table_wrapper);
+		this.bind_sync_popover($table_wrapper);
 
 		return $table_wrapper;
 	}
@@ -521,8 +590,9 @@ class TaxJarCustomerConfig {
 	}
 
 	// Delegated once per table so they survive the tbody being re-rendered.
-	// Both the Exemption Type and the Regions cell open onto the same decision,
-	// which is why the Regions cell opens a dialog carrying the type as well.
+	// Exemption Type is read-only here - the pencil is the only way to change
+	// it, and it always opens the combined dialog so type and regions are
+	// applied together in one save.
 	bind_row_actions($table_wrapper) {
 		// .attr, not .data: jQuery coerces a numeric-looking data attribute to a
 		// Number, and a Customer named by a numeric series would stop matching.
@@ -538,42 +608,14 @@ class TaxJarCustomerConfig {
 			this.update_bulk_state();
 		});
 
-		$table_wrapper.on("change", ".taxjar-exemption-select", (e) =>
-			this.set_exemption_type(row_name(e.currentTarget), e.currentTarget.value)
-		);
-
 		$table_wrapper.on("click", ".taxjar-configure-link", (e) => {
 			e.preventDefault();
 			const name = $(e.currentTarget).attr("data-customer");
 			const row = (this.customers || []).find((c) => c.name === name);
 			if (!row) return;
 
-			// Regions mean nothing without a type behind them, so the dialog
-			// would have nothing it could usefully save. Say so rather than
-			// opening it - the cue repeats the cell's own tooltip, for anyone
-			// who clicked instead of hovering.
-			if (!row.taxjar_exemption_type) {
-				frappe.show_alert({ message: REGIONS_BLOCKED_MESSAGE, indicator: "orange" });
-				return;
-			}
-
 			this.open_configure_dialog([row]);
 		});
-	}
-
-	// Type only - regions are deliberately left alone here, since switching
-	// Wholesale to Government must not silently discard a customer's configured
-	// regions. See set_exemption_type on the server.
-	set_exemption_type(customer, exemption_type) {
-		frappe
-			.xcall(
-				"taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.set_exemption_type",
-				{ customer, exemption_type }
-			)
-			.then(() => {
-				frappe.show_alert({ message: __("Saved"), indicator: "green" });
-				this.refresh();
-			});
 	}
 
 	// ── Selection ─────────────────────────────────────────────────────────
@@ -709,7 +751,7 @@ class TaxJarCustomerConfig {
 				fieldname: "exemption_type",
 				label: __("Exemption Type"),
 				options: EXEMPTION_OPTIONS.map((opt) => ({
-					label: opt || __("(Not Set)"),
+					label: opt || __("Not Configured"),
 					value: opt,
 				})),
 				default: exemption_type,

@@ -116,7 +116,7 @@ function open_manage_exemption_dialog(frm) {
 				fieldname: "exemption_type",
 				label: __("Exemption Type"),
 				options: EXEMPTION_OPTIONS.map((opt) => ({
-					label: opt || __("(Not Set)"),
+					label: opt || __("Not Configured"),
 					value: opt,
 				})),
 				default: frm.doc.taxjar_exemption_type || "",

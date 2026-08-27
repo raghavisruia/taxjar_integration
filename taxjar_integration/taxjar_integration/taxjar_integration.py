@@ -2096,27 +2096,49 @@ def _has_taxjar_fields_changed(doc):
 	return old_regions != new_regions
 
 
+# Every text/datetime field a background sync job writes via a raw db_set/
+# set_value rather than doc.save() - see _set_customer_sync_status. An open
+# form never sees that write, so its in-memory copy goes stale the moment the
+# job runs. taxjar_customer_sync_retryable is the same story but a Check
+# (0/1) rather than text, so it is left out here rather than folded into a
+# blank-string comparison that would silently coerce a real 0 into "".
+_CUSTOMER_SYNC_MANAGED_FIELDS = (
+	"taxjar_customer_id",
+	"taxjar_customer_sync_status",
+	"taxjar_customer_sync_error",
+	"taxjar_last_synced",
+)
+
+
 def on_customer_validate(doc, method):
 	"""Preserve read-only TaxJar fields from being overwritten by stale form data.
 
-	Background jobs set taxjar_customer_id via frappe.db.set_value, but the browser
-	never sees the update. On the next form save, the browser sends the old empty
-	value, overwriting the DB. This hook restores it before the save hits the DB.
+	Background jobs write these via frappe.db.set_value/db_set, which an open
+	form never sees - so its copy goes stale the moment a job runs. The next
+	save from that form (any save, not just a TaxJar-related edit - the whole
+	row goes out on every save) round-trips its stale value back over the DB's,
+	silently undoing the background write. "Synced" reverting to "Queued" is
+	the visible case: the form loaded while a sync was in flight, the job
+	finished and flipped the DB to Synced without the form reloading, and the
+	next save sent the form's stale "Queued" back over it.
+
+	All of these fields are read_only=1 and never legitimately set on `doc`
+	outside a raw db write, so the DB's current value is unconditionally
+	authoritative - restoring only applied when the form's copy was blank,
+	which is exactly the one case ("Queued", not "") this bug does not produce.
 	"""
 	if doc.is_new():
 		return
 
 	db_values = frappe.db.get_value(
-		"Customer", doc.name,
-		["taxjar_customer_id", "taxjar_customer_sync_status", "taxjar_last_synced"],
-		as_dict=True,
+		"Customer", doc.name, list(_CUSTOMER_SYNC_MANAGED_FIELDS), as_dict=True,
 	)
 	if not db_values:
 		return
 
-	for field in ("taxjar_customer_id", "taxjar_customer_sync_status", "taxjar_last_synced"):
-		db_val = db_values.get(field)
-		if db_val and not doc.get(field):
+	for field in _CUSTOMER_SYNC_MANAGED_FIELDS:
+		db_val = db_values.get(field) or ""
+		if doc.get(field) != db_val:
 			doc.set(field, db_val)
 
 	_validate_exempt_regions(doc)
@@ -2147,9 +2169,9 @@ def _validate_exempt_regions(doc):
 	used to mean "exempt everywhere", which was never a decision anyone
 	visibly made. Now "everywhere" means every region was picked (the dialog's
 	Select all does exactly that) - an exemption type with zero regions is
-	simply not a valid state to save, regardless of which of the three write
-	paths reaches here (the Manage Exemption dialog's configure_exemption, the
-	list's inline set_exemption_type, or a direct Customer.save()).
+	simply not a valid state to save, regardless of which write path reaches
+	here (the Manage Exemption dialog's configure_exemption, or a direct
+	Customer.save()).
 	"""
 	regions = doc.get("taxjar_exempt_regions") or []
 

@@ -3111,8 +3111,9 @@ class TestCustomersPageRealtime(UnitTestCase):
 		)
 
 	def test_get_summary_groups_and_respects_filters(self):
-		"""Three groups - total, the exemption sync statuses, and how many are
-		still unconfigured - all scoped by the filters the table uses."""
+		"""Four groups - total, the exemption sync statuses, how many are
+		explicitly non-exempt, and how many are still unconfigured - all scoped
+		by the filters the table uses."""
 		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import get_summary
 
@@ -3124,12 +3125,13 @@ class TestCustomersPageRealtime(UnitTestCase):
 		with patch(f"{page_mod}.frappe.has_permission"), patch(
 			f"{page_mod}.frappe.db.has_column", return_value=True
 		), patch(f"{page_mod}.frappe.get_all", return_value=rows) as mock_get_all, patch(
-			f"{page_mod}.frappe.db.count", side_effect=[52, 38]
+			f"{page_mod}.frappe.db.count", side_effect=[52, 6, 38]
 		) as mock_count:
 			result = get_summary(filters={"search": {"customer_group": "Commercial"}})
 
 		self.assertEqual(result["total"], 52)
 		self.assertEqual(result["exempt"], {"total": 14, "synced": 12, "queued": 1, "failed": 1})
+		self.assertEqual(result["non_exempt"], 6)
 		self.assertEqual(result["not_configured"], 38)
 
 		# Every group carries the caller's filter, or the strip would describe
@@ -3137,42 +3139,6 @@ class TestCustomersPageRealtime(UnitTestCase):
 		self.assertEqual(mock_get_all.call_args[1]["filters"]["customer_group"], ("like", "%Commercial%"))
 		for call in mock_count.call_args_list:
 			self.assertEqual(call[0][1]["customer_group"], ("like", "%Commercial%"))
-
-	def test_set_exemption_type_preserves_regions(self):
-		"""The regression this change is most likely to reintroduce: an inline
-		switch between two real exemption types must not silently discard a
-		customer's configured exempt regions."""
-		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
-		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
-			set_exemption_type,
-		)
-		doc = MagicMock()
-
-		with patch(f"{page_mod}.frappe.has_permission"), patch(
-			f"{page_mod}._ensure_taxjar_customer_fields"
-		), patch(f"{page_mod}.frappe.get_doc", return_value=doc):
-			set_exemption_type("CUST-0001", "Government")
-
-		self.assertEqual(doc.taxjar_exemption_type, "Government")
-		doc.set.assert_not_called()
-		doc.save.assert_called_once()
-
-	def test_set_exemption_type_clears_regions_only_when_blanked(self):
-		"""With no type behind them the regions are orphaned - unreachable from
-		the UI and meaningless to TaxJar."""
-		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
-		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
-			set_exemption_type,
-		)
-		doc = MagicMock()
-
-		with patch(f"{page_mod}.frappe.has_permission"), patch(
-			f"{page_mod}._ensure_taxjar_customer_fields"
-		), patch(f"{page_mod}.frappe.get_doc", return_value=doc):
-			set_exemption_type("CUST-0001", "")
-
-		self.assertEqual(doc.taxjar_exemption_type, "")
-		doc.set.assert_called_once_with("taxjar_exempt_regions", [])
 
 	def test_column_search_is_allowlisted_and_page_size_clamped(self):
 		"""Both land in a database query from a whitelisted endpoint, so
@@ -3223,6 +3189,15 @@ class TestCustomersPageRealtime(UnitTestCase):
 		)
 
 		self.assertIn("Non Exempt", _build_conditions({}, EXEMPT_SCOPE)["taxjar_exemption_type"][1])
+
+	def test_non_exempt_scope_matches_only_non_exempt(self):
+		"""Its own tab, scoped to exactly the value Exempted excludes."""
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			NON_EXEMPT_SCOPE,
+			_build_conditions,
+		)
+
+		self.assertEqual(_build_conditions({}, NON_EXEMPT_SCOPE)["taxjar_exemption_type"], "Non Exempt")
 
 	def test_never_synced_filter_also_survives_a_null_column(self):
 		"""Same trap, same fix - the sync status column is NULL until the first
@@ -4165,57 +4140,52 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		"""taxjar_customer_id was already fetched by get_customers and simply
 		never rendered."""
 		js = self._js()
-		self.assertIn('__("Customer ID (TaxJar)")', js)
+		self.assertIn('__("TaxJar Customer ID")', js)
 		self.assertIn('fieldname: "taxjar_customer_id"', js)
 		# Empty means no successful create in TaxJar yet - a state worth naming
 		# rather than an empty cell.
-		self.assertIn('__("Not synced yet")', js)
+		self.assertIn('__("NA")', js)
 
 	def test_regions_pencil_shows_on_every_row(self):
 		"""An affordance that disappears reads as "nothing to do here", when the
-		truth is "not yet". Rows with no exemption type keep the pencil."""
+		truth is "not yet". Rows with no exemption type keep the pencil - it is
+		the only way to set one, so it is never blocked or greyed out."""
 		js = self._js()
 		regions_fn = js.split("render_regions_cell(row) {")[1].split("\n\t}\n")[0]
 		# One unconditional return - no early exit that drops the control.
 		self.assertEqual(regions_fn.count("return"), 1)
 		self.assertIn("taxjar-configure-link", regions_fn)
-		# Blocked rows are marked, and say why on hover.
-		self.assertIn("taxjar-configure-link--blocked", regions_fn)
-		self.assertIn("REGIONS_BLOCKED_MESSAGE", regions_fn)
+		self.assertNotIn("taxjar-configure-link--blocked", regions_fn)
 
-	def test_regions_click_is_blocked_without_an_exemption_type(self):
-		"""There is nothing to be exempt from without a type, so the click must
-		not open a dialog that cannot save anything useful - and must say so,
-		for anyone who clicked instead of hovering."""
+	def test_regions_click_always_opens_the_dialog(self):
+		"""The pencil is the only way to set an exemption type now, so a row
+		with no type yet must still open the dialog rather than being gated."""
 		js = self._js()
 		handler = js.split('".taxjar-configure-link", (e) => {')[1].split("\n\t\t});")[0]
-		gate = handler.split("if (!row.taxjar_exemption_type) {")[1]
-		self.assertIn("REGIONS_BLOCKED_MESSAGE", gate)
-		self.assertIn("frappe.show_alert", gate)
-		# The dialog opens only past the gate.
-		self.assertLess(
-			handler.index("if (!row.taxjar_exemption_type) {"),
-			handler.index("open_configure_dialog"),
-		)
-
-	def test_blocked_and_hover_cue_are_the_same_words(self):
-		"""Hovering and clicking must not say different things."""
-		js = self._js()
-		self.assertEqual(js.count("const REGIONS_BLOCKED_MESSAGE"), 1)
+		self.assertNotIn("taxjar_exemption_type", handler)
+		self.assertIn("open_configure_dialog", handler)
 
 	def test_not_configured_tab_drops_the_dead_columns(self):
-		"""Exemption Type and Regions would read "Not set" / "—" on every row
-		of that tab."""
+		"""Exemption Type and Configure would read "Not set" / "—" on every
+		row of that tab - each gated by its own guard now that Sync Status
+		(unconditional) sits between them."""
 		js = self._js()
 		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
-		self.assertIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", columns_fn)
-		gated = columns_fn.split("if (this.active_tab !== NOT_CONFIGURED_TAB) {")[1]
-		self.assertIn('__("Exemption Type")', gated)
-		self.assertIn('__("Regions")', gated)
+		guards = columns_fn.count("if (this.active_tab !== NOT_CONFIGURED_TAB) {")
+		self.assertEqual(guards, 2)
+		self.assertIn('__("Exemption Type")', columns_fn)
+		self.assertIn('__("Configure")', columns_fn)
+		# Sync Status sits between the two guarded blocks, and belongs to
+		# neither - it shows on every tab, including this one.
+		exemption_idx = columns_fn.index('__("Exemption Type")')
+		sync_idx = columns_fn.index('__("Sync Status")')
+		configure_idx = columns_fn.index('__("Configure")')
+		self.assertLess(exemption_idx, sync_idx)
+		self.assertLess(sync_idx, configure_idx)
 
-	def test_three_tabs(self):
+	def test_four_tabs(self):
 		js = self._js()
-		for label in ("All", "Exempted Customers", "Exemption Not Configured"):
+		for label in ("All", "Exempted", "Non-Exempted", "Not Configured"):
 			self.assertIn(f'__("{label}")', js)
 
 	def test_no_sync_to_taxjar_bulk_action(self):
@@ -4237,24 +4207,28 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		bulk_fn = js.split("update_bulk_state() {")[1].split("\n\t}\n")[0]
 		self.assertIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", bulk_fn)
 
-	def test_exemption_type_is_editable_in_place(self):
-		"""This page exists to change exemptions - a read-only cell makes it
-		look like a report you can only look at. Every row renders a real
-		Select, so there is nothing to discover as clickable first."""
+	def test_exemption_type_is_read_only(self):
+		"""A region-scoped exemption type needs at least one region to be a
+		valid save, so it can no longer be set from an inline cell on its own -
+		the pencil is the only way in, and it carries both fields together."""
 		js = self._js()
-		select_fn = js.split("render_exemption_select(value) {")[1].split("\n\t}\n")[0]
-		self.assertIn("taxjar-exemption-select", select_fn)
-		self.assertIn("EXEMPTION_OPTIONS", select_fn)
-		self.assertIn("selected", select_fn)
+		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("<select", cell_fn)
+		self.assertNotIn("taxjar-exemption-select", js)
+		self.assertNotIn("set_exemption_type", js)
 
-	def test_inline_type_change_does_not_touch_regions(self):
-		"""configure_exemption rewrites the region table - routing an inline
-		type change through it would destroy every configured region the moment
-		someone switched Wholesale to Government from the grid."""
+	def test_exemption_type_renders_as_a_pill(self):
+		"""Region-scoped exemptions share one colour; Non Exempt and blank
+		(not configured) share the other - neither is a region-scoped
+		exemption."""
 		js = self._js()
-		save_fn = js.split("set_exemption_type(customer, exemption_type) {")[1].split("\n\t}\n")[0]
-		self.assertIn("taxjar_customers.set_exemption_type", save_fn)
-		self.assertNotIn("configure_exemption", save_fn)
+		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
+		self.assertIn("indicator-pill", cell_fn)
+		colors_block = js.split("const EXEMPTION_TYPE_COLORS = {")[1].split("};")[0]
+		self.assertIn('"": "yellow"', colors_block)
+		self.assertIn('"Non Exempt": "yellow"', colors_block)
+		for exempt_type in ("Wholesale", "Government", "Other"):
+			self.assertIn(f'{exempt_type}: "blue"', colors_block)
 
 	def test_regions_uses_the_desk_pencil_icon(self):
 		"""A text glyph's size and baseline shift from platform to platform.
@@ -4267,6 +4241,24 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		regions_fn = js.split("render_regions_cell(row) {")[1].split("\n\t}\n")[0]
 		self.assertIn('frappe.utils.icon("square-pen", "sm")', regions_fn)
 		self.assertNotIn("\u270e", regions_fn)
+
+	def test_failed_sync_status_pairs_the_pill_with_an_info_icon(self):
+		"""The pill text alone doesn't carry the error - Failed gets a
+		separate info-icon trigger for a hover/click popover, same split as
+		the Transaction Sync page's Sync Status column."""
+		js = self._js()
+		cell_fn = js.split("render_sync_status_cell(row) {")[1].split("\n\t}\n")[0]
+		self.assertIn('status !== "Failed"', cell_fn)
+		self.assertIn("taxjar-sync-icon", cell_fn)
+		self.assertIn("taxjar-sync-trigger", cell_fn)
+		self.assertIn('frappe.utils.icon("info", "sm")', cell_fn)
+		self.assertIn("row.taxjar_customer_sync_error", cell_fn)
+
+	def test_sync_popover_bound_and_torn_down(self):
+		js = self._js()
+		self.assertIn("this.bind_sync_popover($table_wrapper)", js)
+		hide_hook = js.split("on_hide() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this._hide_sync_popover()", hide_hook)
 
 	def test_header_search_fields(self):
 		"""Search lives in the desk's own header filter row. Each field is a
@@ -5944,29 +5936,25 @@ class TestSharedRegionHelpersJS(UnitTestCase):
 		self.assertIn("taxjar_ca_provinces.toggle(enabled)", visibility_fn)
 
 	def test_wire_exemption_dialog_hides_the_whole_section_for_non_exempt(self):
-		"""Hiding the hint and the grid individually still leaves the
-		Section Break's own divider and padding behind as bare whitespace
-		for Non Exempt (a real type, so the hint stays hidden too, and not
-		region-requiring, so the grid stays hidden) - the section itself
-		must hide too, via its own show()/hide() (not a Control, so no
-		.toggle())."""
+		"""Hiding the grid alone still leaves the Section Break's own divider
+		and padding behind as bare whitespace for a type with nothing to
+		show (blank, or Non Exempt) - the section itself must hide too, via
+		its own show()/hide() (not a Control, so no .toggle())."""
 		js = self._read_js("taxjar_utils.js")
 		fn = js.split("taxjar_integration.wire_exemption_dialog = function (dialog) {")[1].split("\n};")[0]
 		visibility_fn = fn.split("const update_visibility = () => {")[1].split("\n\t};")[0]
-		self.assertIn("if (!type || enabled) {", visibility_fn)
+		self.assertIn("if (enabled) {", visibility_fn)
 		self.assertIn("taxjar_regions_section.show();", visibility_fn)
 		self.assertIn("taxjar_regions_section.hide();", visibility_fn)
 
-	def test_wire_exemption_dialog_hint_only_shows_for_blank_type(self):
-		"""Blank has something to say ("choose a type"); Non Exempt has
-		nothing useful left to add once the grid is hidden, so the hint
-		stays hidden for it too rather than showing not-a-real-instruction
-		text - toggle(!type) is false for every non-blank value, Non Exempt
-		included, not just the region-requiring ones."""
+	def test_wire_exemption_dialog_has_no_leftover_hint_field(self):
+		"""The "choose a type" hint used to leave the section visible - and
+		the whitespace it occupied - for blank and Non Exempt alike. Removed
+		outright rather than toggled: the section itself already hides for
+		both, so there was nothing left for the hint to usefully say."""
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("taxjar_integration.wire_exemption_dialog = function (dialog) {")[1].split("\n};")[0]
-		visibility_fn = fn.split("const update_visibility = () => {")[1].split("\n\t};")[0]
-		self.assertIn("taxjar_regions_hint.toggle(!type);", visibility_fn)
+		self.assertNotIn("taxjar_regions_hint", js)
+		self.assertNotIn("Choose an exemption type to select exempt regions", js)
 
 
 # ── TaxJar Customer API — delete_customer_from_taxjar ─────────────────────
@@ -6167,13 +6155,14 @@ class TestHasTaxjarFieldsChangedCustomerName(UnitTestCase):
 
 class TestOnCustomerValidate(UnitTestCase):
 
-	def _make_doc(self, customer_id="", sync_status="", last_synced=""):
+	def _make_doc(self, customer_id="", sync_status="", sync_error="", last_synced=""):
 		doc = MagicMock()
 		doc.name = "CUST-001"
 		doc.is_new.return_value = False
 		_values = {
 			"taxjar_customer_id": customer_id,
 			"taxjar_customer_sync_status": sync_status,
+			"taxjar_customer_sync_error": sync_error,
 			"taxjar_last_synced": last_synced,
 		}
 		doc.get.side_effect = lambda f, d=None: _values.get(f, d)
@@ -6182,27 +6171,67 @@ class TestOnCustomerValidate(UnitTestCase):
 	def test_preserves_customer_id_from_stale_overwrite(self):
 		"""Form save with stale empty taxjar_customer_id must restore the DB value."""
 		doc = self._make_doc(customer_id="")
-		db_values = frappe._dict(taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced", taxjar_last_synced="2026-06-20 10:00:00")
+		db_values = frappe._dict(
+			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
+			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
+		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_any_call("taxjar_customer_id", "CUST-001")
 
-	def test_preserves_sync_status_from_stale_overwrite(self):
+	def test_preserves_sync_status_from_stale_blank(self):
 		"""Sync status should also be preserved from stale form data."""
 		doc = self._make_doc(sync_status="")
-		db_values = frappe._dict(taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced", taxjar_last_synced="")
+		db_values = frappe._dict(
+			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
+			taxjar_customer_sync_error="", taxjar_last_synced="",
+		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_any_call("taxjar_customer_sync_status", "Synced")
 
-	def test_does_not_overwrite_when_form_has_value(self):
-		"""If the form already has the field value, don't touch it."""
+	def test_restores_sync_status_from_a_stale_non_blank_value(self):
+		"""The actual reported bug: a background sync flips the DB to Synced
+		while an open form still holds "Queued" from before the job ran (the
+		form never reloaded). The old guard only restored a *blank* stale
+		value, so a stale-but-non-blank "Queued" sailed through unguarded and
+		overwrote "Synced" back to "Queued" on the form's next save."""
+		doc = self._make_doc(sync_status="Queued")
+		db_values = frappe._dict(
+			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
+			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
+		)
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+			on_customer_validate(doc, None)
+
+		doc.set.assert_any_call("taxjar_customer_sync_status", "Synced")
+
+	def test_restores_sync_error_from_a_stale_value(self):
+		"""Same bug, the sibling field: a cleared/updated Sync Error must not
+		be resurrected by a form that still holds the old message."""
+		doc = self._make_doc(sync_error="Old connection timeout")
+		db_values = frappe._dict(
+			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
+			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
+		)
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+			on_customer_validate(doc, None)
+
+		doc.set.assert_any_call("taxjar_customer_sync_error", "")
+
+	def test_does_not_overwrite_when_form_already_matches_db(self):
+		"""Nothing to restore when the form's copy already agrees with the DB."""
 		doc = self._make_doc(customer_id="CUST-001", sync_status="Synced")
-		db_values = frappe._dict(taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced", taxjar_last_synced="")
+		db_values = frappe._dict(
+			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
+			taxjar_customer_sync_error="", taxjar_last_synced="",
+		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
 			on_customer_validate(doc, None)
@@ -6222,7 +6251,10 @@ class TestOnCustomerValidate(UnitTestCase):
 	def test_skips_when_db_has_no_values(self):
 		"""If DB fields are also empty, nothing to restore."""
 		doc = self._make_doc(customer_id="")
-		db_values = frappe._dict(taxjar_customer_id="", taxjar_customer_sync_status="", taxjar_last_synced="")
+		db_values = frappe._dict(
+			taxjar_customer_id="", taxjar_customer_sync_status="",
+			taxjar_customer_sync_error="", taxjar_last_synced="",
+		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
 			on_customer_validate(doc, None)
@@ -6317,7 +6349,8 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		if result["customers"]:
 			c = result["customers"][0]
 			for key in ("name", "customer_name", "customer_group", "taxjar_exemption_type",
-			            "taxjar_customer_id", "taxjar_customer_sync_status", "exempt_region_count"):
+			            "taxjar_customer_id", "taxjar_customer_sync_status",
+			            "taxjar_customer_sync_error", "exempt_region_count"):
 				self.assertIn(key, c)
 
 	def test_get_customers_filter_by_name(self):
