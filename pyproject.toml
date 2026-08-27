@@ -20,9 +20,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/frappe/taxjar_integration"
 
-[tool.bench.dev-dependencies]
-frappe = ">=15.0.0"
-erpnext = ">=15.0.0"
+[tool.bench.frappe-dependencies]
+frappe = ">=16.0.0,<17.0.0"
+erpnext = ">=16.0.0,<17.0.0"
 
 [tool.isort]
 profile = "black"
