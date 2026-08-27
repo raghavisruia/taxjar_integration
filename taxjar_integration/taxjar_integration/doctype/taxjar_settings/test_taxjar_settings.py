@@ -3,7 +3,7 @@
 
 import json
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import frappe
 from frappe.tests import UnitTestCase
@@ -705,16 +705,29 @@ class TestGetTaxDataForeignRows(UnitTestCase):
 			country="United States", state="TX")
 		mock_address.get.return_value = "TX"
 
-		def fake_get_value(doctype, name=None, fieldname=None, **kwargs):
+		# frappe.db.get_value is the same shared object regardless of which
+		# module's reference reaches it, so patching it here also intercepts
+		# Frappe's own internal lookups made during this call - notably
+		# flt()'s rounding-method resolution via frappe.get_system_settings(),
+		# which silently returns 0 for every value once its own DB call is
+		# redirected into a stub with no matching case. wraps= + returning
+		# DEFAULT is the supported way to override just one case and let a
+		# Mock fall through to the real callable - with the real call's own
+		# original args - for everything else, rather than hand-rolling a
+		# delegating wrapper that risks getting some other caller's argument
+		# shape wrong.
+		def fake_get_value(doctype, *args, **kwargs):
 			if doctype == "Account":
 				return "Handling Charges"
-			return "us"
+			return DEFAULT
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_company_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_address_details", return_value=mock_address), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_shipping_address_details", return_value=mock_address), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=fake_get_value), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_usd_exchange_rate", return_value=usd_rate):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		           wraps=frappe.db.get_value, side_effect=fake_get_value), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_usd_exchange_rate", return_value=usd_rate), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_taxjar_customer_id", return_value=None):
 			return get_tax_data(doc)
 
 	def test_synthetic_line_item_appended_after_real_items(self):
