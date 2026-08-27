@@ -4146,34 +4146,35 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		self.assertIn('__("Yes, but transaction is marked as exempt")', fn)
 
 	def test_only_the_sentence_answer_opts_into_wrapping(self):
-		"""frappe's .indicator-pill is a one-word lozenge: fixed 20px height and
-		a dot centred on that box. Only card 2's "Yes, but transaction is marked
-		as exempt" is a sentence, so only that pill relaxes those rules -
-		applied to every pill, "Yes" and "Skipped" would size to their content
-		instead of frappe's 20px and lift their dots off centre, drifting out of
-		step with pills elsewhere in the desk."""
+		"""frappe.ui.badge (es-badge) defaults to nowrap/fit-content - fine for
+		single words, but "Yes, but transaction is marked as exempt" needs to
+		wrap inside the card instead of overflowing it. Unlike the old
+		indicator-pill treatment, there's no dot to re-centre and no fixed
+		height to relax - the override just lets that one badge's text wrap,
+		scoped to badges inside the status cards generally (every card answer
+		goes through the same frappe.ui.badge.html() call, so there's no
+		separate "wrap" flag to set per card any more)."""
 		js = self._read_js("taxjar_utils.js")
 		styles = js.split("_inject_status_card_styles = function () {")[1].split("\n};")[0]
 
-		# Every override hangs off the opt-in class, never the bare pill.
-		self.assertIn(".taxjar-status-card .indicator-pill.taxjar-pill-wrap {", styles)
-		self.assertIn(".taxjar-status-card .indicator-pill.taxjar-pill-wrap::before {", styles)
-		self.assertNotIn(".taxjar-status-card .indicator-pill {", styles)
-
-		rule = styles.split(".taxjar-status-card .indicator-pill.taxjar-pill-wrap {")[1].split("}")[0]
-		self.assertIn("height: auto;", rule)
+		self.assertIn(".taxjar-status-card-a .es-badge {", styles)
+		rule = styles.split(".taxjar-status-card-a .es-badge {")[1].split("}")[0]
 		self.assertIn("white-space: normal;", rule)
-		self.assertIn("align-items: flex-start;", rule)
-		# --radius-full bows a two-line block into a lozenge, so the wrapped
-		# pill takes a fixed radius. Single-word pills still inherit frappe's.
-		self.assertIn("border-radius: 10px;", rule)
 
-		# Set on the sentence branch only, and nowhere else.
+		# The old opt-in wrap class and its indicator-pill-specific fixes are
+		# gone entirely, not just renamed.
+		self.assertNotIn("taxjar-pill-wrap", js)
+		# No more .indicator-pill selector - a nearby comment about the
+		# address cells' own --bg-blue/--text-on-blue tokens still legitimately
+		# mentions "indicator-pill" in prose, so check for the CSS selector
+		# itself, not the bare word.
+		self.assertNotIn(".indicator-pill", styles)
+
+		# Every card answer renders through the same badge call, sentence or not.
 		render_fn = js.split("taxjar_integration.render_status_cards = function (frm) {")[1].split("\n};")[0]
-		self.assertEqual(render_fn.count("wrap = true;"), 1)
-		wrap_branch = render_fn.split("} else if (transaction_exempt) {")[1].split("}")[0]
-		self.assertIn("wrap = true;", wrap_branch)
-		self.assertIn('card.wrap ? " taxjar-pill-wrap" : ""', render_fn)
+		self.assertIn(
+			"frappe.ui.badge.html({ label: card.answer, theme: card.color })", render_fn
+		)
 
 	def test_breakdown_field_label_block_is_collapsed(self):
 		"""The field has no label - the section heading names it - but frappe
@@ -4511,43 +4512,50 @@ class TestDeskPageChromeJS(UnitTestCase):
 		self.assertNotIn("taxjar-select-all", js)
 		self.assertNotIn('__("Select All")', js)
 
-	def test_tab_breaks_carry_a_parent_and_hidden_false(self):
-		"""Both are load-bearing for a FieldGroup outside a form.
-
-		parent: Tab builds its DOM id from `frm.doctype ?? df.parent`, and
-		frappe.scrub() throws on undefined.
-
-		hidden: false: Layout.render() looks for the first field matching
-		`element.hidden == false` to decide whether to inject its own "Details"
-		tab. An absent property is undefined, which fails that check - so
-		frappe splices in a tab of its own, and that one has no parent, so it
-		takes the scrub() crash with it.
-		"""
+	def test_tabs_use_the_espresso_component_not_a_form_fieldgroup(self):
+		"""Both pages used to draw their tabs via a frappe.ui.FieldGroup of
+		Tab Break fields - a form-layout mechanism that needed `parent:` and
+		`hidden: false` workarounds just to avoid frappe splicing in its own
+		"Details" tab and crashing on an undefined frm.doctype. frappe.ui.Tabs
+		needs none of that: no FieldGroup, no Tab Break fields, no Section
+		Break-triggered "first visible field" footgun."""
 		for page in self.TABBED_PAGES:
 			with self.subTest(page=page):
 				js = self._read_page_js(page)
-				tab_block = js.split('fieldtype: "Tab Break"')[1].split("},")[0]
-				self.assertIn("parent:", tab_block)
-				self.assertIn("hidden: false", tab_block)
+				# The construction itself is gone; the class name may still
+				# appear in a comment explaining what replaced it.
+				self.assertNotIn("new frappe.ui.FieldGroup(", js)
+				self.assertNotIn('fieldtype: "Tab Break"', js)
+				self.assertIn("new frappe.ui.Tabs({", js)
+				tabs_block = js.split("new frappe.ui.Tabs({")[1].split("});")[0]
+				self.assertIn("tabs: TABS.map((tab) => ({", tabs_block)
 
-	def test_no_leading_section_break_before_the_tabs(self):
-		"""make_tab() opens a section per tab already, and a Section Break in
-		front would itself be the "first visible field" - which is exactly what
-		makes frappe inject its own tab."""
+	def test_each_tab_lazily_builds_and_caches_its_own_content_wrapper(self):
+		"""content is a function so each tab's table wrapper is only ever
+		built once, the first time that tab is activated - mirroring the
+		lazy build-once-per-tab pattern this page already used before the
+		FieldGroup hack was removed."""
 		for page in self.TABBED_PAGES:
 			with self.subTest(page=page):
 				js = self._read_page_js(page)
-				field_group = js.split("new frappe.ui.FieldGroup({")[1].split("});")[0]
-				self.assertIn("fields: tab_fields", field_group)
+				tabs_block = js.split("new frappe.ui.Tabs({")[1].split("});")[0]
+				self.assertIn("this.tab_content_wrappers[tab.name] = $wrapper", tabs_block)
 
 	def test_bulk_action_is_disabled_not_hidden(self):
 		"""A control that disappears teaches nothing. Disabled it explains
 		itself - and via data-disabled + title rather than pointer-events,
-		which would suppress the very tooltip doing the explaining."""
+		which would suppress the very tooltip doing the explaining. Underneath,
+		this is now frappe.ui.dropdown (the Espresso replacement for bootstrap's
+		data-toggle="dropdown") rather than a hand-rolled .btn-group, so the
+		disabled look targets the button's own es-button class, not a
+		Bootstrap .dropdown-toggle that no longer exists."""
 		button = self._read_component("bulk_action_button")
 		self.assertIn('"data-disabled"', button)
 		self.assertIn("title: this.disabled_title", button)
 		self.assertIn("Select one or more records to run an action", button)
+		self.assertIn("new frappe.ui.Dropdown({", button)
+		self.assertNotIn("dropdown-toggle", button)
+		self.assertNotIn("btn-group", button)
 
 		import os
 		scss_path = os.path.normpath(os.path.join(
@@ -4555,7 +4563,7 @@ class TestDeskPageChromeJS(UnitTestCase):
 			"public", "scss", "taxjar_integration.bundle.scss",
 		))
 		with open(scss_path) as f:
-			disabled_rule = f.read().split(".taxjar-bulk-action .dropdown-toggle[data-disabled] {")[1].split("}")[0]
+			disabled_rule = f.read().split(".es-button.taxjar-bulk-action[data-disabled] {")[1].split("}")[0]
 		self.assertNotIn("pointer-events", disabled_rule)
 
 	def test_bulk_action_labelled_consistently(self):
@@ -4563,21 +4571,21 @@ class TestDeskPageChromeJS(UnitTestCase):
 			with self.subTest(page=page):
 				self.assertIn('label: __("Bulk Action")', self._read_page_js(page))
 
-	def test_tab_click_is_bound_per_tab_not_delegated(self):
-		"""Layout.setup_events() puts a delegated handler on the .form-tabs <ul>
-		that calls e.stopImmediatePropagation(), so a handler on any ancestor of
-		that <ul> never runs - the tab would switch panes without ever reloading
-		its rows. Binding directly on the link fires in the target phase, ahead
-		of the ancestor delegate. setup_events() also calls .off("click") on the
-		<ul> itself, so binding there would simply be erased.
-		"""
+	def test_tab_click_reload_is_wired_via_on_change(self):
+		"""frappe.ui.Tabs fires its own on_change on every real tab switch - no
+		more setup_tab_change() binding directly on each tab's nav-link to
+		dodge Layout.setup_events()'s delegated, stopImmediatePropagation()-ing
+		handler on .form-tabs, since that handler (and the <ul> it was bound
+		to) no longer exists in this page at all."""
 		for page in self.TABBED_PAGES:
 			with self.subTest(page=page):
 				js = self._read_page_js(page)
-				setup_fn = js.split("setup_tab_change() {")[1].split("\n\t}\n")[0]
-				self.assertIn('.tab_link.find(".nav-link").on("click"', setup_fn)
-				self.assertNotIn('.form-tabs-list").on("click"', setup_fn)
-				self.assertIn("this.refresh();", setup_fn)
+				self.assertNotIn("setup_tab_change", js)
+				self.assertNotIn("nav-link", js)
+				tabs_block = js.split("new frappe.ui.Tabs({")[1].split("});")[0]
+				on_change_fn = tabs_block.split("on_change: (index) => {")[1].split("},")[0]
+				self.assertIn("this.enter_tab(TABS[index].name);", on_change_fn)
+				self.assertIn("this.refresh();", on_change_fn)
 
 	def test_table_fills_width_without_a_serial_gutter(self):
 		data_table = self._read_component("data_table_manager")
@@ -4813,14 +4821,18 @@ class TestCustomerConfigPageJS(UnitTestCase):
 	def test_exemption_type_renders_as_a_pill(self):
 		"""Three states, three readings: a region-scoped exemption
 		(Wholesale/Government/Other) is blue, an explicit "Non Exempt" decision
-		is yellow, and blank is neutral grey because it is not an answer at all
-		- the page gives it its own tab for the same reason."""
+		is amber, and blank is neutral gray because it is not an answer at all
+		- the page gives it its own tab for the same reason. frappe.ui.badge,
+		not the old indicator-pill - "amber"/"gray" are the Espresso theme
+		names (badge-legacy-colors.css maps the old "yellow"/"grey" through,
+		but new code should spell the real theme name)."""
 		js = self._js()
 		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
-		self.assertIn("indicator-pill", cell_fn)
+		self.assertIn("frappe.ui.badge.html(", cell_fn)
+		self.assertNotIn("indicator-pill", cell_fn)
 		colors_block = js.split("const EXEMPTION_TYPE_COLORS = {")[1].split("};")[0]
-		self.assertIn('"": "grey"', colors_block)
-		self.assertIn('"Non Exempt": "yellow"', colors_block)
+		self.assertIn('"": "gray"', colors_block)
+		self.assertIn('"Non Exempt": "amber"', colors_block)
 		for exempt_type in ("Wholesale", "Government", "Other"):
 			self.assertIn(f'{exempt_type}: "blue"', colors_block)
 
@@ -4875,13 +4887,19 @@ class TestCustomerConfigPageJS(UnitTestCase):
 
 	def test_selection_is_scoped_to_the_rows_on_screen(self):
 		"""A selection that outlived its page would leave the count claiming
-		rows nobody can see, and the bulk actions acting on them."""
+		rows nobody can see, and the bulk actions acting on them. Reads
+		straight off the DataTableManager instance now (this page's table is
+		frappe.DataTable, same as the Transaction Sync page's), not a
+		hand-tracked Set of selected names."""
 		js = self._js()
 		checked_fn = js.split("get_checked() {")[1].split("\n\t}\n")[0]
-		self.assertIn("this.selected.has", checked_fn)
+		self.assertIn("this.datatable?.get_checked_items()", checked_fn)
+		self.assertNotIn("this.selected", js)
 		# Every navigation clears it.
 		self.assertIn("reset_selection()", js.split("enter_tab(name) {")[1].split("\n\t}\n")[0])
 		self.assertIn("reset_selection()", js.split("on_page: (page) => {")[1].split("},")[0])
+		reset_fn = js.split("reset_selection() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this.datatable?.clear_checked_items()", reset_fn)
 
 	def test_configure_dialog_uses_the_shared_multicheck_region_fields(self):
 		"""The region pickers are frappe.ui.form MultiCheck fields built and
@@ -6118,8 +6136,9 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		self.assertIn('__("Last synced: {0}"', cell_fn)
 		self.assertNotIn('__("Queued for sync")', cell_fn)
 		self.assertIn('if (status !== "Failed") return pill;', cell_fn)
-		# Info icon must be a separate element, not nested inside the pill span.
-		self.assertIn('const pill = `<span class="indicator-pill ${color}">${label}</span>`;', cell_fn)
+		# Info icon must be a separate element, not nested inside the badge.
+		self.assertIn("const pill = frappe.ui.badge.html({ label, theme: color });", cell_fn)
+		self.assertNotIn("indicator-pill", cell_fn)
 		self.assertIn("return `${pill}${icon}`;", cell_fn)
 
 	def test_no_native_title_tooltip_on_sync_icon(self):
@@ -8878,7 +8897,8 @@ class TestTaxBreakdownJS(UnitTestCase):
 		fn = js.split("render_shipping_taxability = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("taxjar_freight_taxable", fn)
 		self.assertIn("Is shipping charges taxable?", fn)
-		self.assertIn("indicator-pill", fn)
+		self.assertIn("frappe.ui.badge.html(", fn)
+		self.assertNotIn("indicator-pill", fn)
 		self.assertIn('__("Yes")', fn)
 		self.assertIn('__("No")', fn)
 
@@ -8954,7 +8974,7 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn('Synced: "green"', colors)
 		self.assertIn('Failed: "red"', colors)
 		self.assertIn('Queued: "blue"', colors)
-		self.assertIn('Excluded: "grey"', colors)
+		self.assertIn('Excluded: "gray"', colors)
 
 	def test_dispatcher_checks_live_not_cached(self):
 		"""Company enable/create-transactions state is read fresh on every
@@ -9007,7 +9027,7 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		fn = self._render_fn()
 		self.assertIn("docstatus === 0", fn)
 		self.assertIn('__("Submit to Sync")', fn)
-		self.assertIn('color = "yellow"', fn)
+		self.assertIn('color = "amber"', fn)
 
 	def test_synced_info_text_shows_last_synced(self):
 		fn = self._render_fn()
@@ -9023,10 +9043,10 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 	def test_cancelled_pill_is_grey_not_green(self):
 		"""Cancelled reuses the "Synced" status value (see _set_sync_status's
 		shared write for both the on_submit and on_cancel paths), but should
-		read as a neutral grey pill, not the green used for an active sync."""
+		read as a neutral gray badge, not the green used for an active sync."""
 		fn = self._render_fn()
 		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
-		self.assertIn('cancelled ? "grey" : taxjar_integration.SYNC_STATUS_COLORS[status]', synced_branch)
+		self.assertIn('cancelled ? "gray" : taxjar_integration.SYNC_STATUS_COLORS[status]', synced_branch)
 
 	def test_queued_info_text(self):
 		fn = self._render_fn()
@@ -9076,18 +9096,22 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn("font-weight: 600", fn)
 
 	def test_uses_indicator_pill_no_dot_class(self):
-		"""Same classes india_compliance's sandbox pill uses."""
+		"""frappe.ui.badge, not the old india_compliance-style indicator-pill
+		no-indicator-dot pill - badges never draw the leading dot in the
+		first place, so there's no dot class to suppress."""
 		fn = self._render_fn()
-		self.assertIn("indicator-pill no-indicator-dot", fn)
+		self.assertIn("frappe.ui.badge({ label, theme: color });", fn)
+		self.assertNotIn("indicator-pill", fn)
 
 	def test_hover_and_click_wired_not_native_title(self):
-		"""Same interaction pattern as the Transactions page's sync icon -
-		shows immediately on hover/click, not the native title attribute
-		(which enforces its own delay and never responds to a click)."""
+		"""frappe.ui.popover, not a hand-rolled hover/click popover and not
+		the native title attribute (which enforces its own delay and never
+		responds to a click). Popover is click-toggle only - trading the old
+		hover preview for the same native component the Customers/
+		Transactions pages' own Sync Status columns already use."""
 		fn = self._render_fn()
-		self.assertIn('.on("mouseenter"', fn)
-		self.assertIn('.on("mouseleave"', fn)
-		self.assertIn('.on("click"', fn)
+		self.assertIn('frappe.ui.popover({ trigger: $badge, content: () => info_text, side: "bottom" });', fn)
+		self.assertNotIn('.on("mouseenter"', fn)
 		self.assertNotIn("title=", fn)
 
 	def test_wired_into_sales_invoice_refresh(self):
