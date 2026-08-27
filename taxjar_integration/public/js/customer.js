@@ -163,7 +163,7 @@ frappe.ui.form.on("Customer", {
 				__("Sync to TaxJar"),
 				() => {
 					frappe.xcall(
-						"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
+						"taxjar_integration.taxjar_integration.taxjar_integration.resync_customer",
 						{ customer_name: frm.doc.name },
 					).then(() => frm.reload_doc()).then(() => {
 						if (frm.doc.taxjar_customer_sync_status === "Failed") {

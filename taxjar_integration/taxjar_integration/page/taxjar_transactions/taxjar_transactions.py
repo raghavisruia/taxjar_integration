@@ -7,6 +7,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	paginated_response,
 	parse_filters,
 	parse_page_size,
+	permitted_count,
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import _publish_transaction_update
 
@@ -53,7 +54,12 @@ def _taxjar_invoice_fields_ready():
 
 
 @frappe.whitelist()
-def get_transactions(filters=None, page=1, scope=INCLUDED_SCOPE, page_size=PAGE_SIZE):
+def get_transactions(
+	filters: dict | str | None = None,
+	page: int | str = 1,
+	scope: str = INCLUDED_SCOPE,
+	page_size: int | str = PAGE_SIZE,
+):
 	frappe.has_permission("Sales Invoice", "read", throw=True)
 	if not _taxjar_invoice_fields_ready():
 		return not_configured_response("invoices")
@@ -64,9 +70,12 @@ def get_transactions(filters=None, page=1, scope=INCLUDED_SCOPE, page_size=PAGE_
 
 	conditions = _build_conditions(filters, scope)
 
-	total = frappe.db.count("Sales Invoice", conditions)
+	total = permitted_count("Sales Invoice", conditions)
 
-	invoices = frappe.get_all(
+	# get_list, not get_all: get_all defaults to ignore_permissions=True, which
+	# would show this page every company's invoices regardless of the caller's
+	# User Permissions.
+	invoices = frappe.get_list(
 		"Sales Invoice",
 		filters=conditions,
 		fields=[
@@ -99,7 +108,7 @@ def get_transactions(filters=None, page=1, scope=INCLUDED_SCOPE, page_size=PAGE_
 
 
 @frappe.whitelist()
-def get_summary(filters=None):
+def get_summary(filters: dict | str | None = None):
 	"""Counts for the summary strip: the submitted/cancelled statuses plus a
 	draft total, both under the same company/date/type filters as the table -
 	the strip drills into what is on screen, so it has to be scoped the same.
@@ -117,7 +126,7 @@ def get_summary(filters=None):
 	filters.pop("excluded_kind", None)
 
 	# Aggregate counts in SQL instead of pulling every row into Python.
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		"Sales Invoice",
 		filters=_build_conditions(filters, SUBMITTED_SCOPE),
 		fields=["taxjar_sync_status", {"COUNT": "*"}],
@@ -137,13 +146,13 @@ def get_summary(filters=None):
 			"excluded": by_status.get("Excluded", 0),
 		},
 		"draft": {
-			"total": frappe.db.count("Sales Invoice", _build_conditions(filters, DRAFT_SCOPE)),
+			"total": permitted_count("Sales Invoice", _build_conditions(filters, DRAFT_SCOPE)),
 		},
 	}
 
 
-@frappe.whitelist()
-def bulk_retry(invoices):
+@frappe.whitelist(methods=["POST"])
+def bulk_retry(invoices: list | str):
 	frappe.has_permission("Sales Invoice", "write", throw=True)
 	if not _taxjar_invoice_fields_ready():
 		frappe.throw(
@@ -151,6 +160,13 @@ def bulk_retry(invoices):
 			title=_("TaxJar Not Configured"),
 		)
 	invoices = frappe.parse_json(invoices) if isinstance(invoices, str) else invoices
+
+	# The blanket check above only proves the caller may write *some* Sales
+	# Invoice; these names came from the client, and the loop below writes with
+	# frappe.db.set_value, which enforces nothing. Checked up front so a partly
+	# permitted list is refused rather than half-applied.
+	for name in invoices:
+		frappe.has_permission("Sales Invoice", "write", doc=name, throw=True)
 
 	queued = 0
 	for name in invoices:

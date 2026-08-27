@@ -63,7 +63,7 @@ function _add_taxjar_buttons(frm) {
 
 	frm.add_custom_button(__("Sync to TaxJar"), function () {
 		frappe.call({
-			method: "taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
+			method: "taxjar_integration.taxjar_integration.taxjar_integration.resync_transaction",
 			args: { invoice_name: frm.doc.name },
 			freeze: true,
 			freeze_message: __("Syncing to TaxJar..."),

@@ -55,7 +55,6 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	preview_foreign_tax_rows,
 	_validate_exempt_regions,
 	_EXEMPTION_TYPES_REQUIRING_REGIONS,
-	retry_all_failed_syncs,
 	sanitize_error_response,
 	set_sales_tax,
 	set_taxjar_breakdown_html,
@@ -3667,8 +3666,8 @@ class TestCustomersPageRealtime(UnitTestCase):
 		]
 		with patch(f"{page_mod}.frappe.has_permission"), patch(
 			f"{page_mod}.frappe.db.has_column", return_value=True
-		), patch(f"{page_mod}.frappe.get_all", return_value=rows) as mock_get_all, patch(
-			f"{page_mod}.frappe.db.count", side_effect=[52, 6, 38]
+		), patch(f"{page_mod}.frappe.get_list", return_value=rows) as mock_get_all, patch(
+			f"{page_mod}.permitted_count", side_effect=[52, 6, 38]
 		) as mock_count:
 			result = get_summary(filters={"search": {"customer_group": "Commercial"}})
 
@@ -5575,7 +5574,7 @@ class TestSalesInvoiceClientScript(UnitTestCase):
 	def test_js_has_sync_button(self):
 		js = self._read_js()
 		self.assertIn("Sync to TaxJar", js)
-		self.assertIn("sync_transaction_to_taxjar", js)
+		self.assertIn("resync_transaction", js)
 
 	def test_js_buttons_grouped_under_taxjar(self):
 		js = self._read_js()
@@ -5641,18 +5640,6 @@ class TestRetryFailedTaxjarSyncs(UnitTestCase):
 		self.assertIn("taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_syncs", cron_tasks)
 
 
-# ── Phase 6: retry_all_failed_syncs (whitelisted) ───────────────────────────
-
-
-class TestRetryAllFailedSyncs(UnitTestCase):
-
-	def test_returns_count_of_retried(self):
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_all", return_value=["SINV-001", "SINV-002", "SINV-003"]), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
-			count = retry_all_failed_syncs()
-		self.assertEqual(count, 3)
-
-
 # ── Phase 7: Transaction Sync page ───────────────────────────────────────────
 
 
@@ -5697,10 +5684,10 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			for i in range(3)
 		]
 		with patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_list",
 			return_value=mock_rows,
 		), patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.permitted_count",
 			return_value=3,
 		):
 			result = get_transactions(filters={}, page=1)
@@ -5731,10 +5718,10 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			),
 		]
 		with patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_list",
 			return_value=mock_rows,
 		), patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.permitted_count",
 			return_value=3,
 		):
 			result = get_transactions(filters={}, page=1)
@@ -5762,10 +5749,10 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			),
 		]
 		with patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_list",
 			return_value=mock_rows,
 		), patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.permitted_count",
 			return_value=3,
 		):
 			result = get_transactions(filters={}, page=1)
@@ -5785,10 +5772,10 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			),
 		]
 		with patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_list",
 			return_value=mock_rows,
 		), patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.permitted_count",
 			return_value=1,
 		):
 			result = get_transactions(filters={}, page=1)
@@ -5809,8 +5796,8 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			frappe._dict(taxjar_sync_status="Excluded", cnt=1),
 		]
 		with patch(f"{self.MOD}.frappe.db.has_column", return_value=True), patch(
-			f"{self.MOD}.frappe.get_all", return_value=mock_rows
-		), patch(f"{self.MOD}.frappe.db.count", return_value=4) as mock_count:
+			f"{self.MOD}.frappe.get_list", return_value=mock_rows
+		), patch(f"{self.MOD}.permitted_count", return_value=4) as mock_count:
 			result = get_summary(filters={})
 
 		self.assertEqual(
@@ -5827,8 +5814,8 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_summary
 
 		with patch(f"{self.MOD}.frappe.db.has_column", return_value=True), patch(
-			f"{self.MOD}.frappe.get_all", return_value=[]
-		) as mock_get_all, patch(f"{self.MOD}.frappe.db.count", return_value=0) as mock_count:
+			f"{self.MOD}.frappe.get_list", return_value=[]
+		) as mock_get_all, patch(f"{self.MOD}.permitted_count", return_value=0) as mock_count:
 			get_summary(filters={"company": "Test Co", "from_date": "2026-01-01"})
 
 		for conditions in (mock_get_all.call_args[1]["filters"], mock_count.call_args[0][1]):
@@ -5883,8 +5870,8 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		)
 
 		with patch(f"{self.MOD}.frappe.db.has_column", return_value=True), patch(
-			f"{self.MOD}.frappe.get_all", return_value=[]
-		), patch(f"{self.MOD}.frappe.db.count", return_value=0) as mock_count:
+			f"{self.MOD}.frappe.get_list", return_value=[]
+		), patch(f"{self.MOD}.permitted_count", return_value=0) as mock_count:
 			get_transactions(filters={}, page=1, scope=EXCLUDED_SCOPE)
 
 		self.assertEqual(
@@ -5921,10 +5908,10 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 	def test_get_transactions_page_clamped_to_min_1(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
 		with patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_all",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.get_list",
 			return_value=[],
 		), patch(
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.frappe.db.count",
+			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.permitted_count",
 			return_value=0,
 		):
 			result = get_transactions(filters={}, page=-5)
@@ -6245,7 +6232,7 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		chain now checks the freshly-reloaded status and surfaces the actual
 		error via a dialog instead of claiming success either way."""
 		js = self._read_js()
-		sync_click = js.split('"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",')[1].split(
+		sync_click = js.split('"taxjar_integration.taxjar_integration.taxjar_integration.resync_customer",')[1].split(
 			"\n\t\t\t\t},\n"
 		)[0]
 		self.assertIn('frm.doc.taxjar_customer_sync_status === "Failed"', sync_click)
@@ -11413,3 +11400,173 @@ class TestRetryCronOnlyPicksUpRetryableFailures(UnitTestCase):
 		self.assertEqual(
 			mock_get_all.call_args.kwargs["filters"]["taxjar_customer_sync_retryable"], 1
 		)
+
+
+# ── Whitelisted endpoint contract ────────────────────────────────────────────
+
+
+class TestWhitelistedEndpointContract(UnitTestCase):
+	"""Every HTTP-reachable method checks permission and, if it writes, is
+	POST-only.
+
+	The registry assertions matter as much as the behavioural ones: a new
+	endpoint added without a guard is the failure mode these are here to catch,
+	and it is invisible to a test that only exercises the endpoints that exist
+	today.
+	"""
+
+	TX_PAGE = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+	CUST_PAGE = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
+
+	@staticmethod
+	def _methods_for(fn):
+		return frappe.allowed_http_methods_for_whitelisted_func.get(fn)
+
+	def test_sync_workers_are_not_reachable_over_http(self):
+		"""The workers run under frappe.enqueue, which resolves a dotted path
+		without whitelisting. Their permission-checked entry points are the
+		only way in from a browser."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			delete_transaction_from_taxjar,
+			sync_customer_to_taxjar,
+			sync_transaction_to_taxjar,
+		)
+
+		for worker in (sync_transaction_to_taxjar, sync_customer_to_taxjar, delete_transaction_from_taxjar):
+			self.assertNotIn(worker, frappe.whitelisted, f"{worker.__name__} should not be whitelisted")
+
+	def test_sync_entry_points_are_post_only(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			resync_customer,
+			resync_transaction,
+		)
+
+		for fn in (resync_transaction, resync_customer):
+			self.assertIn(fn, frappe.whitelisted)
+			self.assertEqual(self._methods_for(fn), ("POST",), f"{fn.__name__} must be POST-only")
+
+	def test_state_changing_endpoints_are_post_only(self):
+		"""Frappe only validates the CSRF token for unsafe HTTP methods, so a
+		writer left on GET is reachable without one."""
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			bulk_clear_exemption,
+			bulk_sync_to_taxjar,
+			configure_exemption,
+		)
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import (
+			fetch_nexus,
+			finish_setup,
+			remove_company,
+			save_company_accounts,
+			save_connection,
+			save_features,
+			test_connection,
+		)
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			bulk_retry,
+		)
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			delete_transaction_manual,
+			mark_address_as_shipping,
+		)
+
+		writers = (
+			test_connection, save_connection, save_company_accounts, save_features,
+			remove_company, fetch_nexus, finish_setup,
+			configure_exemption, bulk_clear_exemption, bulk_sync_to_taxjar,
+			bulk_retry, delete_transaction_manual, mark_address_as_shipping,
+		)
+		for fn in writers:
+			self.assertEqual(self._methods_for(fn), ("POST",), f"{fn.__name__} must be POST-only")
+
+	def test_every_whitelisted_endpoint_in_this_app_has_type_hints(self):
+		import ast
+		import pathlib
+
+		offenders = []
+		root = pathlib.Path(__file__).resolve().parents[3]
+		for path in sorted(root.rglob("*.py")):
+			if path.name.startswith("test_") or "__pycache__" in str(path):
+				continue
+			tree = ast.parse(path.read_text())
+			for node in ast.walk(tree):
+				if not isinstance(node, ast.FunctionDef):
+					continue
+				if not any("whitelist" in ast.unparse(d) for d in node.decorator_list):
+					continue
+				for arg in node.args.args + node.args.kwonlyargs:
+					if arg.arg != "self" and arg.annotation is None:
+						offenders.append(f"{path.name}:{node.lineno} {node.name}({arg.arg})")
+
+		self.assertEqual(offenders, [], f"whitelisted args without type hints: {offenders}")
+
+	def test_read_endpoints_reject_a_user_without_the_doctype(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			get_customers,
+		)
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			get_transactions,
+		)
+
+		frappe.set_user("Guest")
+		try:
+			for fn in (get_transactions, get_customers):
+				with self.assertRaises(frappe.PermissionError):
+					fn()
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_transaction_endpoints_check_the_invoice_before_acting(self):
+		"""Each of these reaches TaxJar for a specific Sales Invoice, so the
+		check has to name that document - a doctype-level check would let a
+		user act on an invoice their User Permissions exclude."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as mod
+
+		cases = (
+			(mod.resync_transaction, "write"),
+			(mod.fetch_transaction_from_taxjar, "read"),
+			(mod.delete_transaction_manual, "write"),
+		)
+		for fn, ptype in cases:
+			with patch.object(mod.frappe, "has_permission", side_effect=frappe.PermissionError) as guard:
+				with self.assertRaises(frappe.PermissionError):
+					fn("SINV-PERM-001")
+			self.assertEqual(
+				guard.call_args[0][:2], ("Sales Invoice", ptype), f"{fn.__name__} checked the wrong permission"
+			)
+			self.assertEqual(guard.call_args[1]["doc"], "SINV-PERM-001")
+
+	def test_customer_resync_checks_the_customer_before_acting(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as mod
+
+		with patch.object(mod.frappe, "has_permission", side_effect=frappe.PermissionError) as guard:
+			with self.assertRaises(frappe.PermissionError):
+				mod.resync_customer("CUST-PERM-001")
+		self.assertEqual(guard.call_args[0][:2], ("Customer", "write"))
+		self.assertEqual(guard.call_args[1]["doc"], "CUST-PERM-001")
+
+	def test_bulk_actions_check_every_name_before_writing_any(self):
+		"""A caller permitted on only part of the list gets a clean refusal
+		rather than a half-applied bulk edit."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as tx,
+		)
+
+		with patch.object(tx.frappe, "has_permission") as guard, patch.object(
+			tx, "_taxjar_invoice_fields_ready", return_value=True
+		), patch.object(tx.frappe.db, "set_value") as write:
+			guard.side_effect = [None, frappe.PermissionError]
+			with self.assertRaises(frappe.PermissionError):
+				tx.bulk_retry(["SINV-A", "SINV-B"])
+
+		write.assert_not_called()
+
+	def test_settings_actions_that_call_taxjar_require_write(self):
+		"""run_doc_method loads the doc with a read check; both of these then
+		call TaxJar and save."""
+		settings = frappe.get_doc("TaxJar Settings")
+		for method in ("update_nexus_list", "refresh_product_tax_categories"):
+			with patch.object(type(settings), "check_permission", side_effect=frappe.PermissionError) as guard:
+				with self.assertRaises(frappe.PermissionError):
+					getattr(settings, method)()
+			self.assertEqual(guard.call_args[0][0], "write")

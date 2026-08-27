@@ -105,8 +105,8 @@ def get_setup_state():
 	}
 
 
-@frappe.whitelist()
-def test_connection(company, token=None, mode=None):
+@frappe.whitelist(methods=["POST"])
+def test_connection(company: str, token: str | None = None, mode: str | None = None):
 	"""Verify a TaxJar token against a lightweight endpoint, without persisting.
 
 	If ``token`` is omitted, falls back to the already-saved credential for
@@ -154,8 +154,13 @@ def test_connection(company, token=None, mode=None):
 	return {"ok": True, "company": company, "mode": mode}
 
 
-@frappe.whitelist()
-def save_connection(mode, credentials=None, enable_taxjar_logging=None, log_retention_days=None):
+@frappe.whitelist(methods=["POST"])
+def save_connection(
+	mode: str,
+	credentials: list | str | None = None,
+	enable_taxjar_logging: int | str | None = None,
+	log_retention_days: int | str | None = None,
+):
 	"""Persist API mode + per-company tokens. A blank token in the payload means
 	"keep the existing one" (the masked field wasn't retyped), not "clear it"."""
 	frappe.has_permission(SETTINGS, "write", throw=True)
@@ -188,7 +193,7 @@ def save_connection(mode, credentials=None, enable_taxjar_logging=None, log_rete
 
 
 @frappe.whitelist()
-def get_default_ledgers(company):
+def get_default_ledgers(company: str):
 	"""Preview the standard-CoA ledger lookup for a company, without persisting
 	anything - lets the Accounts step pre-fill blank fields before the admin sees
 	them. Read-only counterpart to save_company_accounts()."""
@@ -201,8 +206,8 @@ def get_default_ledgers(company):
 	return resolve_default_ledgers(company)
 
 
-@frappe.whitelist()
-def save_company_accounts(rows):
+@frappe.whitelist(methods=["POST"])
+def save_company_accounts(rows: list | str):
 	"""Upsert company_config account heads. Both heads are mandatory on the
 	child doctype, so an incomplete row surfaces that as a normal save error."""
 	frappe.has_permission(SETTINGS, "write", throw=True)
@@ -226,8 +231,8 @@ def save_company_accounts(rows):
 	return {"ok": True}
 
 
-@frappe.whitelist()
-def save_features(company_flags=None):
+@frappe.whitelist(methods=["POST"])
+def save_features(company_flags: list | str | None = None):
 	"""Set each company's Calculate/File flags. Flags for a company without an
 	existing company_config row are silently skipped — the Accounts step must
 	run first to create that row.
@@ -275,8 +280,8 @@ def save_features(company_flags=None):
 	return {"ok": True}
 
 
-@frappe.whitelist()
-def remove_company(company):
+@frappe.whitelist(methods=["POST"])
+def remove_company(company: str):
 	"""Drop a company from the guided setup entirely — its credential and (if
 	any) its company_config row — so it disappears from every later step too
 	rather than leaving an orphaned config with no credential behind it."""
@@ -290,7 +295,7 @@ def remove_company(company):
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def fetch_nexus():
 	"""Pull nexus regions from TaxJar for every configured company (wraps the
 	doctype's own update_nexus_list, which also saves) and return them grouped
@@ -310,7 +315,7 @@ def fetch_nexus():
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def finish_setup():
 	"""Mark setup complete. Saving runs the doctype's own validate(), so an
 	incomplete/invalid configuration surfaces its error instead of being marked done.

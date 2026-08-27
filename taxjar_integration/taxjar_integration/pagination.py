@@ -25,6 +25,23 @@ def parse_page_size(page_size):
 	return page_size if page_size in PAGE_SIZES else PAGE_SIZE
 
 
+def permitted_count(doctype, filters):
+	"""Row count for ``filters`` that respects the caller's permissions.
+
+	frappe.db.count goes straight to the database: it applies no permission
+	query conditions and no User Permissions, so a user restricted to one
+	company would get a total covering every company - a number the table
+	beneath it can never match. get_list runs the same aggregate through the
+	permission-aware query builder.
+
+	The dict form is required: this frappe rejects SQL function strings in
+	SELECT ("count(name) as total") and asks for {"COUNT": "*"} instead, which
+	comes back keyed "COUNT(*)".
+	"""
+	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*"}])
+	return next(iter(rows[0].values()), 0) if rows else 0
+
+
 def paginated_response(items_key, items, total, page, page_size=PAGE_SIZE):
 	"""Build the standard page envelope shared by the TaxJar list pages."""
 	return {

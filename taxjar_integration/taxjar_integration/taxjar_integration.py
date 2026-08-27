@@ -276,7 +276,21 @@ def enqueue_taxjar_delete(doc, method):
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+def resync_transaction(invoice_name: str):
+	"""Permission-checked entry point for the Sales Invoice "Sync to TaxJar" button.
+
+	Runs the sync inline rather than enqueuing it: the button reloads the form in
+	its callback and reports the resulting status, so it needs the work finished
+	by the time it returns. The worker below is deliberately not whitelisted -
+	frappe.enqueue resolves a dotted path without it, so the on_submit hook, the
+	retry cron and the bulk actions all keep working unchanged, while HTTP has
+	exactly one way in and it checks permission first.
+	"""
+	frappe.has_permission("Sales Invoice", "write", doc=invoice_name, throw=True)
+	return sync_transaction_to_taxjar(invoice_name)
+
+
 def sync_transaction_to_taxjar(invoice_name):
 	"""Background worker: create order/refund in TaxJar for a submitted Sales Invoice."""
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
@@ -454,27 +468,10 @@ def _record_sync_failure(err, action, payload, ctx, invoice_name):
 
 
 @frappe.whitelist()
-def retry_all_failed_syncs():
-	"""Re-enqueue all Sales Invoices with Failed sync status."""
-	failed = frappe.get_all(
-		"Sales Invoice",
-		filters={"taxjar_sync_status": "Failed", "docstatus": ("in", (1, 2))},
-		pluck="name",
-	)
-	for name in failed:
-		frappe.enqueue(
-			"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",
-			invoice_name=name,
-			queue="short",
-			job_id=f"taxjar_retry_{name}",
-			deduplicate=True,
-		)
-	return len(failed)
-
-
-@frappe.whitelist()
-def fetch_transaction_from_taxjar(invoice_name):
+def fetch_transaction_from_taxjar(invoice_name: str):
 	"""Pull current transaction state from TaxJar and return the response data."""
+	frappe.has_permission("Sales Invoice", "read", doc=invoice_name, throw=True)
+
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
 	client = get_client(doc.company)
 	if not client:
@@ -512,9 +509,11 @@ def fetch_transaction_from_taxjar(invoice_name):
 		frappe.throw(_("Failed to fetch from TaxJar: {0}").format(str(e)))
 
 
-@frappe.whitelist()
-def delete_transaction_manual(invoice_name):
+@frappe.whitelist(methods=["POST"])
+def delete_transaction_manual(invoice_name: str):
 	"""Manual deletion of a transaction from TaxJar (for cleanup)."""
+	frappe.has_permission("Sales Invoice", "write", doc=invoice_name, throw=True)
+
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
 	client = get_client(doc.company)
 	if not client:
@@ -824,7 +823,7 @@ def _apply_item_discounts(line_items, item_discounts):
 
 
 @frappe.whitelist()
-def preview_foreign_tax_rows(doc_json):
+def preview_foreign_tax_rows(doc_json: dict | str):
 	"""Classify a document's foreign Sales Taxes and Charges rows for the
 	client confirmation dialog (design doc §5) - built on the exact same
 	_classify_foreign_tax_rows() get_tax_data() itself uses, so what the
@@ -1507,7 +1506,7 @@ def _customer_master_exemption(customer, address=None):
 
 
 @frappe.whitelist()
-def get_region_exemption(customer, address=None):
+def get_region_exemption(customer: str, address: str | None = None):
 	"""Whether the customer's master exemption covers this destination.
 
 	Read by the form (apply_region_exemption in taxjar_utils.js) to pre-set and
@@ -1611,7 +1610,7 @@ def get_company_address_details(doc):
 
 
 @frappe.whitelist()
-def check_nexus(shipping_address_name):
+def check_nexus(shipping_address_name: str):
 	if not isinstance(shipping_address_name, str) or not shipping_address_name.strip():
 		return
 
@@ -1620,6 +1619,12 @@ def check_nexus(shipping_address_name):
 
 	if not frappe.db.exists("Address", shipping_address_name):
 		return
+
+	# After the existence guard, not before it: a doc-level check on a name that
+	# does not exist raises DoesNotExistError, and this is called on every
+	# shipping_address_name change, where a stale link should stay a quiet
+	# no-op rather than an error dialog.
+	frappe.has_permission("Address", "read", doc=shipping_address_name, throw=True)
 
 	try:
 		address = frappe.get_doc("Address", shipping_address_name)
@@ -1632,7 +1637,7 @@ def check_nexus(shipping_address_name):
 
 
 @frappe.whitelist()
-def get_customer_addresses(customer):
+def get_customer_addresses(customer: str):
 	frappe.has_permission("Address", "read", throw=True)
 	return frappe.get_all(
 		"Address",
@@ -1650,8 +1655,8 @@ def get_customer_addresses(customer):
 	)
 
 
-@frappe.whitelist()
-def mark_address_as_shipping(address_name):
+@frappe.whitelist(methods=["POST"])
+def mark_address_as_shipping(address_name: str):
 	address = frappe.get_doc("Address", address_name)
 	address.check_permission("write")
 	address.is_shipping_address = 1
@@ -1779,7 +1784,7 @@ def company_creates_transactions(company, config=None):
 
 
 @frappe.whitelist()
-def is_taxjar_enabled_for_company(company):
+def is_taxjar_enabled_for_company(company: str):
 	"""Live read for the sidebar sync-status pill (see render_sync_status_sidebar_pill
 	in taxjar_utils.js) - checked on every form refresh rather than cached on the
 	transaction doc, since a stored flag would go stale for a Draft left unsaved
@@ -2174,7 +2179,18 @@ def _record_customer_sync_failure(err, action, payload, ctx, customer_name):
 	_set_customer_sync_status(customer_name, "Failed", error=info["message"], retryable=info["retryable"])
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+def resync_customer(customer_name: str, company: str | None = None):
+	"""Permission-checked entry point for the Customer "Sync to TaxJar" button.
+
+	Inline rather than enqueued, for the same reason as resync_transaction: the
+	button reloads the form and reports the resulting sync status. The worker
+	below stays un-whitelisted so enqueue callers are unaffected.
+	"""
+	frappe.has_permission("Customer", "write", doc=customer_name, throw=True)
+	return sync_customer_to_taxjar(customer_name, company=company)
+
+
 def sync_customer_to_taxjar(customer_name, company=None):
 	"""Create or update a customer record in TaxJar.
 

@@ -105,8 +105,12 @@ class TaxJarSettings(Document):
 			if not any(cred.live_token for cred in (self.table_hvjw or [])):
 				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode."))
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def update_nexus_list(self):
+		# run_doc_method only guarantees read on the way in, and this calls
+		# TaxJar and then saves.
+		self.check_permission("write")
+
 		if not self.company_config:
 			frappe.throw(frappe._("Please add at least one Company Configuration before updating Nexus list"))
 
@@ -178,7 +182,7 @@ class TaxJarSettings(Document):
 			),
 		}
 
-	@frappe.whitelist()
+	@frappe.whitelist(methods=["POST"])
 	def refresh_product_tax_categories(self):
 		"""Manual "Update Product Tax Category List" button: unlike the weekly
 		scheduled job (which logs and moves on - see tasks.sync_product_tax_categories),
@@ -186,6 +190,10 @@ class TaxJarSettings(Document):
 		message rather than an unhandled exception. Categories aren't
 		company-scoped, so any configured credential is enough - this doesn't gate
 		on _is_taxjar_enabled()."""
+		# Same reasoning as update_nexus_list: read perm gets you in here, but
+		# this calls TaxJar and inserts Product Tax Category rows.
+		self.check_permission("write")
+
 		client = get_client()
 		if not client:
 			frappe.throw(frappe._("Could not connect to TaxJar. Check your API credentials."))

@@ -7,6 +7,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	paginated_response,
 	parse_filters,
 	parse_page_size,
+	permitted_count,
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import _publish_customer_update
 
@@ -90,7 +91,12 @@ def _ensure_taxjar_customer_fields():
 
 
 @frappe.whitelist()
-def get_customers(filters=None, page=1, scope=ALL_SCOPE, page_size=PAGE_SIZE):
+def get_customers(
+	filters: dict | str | None = None,
+	page: int | str = 1,
+	scope: str = ALL_SCOPE,
+	page_size: int | str = PAGE_SIZE,
+):
 	frappe.has_permission("Customer", "read", throw=True)
 	if not _taxjar_customer_fields_ready():
 		return not_configured_response("customers")
@@ -101,9 +107,10 @@ def get_customers(filters=None, page=1, scope=ALL_SCOPE, page_size=PAGE_SIZE):
 
 	conditions = _build_conditions(filters, scope)
 
-	total = frappe.db.count("Customer", conditions)
+	total = permitted_count("Customer", conditions)
 
-	customers = frappe.get_all(
+	# get_list, not get_all - see the note in the Transaction Sync page.
+	customers = frappe.get_list(
 		"Customer",
 		filters=conditions,
 		fields=[
@@ -117,6 +124,11 @@ def get_customers(filters=None, page=1, scope=ALL_SCOPE, page_size=PAGE_SIZE):
 	)
 
 	# Fetch all region counts in one grouped query instead of one count per row.
+	# get_all rather than get_list here on purpose: get_list drops the `parent`
+	# column from a child-table select, which is the one field this grouping
+	# needs. It stays permission-correct because `names` came out of the
+	# permission-aware Customer query above, so nothing outside the caller's
+	# visibility can be counted.
 	names = [c["name"] for c in customers]
 	region_counts = {}
 	if names:
@@ -137,7 +149,7 @@ def get_customers(filters=None, page=1, scope=ALL_SCOPE, page_size=PAGE_SIZE):
 
 
 @frappe.whitelist()
-def get_summary(filters=None):
+def get_summary(filters: dict | str | None = None):
 	"""Counts for the summary strip. Scoped by the same filters as the table so
 	the strip always describes what is on screen.
 	"""
@@ -151,7 +163,7 @@ def get_summary(filters=None):
 	filters.pop("sync_status", None)
 
 	exempt_conditions = _build_conditions(filters, EXEMPT_SCOPE)
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		"Customer",
 		filters=exempt_conditions,
 		fields=["taxjar_customer_sync_status", {"COUNT": "*"}],
@@ -165,22 +177,26 @@ def get_summary(filters=None):
 		)
 
 	return {
-		"total": frappe.db.count("Customer", _build_conditions(filters, ALL_SCOPE)),
+		"total": permitted_count("Customer", _build_conditions(filters, ALL_SCOPE)),
 		"exempt": {
 			"total": sum(by_status.values()),
 			"synced": by_status.get("Synced", 0),
 			"queued": by_status.get("Queued", 0),
 			"failed": by_status.get("Failed", 0),
 		},
-		"non_exempt": frappe.db.count("Customer", _build_conditions(filters, NON_EXEMPT_SCOPE)),
-		"not_configured": frappe.db.count(
+		"non_exempt": permitted_count("Customer", _build_conditions(filters, NON_EXEMPT_SCOPE)),
+		"not_configured": permitted_count(
 			"Customer", _build_conditions(filters, NOT_CONFIGURED_SCOPE)
 		),
 	}
 
 
 @frappe.whitelist()
-def get_exempt_regions(customer):
+def get_exempt_regions(customer: str):
+	frappe.has_permission("Customer", "read", doc=customer, throw=True)
+
+	# get_all on a child table, gated by the doc-level Customer check above -
+	# get_list would need a parent_doctype and still resolve to the same rows.
 	regions = frappe.get_all(
 		"TaxJar Customer Exempt Region",
 		filters={"parent": customer, "parenttype": "Customer"},
@@ -189,8 +205,25 @@ def get_exempt_regions(customer):
 	return regions
 
 
-@frappe.whitelist()
-def configure_exemption(customers, exemption_type, regions=None):
+def _check_each(customers):
+	"""Assert write permission on every named customer before touching any.
+
+	The blanket has_permission() at the top of each bulk endpoint only proves
+	the caller may write *some* Customer; the names come from the client. This
+	checks up front rather than inside the mutation loop so a caller who is
+	only allowed half the list gets a clean refusal instead of a half-applied
+	bulk edit.
+	"""
+	for name in customers:
+		frappe.has_permission("Customer", "write", doc=name, throw=True)
+
+
+@frappe.whitelist(methods=["POST"])
+def configure_exemption(
+	customers: list | str,
+	exemption_type: str,
+	regions: list | str | None = None,
+):
 	"""Write the exemption type and its exempt regions together, for one or
 	many customers.
 
@@ -210,6 +243,7 @@ def configure_exemption(customers, exemption_type, regions=None):
 
 	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
 	regions = frappe.parse_json(regions) if isinstance(regions, str) else (regions or [])
+	_check_each(customers)
 
 	# No exemption type means no exemption, and an exemption region without one
 	# is meaningless - drop them rather than orphan them.
@@ -227,11 +261,12 @@ def configure_exemption(customers, exemption_type, regions=None):
 	return {"updated": len(customers)}
 
 
-@frappe.whitelist()
-def bulk_clear_exemption(customers):
+@frappe.whitelist(methods=["POST"])
+def bulk_clear_exemption(customers: list | str):
 	frappe.has_permission("Customer", "write", throw=True)
 	_ensure_taxjar_customer_fields()
 	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
+	_check_each(customers)
 
 	for name in customers:
 		doc = frappe.get_doc("Customer", name)
@@ -242,19 +277,20 @@ def bulk_clear_exemption(customers):
 	return {"updated": len(customers)}
 
 
-@frappe.whitelist()
-def bulk_sync_to_taxjar(customers):
+@frappe.whitelist(methods=["POST"])
+def bulk_sync_to_taxjar(customers: list | str):
 	"""Re-enqueue a customer sync without changing anything on the customer.
 
 	Reached only by the page's "Retry {n} Failed" action. Ordinary edits do not
 	need it - on_customer_update already enqueues a sync whenever a TaxJar
 	field changes. It exists because a failure leaves nothing to re-save, and
-	the 15-minute retry cron (retry_all_failed_syncs) covers Sales Invoices
+	the 15-minute retry cron (retry_failed_taxjar_syncs) covers Sales Invoices
 	only, never Customers.
 	"""
 	frappe.has_permission("Customer", "write", throw=True)
 	_ensure_taxjar_customer_fields()
 	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
+	_check_each(customers)
 
 	queued = 0
 	for name in customers:
