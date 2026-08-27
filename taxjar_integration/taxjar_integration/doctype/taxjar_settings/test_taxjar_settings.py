@@ -200,6 +200,32 @@ class _FakeDoc:
 		return self._onload[key] if key else self._onload
 
 
+# Doctypes the framework itself reads through frappe.db.get_value while doing
+# unrelated work - loading a Meta, resolving a custom field. A test stubbing
+# get_value must let these through.
+_FRAMEWORK_DOCTYPES = frozenset({"DocType", "DocField", "Custom Field", "Property Setter", "DocPerm"})
+
+
+def _scalar_get_value(value):
+	"""frappe.db.get_value stub answering the app's own lookups with `value`
+	while letting the framework's internal ones reach the real implementation.
+
+	frappe.get_meta() loads a DocType through frappe.db.get_value, so a blanket
+	`return_value=` hands the meta loader a scalar and it dies with "'str'
+	object has no attribute 'get'". It only bites when that meta is not already
+	cached, which depends on which tests ran first - so the blanket form fails
+	by test order rather than never.
+	"""
+	real = frappe.db.get_value
+
+	def side_effect(doctype, *args, **kwargs):
+		if doctype in _FRAMEWORK_DOCTYPES:
+			return real(doctype, *args, **kwargs)
+		return value
+
+	return side_effect
+
+
 def _make_doc(company="Test Co", taxes=None, currency="USD", items=None):
 	return _FakeDoc(company=company, taxes=taxes, currency=currency, items=items)
 
@@ -565,7 +591,7 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "Handling Fee", 20.0, idx=2)])
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value="Handling Charges",
+			side_effect=_scalar_get_value("Handling Charges"),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
 		self.assertEqual(len(result["synthetic_items"]), 1)
@@ -582,7 +608,7 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "Handling Fee", 20.0, idx=1)])
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value=None,
+			side_effect=_scalar_get_value(None),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
 		self.assertEqual(result["synthetic_items"][0]["description"], "5210 - Handling - TC - Handling Fee")
@@ -591,7 +617,7 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "", 20.0, idx=1)])
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value="Handling Charges",
+			side_effect=_scalar_get_value("Handling Charges"),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
 		self.assertEqual(result["synthetic_items"][0]["description"], "Handling Charges")
@@ -618,7 +644,7 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		])
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value="Handling",
+			side_effect=_scalar_get_value("Handling"),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
 		self.assertEqual(len(result["synthetic_items"]), 1)
@@ -635,7 +661,7 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		doc = _make_doc(taxes=[_make_tax_row("Handling - TC", "Fee", 5.0, idx=5)])
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value="Handling",
+			side_effect=_scalar_get_value("Handling"),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
 		self.assertEqual(result["synthetic_items"][0]["id"], 1005)
@@ -648,7 +674,7 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		config = self._config(shipping_head=None)
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value="Freight",
+			side_effect=_scalar_get_value("Freight"),
 		):
 			result = _classify_foreign_tax_rows(doc, config)
 		self.assertEqual(len(result["synthetic_items"]), 1)
@@ -795,7 +821,7 @@ class TestPreviewForeignTaxRows(UnitTestCase):
 		     patch(f"{self.MOD}.company_calculates_tax", return_value=calculates_tax), \
 		     patch(f"{self.MOD}.get_region", return_value=region), \
 		     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
-		     patch(f"{self.MOD}.frappe.db.get_value", return_value="Handling Charges"):
+		     patch(f"{self.MOD}.frappe.db.get_value", side_effect=_scalar_get_value("Handling Charges")):
 			return preview_foreign_tax_rows(doc_data)
 
 	def test_returns_empty_for_no_foreign_rows(self):
@@ -950,7 +976,7 @@ class TestCheckForNexus(UnitTestCase):
 	def test_returns_true_when_in_nexus(self):
 		doc = _make_doc(company="Acme Inc")
 		tax_dict = {"to_state": "CA"}
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="NX-1"), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("NX-1")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock()):
 			self.assertTrue(check_for_nexus(doc, tax_dict))
 
@@ -959,7 +985,7 @@ class TestCheckForNexus(UnitTestCase):
 		config.tax_account_head = "Sales Tax - TC"
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 50.0)])
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=config):
 			result = check_for_nexus(doc, {"to_state": "TX"})
 
@@ -1005,7 +1031,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -1030,7 +1056,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -1056,7 +1082,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -1087,7 +1113,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value="Wholesale"), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -1125,7 +1151,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch(f"{mod}.validate_tax_request", return_value=tax_data), \
 		     patch(f"{mod}._get_customer_exemption_type", return_value=None), \
 		     patch(f"{mod}._set_tax_status_fields", side_effect=capture), \
-		     patch(f"{mod}.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch(f"{mod}.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch(f"{mod}.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -1145,7 +1171,7 @@ class TestSetSalesTax(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=company_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"to_state": "TX", "dummy": True}), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)):
 			set_sales_tax(doc, None)
 
 		self.assertEqual(len([t for t in doc.taxes if t.account_head == "Sales Tax - TC"]), 0)
@@ -1198,7 +1224,7 @@ class TestSetSalesTaxCache(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data) as mock_validate, \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=settings_modified), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(settings_modified)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=cache):
 			set_sales_tax(doc, None)
 
@@ -1254,7 +1280,7 @@ class TestGetLineItemDict(UnitTestCase):
 		from taxjar_integration.taxjar_integration.taxjar_integration import get_line_item_dict
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value=item_master_category,
+			side_effect=_scalar_get_value(item_master_category),
 		):
 			return get_line_item_dict(item, docstatus=0)
 
@@ -1796,7 +1822,7 @@ class TestGetIso3166StateCode(UnitTestCase):
 
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value="US",
+			side_effect=_scalar_get_value("US"),
 		):
 			return get_iso_3166_2_state_code(address)
 
@@ -1884,7 +1910,7 @@ class TestValidateAddress(UnitTestCase):
 		from taxjar_integration.taxjar_integration.taxjar_integration import validate_address
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			return_value=country_code,
+			side_effect=_scalar_get_value(country_code),
 		), patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled",
 			return_value=False,
@@ -2738,7 +2764,7 @@ class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-		           return_value={"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"}):
+		           side_effect=_scalar_get_value({"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"})):
 			is_exempt, reason = check_sales_tax_exemption(doc, config)
 
 		self.assertTrue(is_exempt)
@@ -2753,7 +2779,7 @@ class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-		           return_value={"exempt_from_sales_tax": 0, "taxjar_exemption_type": None}):
+		           side_effect=_scalar_get_value({"exempt_from_sales_tax": 0, "taxjar_exemption_type": None})):
 			is_exempt, reason = check_sales_tax_exemption(doc, config)
 
 		self.assertFalse(is_exempt)
@@ -2804,7 +2830,7 @@ class TestGetCustomerExemptionType(UnitTestCase):
 	def _patch(self, exemption_type):
 		mod = "taxjar_integration.taxjar_integration.taxjar_integration"
 		return _patch_all(
-			patch(f"{mod}.frappe.db.get_value", return_value=exemption_type),
+			patch(f"{mod}.frappe.db.get_value", side_effect=_scalar_get_value(exemption_type)),
 			# No exempt regions listed: exempt wherever the sale ships.
 			patch(f"{mod}.frappe.get_all", return_value=[]),
 		)
@@ -3613,7 +3639,7 @@ class TestTransactionsPageRealtime(UnitTestCase):
 
 		with patch(f"{page_mod}.frappe.has_permission"), \
 		     patch(f"{page_mod}.frappe.db.has_column", return_value=True), \
-		     patch(f"{page_mod}.frappe.db.get_value", return_value="Failed"), \
+		     patch(f"{page_mod}.frappe.db.get_value", side_effect=_scalar_get_value("Failed")), \
 		     patch(f"{page_mod}.frappe.db.set_value"), \
 		     patch(f"{page_mod}.frappe.enqueue"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
@@ -3635,7 +3661,7 @@ class TestTransactionsPageRealtime(UnitTestCase):
 
 		with patch(f"{page_mod}.frappe.has_permission"), \
 		     patch(f"{page_mod}.frappe.db.has_column", return_value=True), \
-		     patch(f"{page_mod}.frappe.db.get_value", return_value="Synced"), \
+		     patch(f"{page_mod}.frappe.db.get_value", side_effect=_scalar_get_value("Synced")), \
 		     patch(f"{page_mod}.frappe.enqueue"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
 			bulk_retry(["SINV-0001"])
@@ -3786,7 +3812,7 @@ class TestCustomersPageRealtime(UnitTestCase):
 
 		with patch(f"{page_mod}.frappe.has_permission"), \
 		     patch(f"{page_mod}._ensure_taxjar_customer_fields"), \
-		     patch(f"{page_mod}.frappe.db.get_value", return_value="cust_1"), \
+		     patch(f"{page_mod}.frappe.db.get_value", side_effect=_scalar_get_value("cust_1")), \
 		     patch(f"{page_mod}.frappe.db.set_value"), \
 		     patch(f"{page_mod}.frappe.get_single", return_value=settings), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
@@ -3935,7 +3961,7 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 			_customer_master_exemption,
 		)
 		with patch(f"{mod}.frappe.db.has_column", return_value=True), \
-		     patch(f"{mod}.frappe.db.get_value", return_value="Wholesale"), \
+		     patch(f"{mod}.frappe.db.get_value", side_effect=_scalar_get_value("Wholesale")), \
 		     patch(f"{mod}.frappe.db.exists", return_value=False), \
 		     patch(f"{mod}.frappe.get_all", return_value=[frappe._dict(state="FL")]):
 			self.assertEqual(_customer_master_exemption("CUST-0001", None), ("Wholesale", None))
@@ -6717,7 +6743,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
 		)
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_any_call("taxjar_customer_id", "CUST-001")
@@ -6730,7 +6756,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			taxjar_customer_sync_error="", taxjar_last_synced="",
 		)
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_any_call("taxjar_customer_sync_status", "Synced")
@@ -6747,7 +6773,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
 		)
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_any_call("taxjar_customer_sync_status", "Synced")
@@ -6761,7 +6787,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
 		)
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_any_call("taxjar_customer_sync_error", "")
@@ -6774,7 +6800,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			taxjar_customer_sync_error="", taxjar_last_synced="",
 		)
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_not_called()
@@ -6797,7 +6823,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			taxjar_customer_sync_error="", taxjar_last_synced="",
 		)
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=db_values):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
 			on_customer_validate(doc, None)
 
 		doc.set.assert_not_called()
@@ -6975,6 +7001,12 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 
 		name = customers[0]["name"]
 		original = customers[0]["taxjar_exemption_type"]
+		# Captured, not just the type: restoring a region-scoped type without
+		# its regions is not a saveable state, so a run where an earlier test
+		# left this customer region-scoped would fail here rather than in
+		# whatever actually broke. Same capture-and-guard as
+		# test_bulk_clear_exemption and test_configure_exemption_applies_to_many.
+		original_regions = get_exempt_regions(name)
 		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
 		with patch(f"{mod}.frappe.enqueue"):
@@ -6987,7 +7019,9 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		self.assertEqual(get_exempt_regions(name), [])
 
 		with patch(f"{mod}.frappe.enqueue"):
-			configure_exemption([name], original or "")
+			regions = [{"country": r["country"], "state": r["state"]} for r in original_regions]
+			if original not in _EXEMPTION_TYPES_REQUIRING_REGIONS or regions:
+				configure_exemption([name], original or "", regions)
 
 	def test_configure_exemption_applies_to_many(self):
 		"""Other is a region-scoped type - at least one region is now mandatory
@@ -8155,7 +8189,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -8181,7 +8215,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
-				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 					set_sales_tax(doc, None)
 
@@ -8209,7 +8243,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
-				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 					set_sales_tax(doc, None)
 
@@ -8230,7 +8264,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="2026-01-01 00:00:00"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
 			set_sales_tax(doc, None)
 
@@ -8253,7 +8287,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=company_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"to_state": "TX", "dummy": True}), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None):
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)):
 			set_sales_tax(doc, None)
 
 		self.assertIsNone(doc.taxjar_breakdown_json)
@@ -9208,7 +9242,7 @@ class TestComputeProductTaxable(UnitTestCase):
 	def test_no_ptc_counts_as_taxable(self):
 		doc = _make_doc()
 		doc.items = [self._make_item_with_ptc(None)]
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)):
 			status, reason = _compute_product_taxable(doc)
 		self.assertEqual(status, "Yes")
 
@@ -9220,7 +9254,7 @@ class TestCheckForNexusStatusFields(UnitTestCase):
 		doc = _make_doc()
 		tax_dict = {"to_state": "DC", "from_city": "Austin", "from_state": "TX", "from_zip": "78701",
 		            "to_city": "Washington", "to_zip": "20001"}
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=config):
 			result = check_for_nexus(doc, tax_dict)
 		self.assertFalse(result)
@@ -9233,7 +9267,7 @@ class TestCheckForNexusStatusFields(UnitTestCase):
 		config = MagicMock(tax_account_head="Sales Tax - TC")
 		doc = _make_doc()
 		tax_dict = {"to_state": "DC"}
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=None), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=config):
 			check_for_nexus(doc, tax_dict)
 		self.assertIsNone(doc.taxjar_breakdown_json)
@@ -9241,7 +9275,7 @@ class TestCheckForNexusStatusFields(UnitTestCase):
 	def test_in_nexus_returns_true(self):
 		doc = _make_doc()
 		tax_dict = {"to_state": "CA"}
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="NX-1"), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("NX-1")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock()):
 			self.assertTrue(check_for_nexus(doc, tax_dict))
 
@@ -9254,7 +9288,7 @@ class TestExemptionReasonInTuple(UnitTestCase):
 		config = MagicMock(tax_account_head="Sales Tax - TC")
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-		           return_value={"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"}):
+		           side_effect=_scalar_get_value({"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"})):
 			is_exempt, reason = check_sales_tax_exemption(doc, config)
 		self.assertTrue(is_exempt)
 		self.assertIn("Wholesale", reason)
@@ -10837,7 +10871,7 @@ class TestResolveDefaultLedgers(UnitTestCase):
 
 	def test_returns_none_when_neither_found(self):
 		"""Non-standard chart of accounts: no account, no exception."""
-		with patch(f"{REGIONAL}.frappe.db.get_value", return_value=None):
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=_scalar_get_value(None)):
 			result = resolve_default_ledgers("Test Co")
 
 		self.assertIsNone(result["tax_account_head"])
@@ -11165,7 +11199,7 @@ class TestDisableDefaultUsTemplates(UnitTestCase):
 			self.assertEqual(call.args[2], {"is_default": 0, "disabled": 1})
 
 	def test_noop_when_none_present(self):
-		with patch(f"{REGIONAL}.frappe.db.get_value", return_value=None), \
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=_scalar_get_value(None)), \
 		     patch(f"{REGIONAL}.frappe.db.set_value") as mock_set:
 			_disable_default_us_templates("Test Co")
 
@@ -11174,7 +11208,7 @@ class TestDisableDefaultUsTemplates(UnitTestCase):
 	def test_does_not_touch_similarly_named_custom_template(self):
 		"""Only the three exact literal titles are ever matched - a user's own
 		template named e.g. "US ST 6% (custom)" is untouched."""
-		with patch(f"{REGIONAL}.frappe.db.get_value", return_value=None) as mock_get:
+		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=_scalar_get_value(None)) as mock_get:
 			_disable_default_us_templates("Test Co")
 
 		queried_titles = {c.args[1]["title"] for c in mock_get.call_args_list}
