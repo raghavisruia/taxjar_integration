@@ -24,18 +24,6 @@ const STATUS_COLORS = {
 	Queued: "blue",
 };
 
-// A region-scoped exemption (Wholesale/Government/Other) shares one color;
-// Non Exempt gets its own - neither is a region-scoped exemption, so neither
-// belongs in that color's group. "" (not configured) is neutral grey, not a
-// configured answer at all.
-const EXEMPTION_TYPE_COLORS = {
-	"": "gray",
-	Wholesale: "blue",
-	Government: "blue",
-	Other: "blue",
-	"Non Exempt": "amber",
-};
-
 const SYNC_UPDATE_EVENT = "taxjar_customers_update";
 
 // Whether an exemption is configured is the tab, not a filter - so there is
@@ -352,14 +340,18 @@ class TaxJarCustomerConfig {
 				label: __("TaxJar Customer ID"),
 				fieldname: "taxjar_customer_id",
 				width: 170,
-				// Empty means no successful create in TaxJar yet, which is a
-				// state worth naming rather than an empty cell.
+				// Empty means no successful create in TaxJar yet - a dash,
+				// same as every other empty cell in this table, rather than
+				// a word that reads as its own status.
 				_html: (value) =>
 					value
 						? `<span class="taxjar-customer-id">${frappe.utils.escape_html(value)}</span>`
-						: `<span class="text-muted">${__("NA")}</span>`,
+						: `<span class="text-muted">-</span>`,
 			},
-			{ label: __("Customer Group"), fieldname: "customer_group", width: 160 },
+			{
+				label: __("Customer Group"), fieldname: "customer_group", width: 160,
+				_html: (value) => frappe.utils.escape_html(value || "-"),
+			},
 		];
 
 		columns.push({
@@ -397,10 +389,15 @@ class TaxJarCustomerConfig {
 		return columns;
 	}
 
+	// Plain text, not a badge - blank is a common enough state (it's what
+	// the whole Not Configured tab is) that a colored pill on every row read
+	// as noisier status signalling than this column actually carries. A
+	// dash, same as every other empty cell in this table, rather than the
+	// word "Not Configured" repeating what the tab itself already says.
 	render_exemption_type_cell(value) {
-		const label = value || __("Not Configured");
-		const color = EXEMPTION_TYPE_COLORS[value || ""] || "gray";
-		return frappe.ui.badge.html({ label: __(label), theme: color });
+		return value
+			? frappe.utils.escape_html(value)
+			: `<span class="text-muted">-</span>`;
 	}
 
 	// The pencil is on every row, including rows with no exemption type - it

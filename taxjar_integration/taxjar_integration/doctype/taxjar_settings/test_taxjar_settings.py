@@ -4738,9 +4738,13 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		js = self._js()
 		self.assertIn('__("TaxJar Customer ID")', js)
 		self.assertIn('fieldname: "taxjar_customer_id"', js)
-		# Empty means no successful create in TaxJar yet - a state worth naming
-		# rather than an empty cell.
-		self.assertIn('__("NA")', js)
+		# Empty means no successful create in TaxJar yet - a dash, same as
+		# every other empty cell in this table. Scoped to get_columns(), not
+		# the whole file - SEARCH_FIELDS has its own, unrelated "TaxJar
+		# Customer ID" label for the header search field.
+		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
+		id_fn = columns_fn.split('fieldname: "taxjar_customer_id"')[1].split("},")[0]
+		self.assertIn('<span class="text-muted">-</span>', id_fn)
 
 	def test_regions_pencil_shows_on_every_row(self):
 		"""An affordance that disappears reads as "nothing to do here", when the
@@ -4765,13 +4769,14 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		"""The Configure cell is the only way to set an exemption, so hiding it
 		on the Not Configured tab would make exactly the customers that need one
 		the only ones you could not give one to. Exemption Type stays too, and
-		renders blank as "Not Configured" rather than being dropped."""
+		renders blank as a dash rather than being dropped."""
 		js = self._js()
 		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
 		self.assertNotIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", columns_fn)
 		self.assertIn('__("Exemption Type")', columns_fn)
 		self.assertIn('__("Configure")', columns_fn)
-		self.assertIn('value || __("Not Configured")', js)
+		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
+		self.assertIn('<span class="text-muted">-</span>', cell_fn)
 		# Clearing, unlike configuring, IS meaningless there - that guard lives
 		# on the bulk actions and must stay.
 		bulk_fn = js.split("\tupdate_bulk_state() {")[1].split("\n\t}\n")[0]
@@ -4818,23 +4823,19 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		self.assertNotIn("taxjar-exemption-select", js)
 		self.assertNotIn("set_exemption_type", js)
 
-	def test_exemption_type_renders_as_a_pill(self):
-		"""Three states, three readings: a region-scoped exemption
-		(Wholesale/Government/Other) is blue, an explicit "Non Exempt" decision
-		is amber, and blank is neutral gray because it is not an answer at all
-		- the page gives it its own tab for the same reason. frappe.ui.badge,
-		not the old indicator-pill - "amber"/"gray" are the Espresso theme
-		names (badge-legacy-colors.css maps the old "yellow"/"grey" through,
-		but new code should spell the real theme name)."""
+	def test_exemption_type_renders_as_plain_text(self):
+		"""Not a badge/pill - blank is common enough (it's the whole Not
+		Configured tab) that a colored status pill on every row would read
+		as noisier signalling than this column actually carries. Blank
+		renders as a muted dash, same as every other empty cell in this
+		table, rather than repeating the word the tab itself already says."""
 		js = self._js()
 		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
-		self.assertIn("frappe.ui.badge.html(", cell_fn)
+		self.assertNotIn("frappe.ui.badge", cell_fn)
 		self.assertNotIn("indicator-pill", cell_fn)
-		colors_block = js.split("const EXEMPTION_TYPE_COLORS = {")[1].split("};")[0]
-		self.assertIn('"": "gray"', colors_block)
-		self.assertIn('"Non Exempt": "amber"', colors_block)
-		for exempt_type in ("Wholesale", "Government", "Other"):
-			self.assertIn(f'{exempt_type}: "blue"', colors_block)
+		self.assertNotIn("EXEMPTION_TYPE_COLORS", js)
+		self.assertIn("frappe.utils.escape_html(value)", cell_fn)
+		self.assertIn('<span class="text-muted">-</span>', cell_fn)
 
 	def test_regions_uses_the_desk_pencil_icon(self):
 		"""A text glyph's size and baseline shift from platform to platform.
