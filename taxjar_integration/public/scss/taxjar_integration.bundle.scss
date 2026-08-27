@@ -217,6 +217,18 @@
 	cursor: not-allowed;
 }
 
+// ── Customer page: Configure column ──────────────────────────────────────
+// The region count prefixes the pencil icon and only shows once a row has
+// configured regions - without a reserved width, the icon visibly shifts
+// left/right as the count goes from blank to 1 digit to 2 digits. 2ch fits
+// a two-digit count (this app caps regions well under 100 per customer);
+// right-aligned so the icon itself always sits flush against it.
+.taxjar-region-count {
+	display: inline-block;
+	min-width: 2ch;
+	text-align: right;
+}
+
 // ── Tab row ───────────────────────────────────────────────────────────────
 // frappe draws the tab titles in .form-tabs-list; the page hangs its own
 // controls (selection count, Bulk Action) on the right of the same row.

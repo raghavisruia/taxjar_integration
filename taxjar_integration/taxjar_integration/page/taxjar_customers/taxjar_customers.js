@@ -356,6 +356,14 @@ class TaxJarCustomerConfig {
 	get_columns() {
 		const columns = [
 			{
+				label: __("Customer Name"),
+				fieldname: "customer_name",
+				_html: (value, row) =>
+					`<a href="/app/customer/${encodeURIComponent(row.name)}">${frappe.utils.escape_html(
+						value || row.name
+					)}</a>`,
+			},
+			{
 				label: __("TaxJar Customer ID"),
 				fieldname: "taxjar_customer_id",
 				width: 170,
@@ -365,14 +373,6 @@ class TaxJarCustomerConfig {
 					value
 						? `<span class="taxjar-customer-id">${frappe.utils.escape_html(value)}</span>`
 						: `<span class="text-muted">${__("NA")}</span>`,
-			},
-			{
-				label: __("Customer Name"),
-				fieldname: "customer_name",
-				_html: (value, row) =>
-					`<a href="/app/customer/${encodeURIComponent(row.name)}">${frappe.utils.escape_html(
-						value || row.name
-					)}</a>`,
 			},
 			{ label: __("Customer Group"), fieldname: "customer_group", width: 160 },
 		];
@@ -428,11 +428,15 @@ class TaxJarCustomerConfig {
 	render_regions_cell(row) {
 		const count = row.exempt_region_count || 0;
 
+		// The count span always renders, blank or not - a fixed-width slot
+		// (see .taxjar-region-count in the stylesheet) keeps the pencil icon
+		// planted in the same spot whether the row has 0, 1, or 2+ regions,
+		// instead of the icon visibly shifting with the digit count.
 		return `<button type="button"
 			class="taxjar-configure-link"
 			data-customer="${frappe.utils.escape_html(row.name)}"
 			title="${__("Configure exemption")}"
-			>${count || ""}${frappe.utils.icon("square-pen", "sm")}</button>`;
+			><span class="taxjar-region-count">${count || ""}</span>${frappe.utils.icon("square-pen", "sm")}</button>`;
 	}
 
 	// Failed pairs the pill with a separate info icon (never nested inside the
