@@ -4753,16 +4753,21 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		self.assertNotIn("taxjar_exemption_type", handler)
 		self.assertIn("open_configure_dialog", handler)
 
-	def test_not_configured_tab_drops_the_dead_columns(self):
-		"""Exemption Type and Configure would read "Not set" / "—" on every
-		row of that tab - each gated by its own guard now that Sync Status
-		(unconditional) sits between them."""
+	def test_exemption_columns_show_on_every_tab_including_not_configured(self):
+		"""The Configure cell is the only way to set an exemption, so hiding it
+		on the Not Configured tab would make exactly the customers that need one
+		the only ones you could not give one to. Exemption Type stays too, and
+		renders blank as "Not Configured" rather than being dropped."""
 		js = self._js()
 		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
-		guards = columns_fn.count("if (this.active_tab !== NOT_CONFIGURED_TAB) {")
-		self.assertEqual(guards, 2)
+		self.assertNotIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", columns_fn)
 		self.assertIn('__("Exemption Type")', columns_fn)
 		self.assertIn('__("Configure")', columns_fn)
+		self.assertIn('value || __("Not Configured")', js)
+		# Clearing, unlike configuring, IS meaningless there - that guard lives
+		# on the bulk actions and must stay.
+		bulk_fn = js.split("\tupdate_bulk_state() {")[1].split("\n\t}\n")[0]
+		self.assertIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", bulk_fn)
 		# Sync Status sits between the two guarded blocks, and belongs to
 		# neither - it shows on every tab, including this one.
 		exemption_idx = columns_fn.index('__("Exemption Type")')
@@ -4806,14 +4811,15 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		self.assertNotIn("set_exemption_type", js)
 
 	def test_exemption_type_renders_as_a_pill(self):
-		"""Region-scoped exemptions share one colour; Non Exempt and blank
-		(not configured) share the other - neither is a region-scoped
-		exemption."""
+		"""Three states, three readings: a region-scoped exemption
+		(Wholesale/Government/Other) is blue, an explicit "Non Exempt" decision
+		is yellow, and blank is neutral grey because it is not an answer at all
+		- the page gives it its own tab for the same reason."""
 		js = self._js()
 		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
 		self.assertIn("indicator-pill", cell_fn)
 		colors_block = js.split("const EXEMPTION_TYPE_COLORS = {")[1].split("};")[0]
-		self.assertIn('"": "yellow"', colors_block)
+		self.assertIn('"": "grey"', colors_block)
 		self.assertIn('"Non Exempt": "yellow"', colors_block)
 		for exempt_type in ("Wholesale", "Government", "Other"):
 			self.assertIn(f'{exempt_type}: "blue"', colors_block)
@@ -7504,8 +7510,14 @@ class TestProductTaxCategorySummary(UnitTestCase):
 		with open(path) as f:
 			js = f.read()
 
-		self.assertIn("frappe.datetime.str_to_user(summary.last_updated)", js)
-		self.assertNotIn("frappe.datetime.comment_when(summary.last_updated)", js)
+		# The call now lives in the shared _format_last_synced() helper (Nexus
+		# and Product Tax Category ask the same question), so assert the route
+		# rather than one inlined call site.
+		formatter = js.split("function _format_last_synced(value) {")[1].split("}")[0]
+		self.assertIn("frappe.datetime.str_to_user(value)", formatter)
+		self.assertIn("_format_last_synced(summary.last_updated)", js)
+		# Only as the comment explaining why it is not used - never as a call.
+		self.assertNotIn("frappe.datetime.comment_when(", js)
 
 
 class TestRefreshProductTaxCategories(UnitTestCase):
@@ -9955,13 +9967,15 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("log_retention_days", save_connect)
 
 	def test_review_shows_api_log_status(self):
-		"""Two separate pills - "Enabled" and "N day(s) retention" - not one
-		combined "On · retain Nd" string."""
+		"""The Review step reports whether logging is on and for how long, and
+		the retention figure pluralises - "1 days retention" is the bug this
+		guards."""
 		js = self._js()
-		self.assertIn('__("API Logs")', js)
-		self.assertIn('__("Enabled")', js)
+		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
+		self.assertIn('__("API Logs")', review)
 		self.assertIn(
-			'__("{0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])', js
+			'__("Enabled · {0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])',
+			review,
 		)
 
 	def test_gated_continue_stays_clickable_and_explains_itself(self):
@@ -10009,35 +10023,31 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("c.company", gate)
 		self.assertNotIn("c.controls.company.get_value()", gate)
 
-	def test_test_connection_button_is_not_plain_default(self):
-		"""Visually elevated above a plain .btn-default so it reads as the
-		action that actually matters before Continue unlocks."""
-		css = self._setup_css()
-		self.assertIn(".ts-test {", css)
+	def test_connect_button_is_not_a_plain_default(self):
+		"""It is the action that actually matters before Continue unlocks, so
+		it carries a variant of its own rather than falling back to the
+		framework's default button styling."""
+		js = self._js()
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		idle = fn.rsplit("} else {", 1)[1]
+		self.assertIn('label: __("Connect")', idle)
+		self.assertIn('variant: "outline"', idle)
 
-	def test_only_the_page_cta_is_ink_coloured(self):
-		"""--text-color as a fill or a border is reserved for .ts-next
-		("Save & continue"). Connect used to carry a 1.5px ink border and the
-		active Sandbox/Live segment an ink fill, which put two more things on
-		the Connect step wearing the primary action's colour - the segment in
-		particular read as "Live is the way forward" rather than "Live is
-		selected". Weight and lift carry those two instead.
-		"""
-		css = self._setup_css()
-
-		cta = css.split(".taxjar-setup .ts-next.btn-dark {")[1].split("}")[0]
-		self.assertIn("var(--text-color)", cta)
-
-		test_btn = css.split(".taxjar-setup .ts-test {")[1].split("}")[0]
-		self.assertIn("border: 1px solid var(--border-color);", test_btn)
-		self.assertNotIn("border: 1.5px solid var(--text-color)", test_btn)
-		# Bold text is what still sets it apart from a plain .btn-default.
-		self.assertIn("font-weight: 600;", test_btn)
-
-		seg = css.split(".taxjar-setup .ts-seg-btn.ts-seg-active {")[1].split("}")[0]
-		self.assertIn("background: var(--card-bg);", seg)
-		self.assertIn("box-shadow:", seg)
-		self.assertNotIn("background: var(--text-color)", seg)
+	def test_only_the_page_cta_is_a_solid_button(self):
+		"""The filled treatment is reserved for "Continue". Connect and the
+		Sandbox/Live segment used to wear ink too, which read as "this is the
+		way forward" rather than "this is selected"; both are outline now, so
+		exactly one control on the page is solid."""
+		js = self._js()
+		self.assertEqual(js.count('variant: "solid"'), 1)
+		cta = js.split('.find(".ts-next-mount").append(')[1].split("}));")[0]
+		self.assertIn('label: __("Continue")', cta)
+		self.assertIn('variant: "solid"', cta)
+		# and the two that used to compete with it are not.
+		action = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		self.assertNotIn('variant: "solid"', action)
+		toggle = js.split("_render_mode_toggle($parent, initial) {")[1].split("\n\t}\n")[0]
+		self.assertNotIn('variant: "solid"', toggle)
 
 	def test_connect_excludes_already_added_companies_via_get_query(self):
 		js = self._js()
@@ -10049,37 +10059,25 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 	# (per latest user feedback, superseding v3's shared top-row/divider) ──
 
 	def test_connect_mode_is_a_segmented_toggle_not_a_dropdown(self):
-		"""Sandbox/Live is a binary choice, shown as a two-button pill toggle
-		instead of hiding one option behind a closed <select> dropdown -
-		_render_mode_toggle is a hand-built stand-in exposing only the
-		get_value/set_value subset the rest of the file calls on
-		this.controls.mode, not a real frappe control (so no native
-		show_description_on_click/InfoCard for it - the label+description
-		are hand-authored instead, same as Enable API logs)."""
+		"""Sandbox/Live is a binary choice, shown as a segmented toggle rather
+		than hiding one option behind a closed <select>. Built on frappe's own
+		tab_buttons component; _render_mode_toggle still wraps it in the
+		get_value/set_value pair the rest of the file calls on
+		this.controls.mode."""
 		js = self._js()
 		self.assertNotIn('fieldtype: "Select", fieldname: "api_mode"', js)
-		self.assertIn(
-			'this.controls.mode = this._render_mode_toggle(this.$body.find(".ts-field-mode"), s.api_mode || "Live");',
-			js,
-		)
 		toggle_fn = js.split("_render_mode_toggle($parent, initial) {")[1].split("\n\t}\n")[0]
-		self.assertIn('data-value="Sandbox"', toggle_fn)
-		self.assertIn('data-value="Live"', toggle_fn)
-		self.assertIn("get_value: () => value,", toggle_fn)
-		self.assertIn("set_value: (v) => { value = v; setActive(); },", toggle_fn)
-		# A real click drives _on_mode_change() directly - no $input "change"
-		# event to bind, since this isn't a real frappe control.
-		self.assertIn("this._on_mode_change();", toggle_fn)
-
-		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
-		mode_card = render_connect.split('<div class="ts-field-mode">')[0]
-		self.assertIn('<label class="control-label">', mode_card)
-		self.assertIn('<span class="ts-reqd">*</span>', mode_card)
-		# Label only: the note that used to sit under it is gone, and so is the
+		self.assertIn("frappe.ui.tab_buttons({", toggle_fn)
+		self.assertIn('{ label: __("Sandbox"), value: "Sandbox" }', toggle_fn)
+		self.assertIn('{ label: __("Live"), value: "Live" }', toggle_fn)
+		self.assertIn("get_value: () => tabButtons.get_value()", toggle_fn)
+		self.assertIn("set_value: (v) => tabButtons.set_value(v, { silent: true })", toggle_fn)
+		# Changing the segment drives _on_mode_change() directly.
+		self.assertIn("on_change: () => this._on_mode_change()", toggle_fn)
+		# The note that used to sit under the label is gone, and so is the
 		# info-icon tooltip that briefly replaced it.
-		self.assertNotIn("ts-fieldnote", mode_card)
-		self.assertNotIn("Live requests affect real filings", self._js())
-		self.assertNotIn("info-trigger", self._js())
+		self.assertNotIn("Live requests affect real filings", js)
+		self.assertNotIn("info-trigger", js)
 
 	def test_connect_logs_card_sits_below_api_credentials(self):
 		"""Enable API logs' position has moved a few times across rounds
@@ -10185,17 +10183,11 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		shell = js.split("_build_shell() {")[1].split("`).appendTo(this.page.main);")[0]
 
 		head = shell.split('<header class="ts-head">')[1].split("</header>")[0]
-		self.assertIn("ts-intervals", head)
+		self.assertIn("ts-rail", head)
 		self.assertNotIn("ts-title", head)
 
 		self.assertLess(shell.index("</header>"), shell.index('<h2 class="ts-title">'))
 		self.assertLess(shell.index('<h2 class="ts-title">'), shell.index('<div class="ts-body">'))
-
-		css = self._setup_css()
-		# The rail's old 24px top margin separated it from the heading above it;
-		# as .ts-head's only child, the header's padding does that now.
-		rail = css.split(".taxjar-setup .ts-progress {")[1].split("}")[0]
-		self.assertIn("margin: 0;", rail)
 
 	def test_descriptions_are_not_capped_below_the_panel_width(self):
 		"""A 60ch measure on .ts-fieldnote broke every step's description onto a
@@ -10287,25 +10279,17 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		js = self._js()
 		self.assertIn('const $retentionField = this.$body.find(".ts-retention-row");', js)
 
-	def test_info_popover_is_click_to_show_not_hover(self):
-		"""The info popover is built and shown from a real click handler
-		(delegated once in _build_shell, not rebound per render), not a CSS
-		:hover rule - works the same on touch and desktop."""
-		js = self._js()
-		self.assertIn('this.$root.on("click", ".ts-info-btn"', js)
-		self.assertIn("_toggle_info_popover", js)
-		import os
-		path = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
-		css = open(path).read()
+	def test_no_hover_only_affordances_remain(self):
+		"""Whatever explains a failure has to work on touch as well as desktop.
+		The click-driven info popover this used to guard is gone - the reason
+		now lives on the token field itself - so what is left to assert is that
+		nothing reintroduced a hover-only replacement."""
+		css = self._setup_css()
 		self.assertNotIn(":hover .ts-info-pop", css)
 		self.assertNotIn(".ts-info-pop:hover", css)
+		self.assertNotIn(".ts-info-btn", css)
 
-	def test_info_popover_toggles_closed_on_second_click_of_same_button(self):
-		js = self._js()
-		fn = js.split("_toggle_info_popover($trigger) {")[1].split("\n\t}\n")[0]
-		self.assertIn('const reopening = $trigger.hasClass("ts-info-btn-active");', fn)
-		self.assertIn("if (reopening) return;", fn)
+	
 
 	def test_connect_retention_default_is_fifteen_and_shows_pluralised_unit(self):
 		"""Default is 15 days, and the "day"/"days" unit word is a separate
@@ -10347,21 +10331,22 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		)
 
 	def test_connect_add_company_button_lives_below_the_rows(self):
-		"""'+ Add another company' sits in its own .ts-cred-add-row below the
+		"""'Add another company' mounts into its own .ts-cred-add-row below the
 		credential rows, not inside the clickable .ts-cred-heading - so it is
 		only ever reachable while the section is already expanded, and its
-		click handler needs no stopPropagation or force-expand to guard
-		against also toggling the heading's own collapse."""
+		click needs no stopPropagation to avoid also toggling the collapse."""
 		js = self._js()
 		render_connect = js.split("_render_connect() {")[1].split("\n\t\tthis.controls.mode")[0]
 		heading = render_connect.split('<div class="ts-card-h ts-cred-heading">')[1].split("</div>")[0]
-		self.assertNotIn("ts-add-cred", heading)
-		add_row = render_connect.split('<div class="ts-card-b ts-cred-add-row">')[1].split("</div>")[0]
-		self.assertIn("ts-add-cred", add_row)
-		add_click = js.split('this.$body.find(".ts-add-cred").on("click", () => {')[1].split("\n\t\t});")[0]
-		self.assertNotIn("stopPropagation", add_click)
-		self.assertNotIn("_set_creds_expanded", add_click)
-		self.assertIn("this._add_credential_card({ company: null, token_last4: null });", add_click)
+		self.assertNotIn("ts-cred-add-row", heading)
+		# Rows first, then the add row - both siblings inside the card.
+		self.assertLess(
+			render_connect.index("ts-cred-rows"), render_connect.index("ts-cred-add-row")
+		)
+		add_mount = js.split('.find(".ts-cred-add-row")')[1].split(";")[0]
+		self.assertIn("frappe.ui.button", add_mount)
+		self.assertNotIn("stopPropagation", add_mount)
+		self.assertIn("this._add_credential_card({ company: null, token_last4: null })", js)
 
 	def test_connect_credentials_section_starts_expanded(self):
 		"""Required step - starting collapsed would just cost an extra click
@@ -10446,77 +10431,71 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		on_mode_change = js.split("_on_mode_change() {")[1].split("\n\t}\n")[0]
 		self.assertNotIn("tokenCtrl.df.description", on_mode_change)
 
-	def test_connect_test_connection_pill_replaces_button_on_result(self):
-		"""_render_cred_action cycles the action slot through an idle "Connect"
-		button, a green Success pill, and a yellow Retry pill - the pill
-		replaces the button rather than sitting beside it."""
+	def test_connect_result_replaces_the_button_rather_than_joining_it(self):
+		"""The action slot cycles through one control at a time - an idle
+		"Connect" button, a green verified badge, a red retry button - by
+		emptying the slot and appending a single replacement, never stacking
+		two controls side by side."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
-		self.assertIn('$action.html(`<span class="ts-chip ok ts-cred-pill">', fn)
-		self.assertIn('$action.html(`<button type="button" class="btn btn-default ts-test">${__("Connect")}</button>`);', fn)
-		self.assertIn('<span class="ts-chip retry ts-cred-pill">${__("Retry")}</span>', fn)
+		self.assertIn('.find(".ts-cred-action").empty()', fn)
+		self.assertEqual(fn.count("$action.append("), 3)
+		self.assertIn('theme: "green"', fn)
+		self.assertIn('label: __("Connect")', fn)
+		self.assertIn('tooltip: __("Retry")', fn)
 
-	def test_connect_failed_state_shows_warning_icon_outside_the_pill(self):
-		"""The warning icon is a sibling of the Retry pill, not nested inside
-		it - so clicking the icon (to see the failure reason) is never also
-		routed through the pill's own click-to-retry handler."""
+	def test_connect_failure_reason_surfaces_on_the_token_field(self):
+		"""A failed connection has to say why. It no longer does that through a
+		bespoke info popover beside the action slot - the reason is set on the
+		token field itself (df.invalid + set_description, frappe's native
+		invalid-field primitive), so the message sits next to the input the user
+		has to correct rather than behind a second click."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
-		failed_branch = fn.split("else if (entry.lastError) {")[1].split("} else {")[0]
-		# The info button call comes before the pill span, and is not nested
-		# inside its <span> tag.
-		self.assertLess(
-			failed_branch.index("this._info_btn_html(entry.lastError)"),
-			failed_branch.index('<span class="ts-chip retry ts-cred-pill">'),
-		)
-		self.assertNotIn(
-			'<span class="ts-chip retry ts-cred-pill">${this._info_btn_html', failed_branch
-		)
-		self.assertIn("this._info_btn_html(entry.lastError)", fn)
-		# Triangle-alert (a warning icon), not the plain info icon used
-		# elsewhere - the failure state reads as a warning, not neutral info.
-		# "md" (20px), not "xs" (12px) - too small to read as a warning at a
-		# glance next to normal body text.
-		info_btn_fn = js.split("_info_btn_html(text) {")[1].split("\n\t}\n")[0]
-		self.assertIn('frappe.utils.icon("triangle-alert", "md")', info_btn_fn)
-		import os
-		path = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
-		css = open(path).read()
-		info_btn_rule = css.split(".taxjar-setup .ts-info-btn {")[1].split("}")[0]
-		self.assertIn("width: 26px", info_btn_rule)
-		self.assertIn("height: 26px", info_btn_rule)
+		# Every render pushes the current error (or clears it) onto the field.
+		self.assertIn("this._set_token_error(entry, entry.lastError);", fn)
+		setter = js.split("_set_token_error(entry, message) {")[1].split("\n\t}\n")[0]
+		self.assertIn("df.invalid", setter)
+		self.assertIn("set_description", setter)
+		# The old popover machinery is gone, not merely unused.
+		self.assertNotIn("_info_btn_html", js)
+		self.assertNotIn("_toggle_info_popover", js)
 
-	def test_retry_pill_is_visually_distinct_yellow_not_the_neutral_warn_chip(self):
-		""".warn stays the neutral "in progress" chip (the Connect spinner and
-		the unrelated Nexus fetch-status chip both still use it) - the new
-		Retry state needed to be actually yellow, so it gets its own .retry
-		class rather than repurposing .warn and silently recolouring those
-		other two spinners too."""
-		import os
-		path = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
-		css = open(path).read()
-		retry_rule = css.split(".taxjar-setup .ts-chip.retry {")[1].split("}")[0]
-		self.assertIn("yellow", retry_rule)
-		warn_rule = css.split(".taxjar-setup .ts-chip.warn {")[1].split("}")[0]
-		self.assertNotIn("yellow", warn_rule)
+	def test_retry_state_is_visually_distinct_from_the_neutral_states(self):
+		"""The failed state needed to read as failed, not as another neutral
+		"in progress" chip. It carries its own theme and its own icon, and is
+		the only state in the slot that does."""
+		js = self._js()
+		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
+		failed = fn.split("} else if (entry.lastError) {")[1].split("} else {")[0]
+		self.assertIn('theme: "red"', failed)
+		self.assertIn('icon: "refresh-cw"', failed)
+		# Verified is the other themed state, and it is a different colour.
+		verified = fn.split("if (entry.tested) {")[1].split("} else if")[0]
+		self.assertIn('theme: "green"', verified)
+		self.assertNotIn('theme: "red"', verified)
 
 	def test_connect_button_renamed_to_connect(self):
 		"""The idle action-slot button reads "Connect", not "Test connection"."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
-		self.assertIn('${__("Connect")}</button>', fn)
+		self.assertIn('label: __("Connect")', fn)
 		self.assertNotIn("Test connection", fn)
 
-	def test_connect_pill_click_retests(self):
-		"""Clicking either result pill re-runs the test - the same handler as
-		the idle button, just bound to whichever element ends up in the slot."""
+	def test_connect_action_slot_retests_in_every_state(self):
+		"""Verified and failed both stay clickable - the same _test_connection
+		handler as the idle button, so a stale Success or a failure can always
+		be re-checked without reloading the wizard."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
-		self.assertIn(
-			'$action.find(".ts-test, .ts-cred-pill").on("click", () => this._test_connection(entry));', fn
-		)
+		for branch in ("if (entry.tested) {", "} else if (entry.lastError) {", "} else {"):
+			self.assertIn(branch, fn)
+		# Failed and idle wire the handler inline; the verified badge is
+		# non-interactive markup on its own, so _build_status_badge does the
+		# click/keyboard wiring for that one.
+		self.assertEqual(fn.count("onclick: () => this._test_connection(entry)"), 2)
+		badge = js.split("_build_status_badge(entry, {")[1].split("\n\t}\n")[0]
+		self.assertIn("this._test_connection(entry)", badge)
 
 	def test_connect_edits_fall_back_through_reset_cred_status_to_idle_button(self):
 		"""Editing company or token after a test must clear lastError too, not
@@ -10528,13 +10507,13 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("this._render_cred_action(entry);", fn)
 
 	def test_connect_css_supports_credentials_section_and_rows(self):
-		import os
-		path = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
-		css = open(path).read()
+		"""The credentials heading is the collapse target and its chevron turns
+		when open. The pill's own cursor rule is gone with the pill - the action
+		slot now holds frappe.ui.button/badge, which carry their own affordance."""
+		css = self._setup_css()
 		self.assertIn(".taxjar-setup .ts-cred-heading { cursor: pointer; justify-content: flex-start; }", css)
 		self.assertIn(".taxjar-setup .ts-acc-chevron-open { transform: rotate(90deg); }", css)
-		self.assertIn(".taxjar-setup .ts-cred-pill { cursor: pointer; }", css)
+		self.assertNotIn(".ts-cred-pill", css)
 
 	def test_accounts_step_uses_company_scoped_account_links(self):
 		js = self._js()
@@ -10556,14 +10535,15 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("_fetch_nexus", js)
 		self.assertIn("_render_nexus_groups", js)
 
-	def test_nexus_note_uses_framework_alert_warning_not_bespoke_banner(self):
-		"""A locally-invented .ts-banner box (custom border/background) reused
-		the framework's own .alert.alert-warning instead - the same themed,
-		light/dark-aware component used elsewhere in the desk (e.g. the
-		doctype permissions "customized" banner), rather than reinventing a
-		yellow box with hand-picked colors."""
+	def test_nexus_note_uses_the_framework_alert_not_a_bespoke_banner(self):
+		"""A locally-invented .ts-banner box (hand-picked border/background)
+		replaced by frappe's own alert component - themed and light/dark aware
+		without this page picking any colours itself."""
 		js = self._js()
-		self.assertIn('class="alert alert-warning ts-nexusnote" role="alert"', js)
+		self.assertIn('<div class="ts-nexusnote-mount"></div>', js)
+		mount = js.split('.find(".ts-nexusnote-mount").append(')[1].split("}));")[0]
+		self.assertIn("frappe.ui.alert({", mount)
+		self.assertIn('theme: "blue"', mount)
 		self.assertNotIn("ts-banner", js)
 
 	def test_token_label_reads_tracked_mode_not_control_mid_flight(self):
@@ -10586,13 +10566,11 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("this._modeIsLive = live;", on_mode_change)
 
 	def test_credential_card_starts_saved_triggers_a_fresh_test(self):
-		"""A company with a stored token must not show a stale "Success" pill
-		just because a token exists - the token could have been edited
-		directly on the TaxJar Settings form since this wizard last ran.
-		Every card starts untested and, if a token was already saved,
-		immediately re-verifies it against TaxJar via the same
-		_test_connection path a manual click uses - a real check, not a
-		re-display of whatever the last check happened to find."""
+		"""A company with a stored token must not show a stale verified state
+		just because a token exists - it could have been edited on the TaxJar
+		Settings form since this wizard last ran. Every card starts untested
+		and, if a token was already saved, immediately re-verifies it through
+		the same _test_connection path a manual click uses."""
 		js = self._js()
 		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t}\n")[0]
 		self.assertIn("const alreadySaved = !!cred.token_last4;", add_card)
@@ -10602,8 +10580,11 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		)
 		self.assertIn("if (alreadySaved) {", add_card)
 		self.assertIn("this._test_connection(entry);", add_card)
+		# ...and only a real result paints the verified badge.
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
-		self.assertIn('$action.html(`<span class="ts-chip ok ts-cred-pill"><span class="ts-chip-dot"></span> ${__("Success")}</span>`);', fn)
+		verified = fn.split("if (entry.tested) {")[1].split("} else if")[0]
+		self.assertIn("_build_status_badge", verified)
+		self.assertIn('theme: "green"', verified)
 
 	def test_test_connection_reads_entry_company_not_the_control(self):
 		"""The auto re-test above fires synchronously right after
@@ -10682,13 +10663,16 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		render_nexus = js.split("_render_nexus(")[1].split("\n\t_render_nexus_groups(")[0]
 		self.assertIn("this._fetch_nexus()", render_nexus)
 
-	def test_fetch_nexus_status_pluralises_region_and_company(self):
-		"""1 region/1 company must not read "1 regions across 1 companies"."""
+	def test_nexus_counts_pluralise_company(self):
+		"""1 company must not read "1 companies". The fetch step no longer
+		prints a count of its own - the region pills themselves are the result,
+		and the badge beside them carries the state - so the count that remains
+		is the Review step's, and it is the one that has to agree with itself."""
 		js = self._js()
-		self.assertIn('const regionWord = total === 1 ? __("region") : __("regions");', js)
-		self.assertIn('const companyWord = companiesN === 1 ? __("company") : __("companies");', js)
+		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
 		self.assertIn(
-			'__("Fetched {0} {1} across {2} {3}", [total, regionWord, companiesN, companyWord])', js
+			'__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])',
+			review,
 		)
 
 	def test_review_nexus_row_pluralises_company(self):
@@ -10708,19 +10692,19 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn('__("Auto-Refresh")', js)
 		self.assertIn('__("Daily at midnight")', js)
 
-	def test_daily_at_midnight_pill_matches_other_pills_styling(self):
-		"""Regression guard: every other Review pill (Live, Enabled, N days
-		retention) sits nested one level inside the row's value span, so
-		.ts-kv > span:last-child's bold override lands on that wrapper, not the
-		pill - .indicator-pill's own "regular" weight wins. "Daily at midnight"
-		was the one pill placed as a *direct* child of .ts-kv, so it alone took
-		the bold override directly and rendered inconsistently bolder than
-		every other pill on the same screen."""
+	def test_review_values_share_one_weight(self):
+		"""Regression guard: "Daily at midnight" was the one Review value placed
+		as a direct child of .ts-kv, so it alone picked up that row's bold
+		override and rendered heavier than every value beside it. Every value
+		now goes through .ts-kv-plain, which is what keeps them consistent."""
 		js = self._js()
+		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
 		self.assertIn(
-			'<span>${__("Auto-Refresh")}</span><span><span class="indicator-pill green no-indicator-dot">${__("Daily at midnight")}</span></span>',
-			js,
+			'<span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span>',
+			review,
 		)
+		# Nothing in the Review card sets a value span without that class.
+		self.assertNotIn('<span>${__("Auto-Refresh")}</span><span>', review)
 
 	def test_review_accounts_stack_company_and_detail_on_separate_lines(self):
 		js = self._js()
