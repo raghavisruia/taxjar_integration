@@ -249,7 +249,7 @@ def enqueue_taxjar_sync(doc, method):
 		invoice_name=doc.name,
 		queue="short",
 		enqueue_after_commit=True,
-		job_id=f"taxjar_sync_{doc.name}",
+		job_id=f"taxjar_transaction_{doc.name}",
 		deduplicate=True,
 		now=frappe.flags.in_test,
 	)
@@ -265,12 +265,18 @@ def enqueue_taxjar_delete(doc, method):
 	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
 	_publish_transaction_update(doc.name, "Queued")
 
+	# Same job_id as enqueue_taxjar_sync(): if the create job for this invoice is
+	# still queued when it gets cancelled, deduplicate=True drops this enqueue
+	# rather than letting both run out of order. The queued create job still
+	# runs sync_transaction_to_taxjar, which re-reads docstatus and defers to
+	# delete_transaction_from_taxjar itself - so nothing is lost, and a delete
+	# can never race a not-yet-created order onto a false "already gone" 404.
 	frappe.enqueue(
 		"taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction_from_taxjar",
 		invoice_name=doc.name,
 		queue="short",
 		enqueue_after_commit=True,
-		job_id=f"taxjar_delete_{doc.name}",
+		job_id=f"taxjar_transaction_{doc.name}",
 		deduplicate=True,
 		now=frappe.flags.in_test,
 	)
@@ -953,7 +959,7 @@ def set_sales_tax(doc, method):
 	if cached is not None:
 		tax_data = cached
 	else:
-		tax_data = validate_tax_request(tax_dict)
+		tax_data = validate_tax_request(tax_dict, company=doc.company)
 		if tax_data is not None:
 			frappe.cache().set_value(cache_key, tax_data, expires_in_sec=300)
 	if tax_data is not None and tax_data.amount_to_collect is not None:
@@ -1551,10 +1557,10 @@ def _get_effective_exemption(doc):
 	return None, None
 
 
-def validate_tax_request(tax_dict):
+def validate_tax_request(tax_dict, company=None):
 	"""Return the sales tax that should be collected for a given order."""
 
-	client = get_client()
+	client = get_client(company)
 
 	if not client:
 		log_taxjar_call(action="tax_for_order", status="skipped", error="TaxJar client is not configured")

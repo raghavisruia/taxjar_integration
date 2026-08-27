@@ -5513,7 +5513,26 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		mock_enqueue.assert_called_once()
 		call_kwargs = mock_enqueue.call_args[1]
 		self.assertTrue(call_kwargs["deduplicate"])
-		self.assertIn("job_id", call_kwargs)
+		self.assertEqual(call_kwargs["job_id"], f"taxjar_transaction_{doc.name}")
+
+	def test_shares_job_id_with_enqueue_taxjar_delete(self):
+		"""A cancel racing a still-queued create must dedupe against it, not run
+		alongside it - otherwise a delete can 404 against an order the create
+		hasn't made yet, read that as "already gone", and never retry once the
+		create finally does succeed."""
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+		mock_client = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_sync(doc, None)
+			sync_job_id = mock_enqueue.call_args[1]["job_id"]
+			enqueue_taxjar_delete(doc, None)
+			delete_job_id = mock_enqueue.call_args[1]["job_id"]
+
+		self.assertEqual(sync_job_id, delete_job_id)
 
 
 class TestEnqueueTaxjarDelete(UnitTestCase):
@@ -5537,7 +5556,9 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 
 		doc.db_set.assert_called_once_with("taxjar_sync_status", "Queued", update_modified=False)
 		mock_enqueue.assert_called_once()
-		self.assertIn("delete", mock_enqueue.call_args[1]["job_id"])
+		# Same job_id as enqueue_taxjar_sync() for this invoice - see the comment
+		# there on why a queued create must dedupe against a cancel, not race it.
+		self.assertEqual(mock_enqueue.call_args[1]["job_id"], f"taxjar_transaction_{doc.name}")
 
 
 class TestIsTaxjarEnabledForCompany(UnitTestCase):
