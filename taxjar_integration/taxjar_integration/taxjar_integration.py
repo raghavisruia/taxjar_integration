@@ -969,10 +969,16 @@ def set_sales_tax(doc, method):
 	# without this a stale success for the same cart/address (from before the
 	# token changed) would keep being served for up to five minutes with no
 	# call to TaxJar at all, silently masking a broken token.
+	# doc.company rides along too: company_config above resolves a distinct
+	# TaxJar credential per company, so two companies whose carts/addresses
+	# happen to produce an identical tax_dict must not share a cache entry -
+	# that would serve one company's document a tax result computed through
+	# the other company's TaxJar account.
 	settings_modified = frappe.db.get_single_value("TaxJar Settings", "modified")
 	cache_key = "taxjar_tax:" + hashlib.md5(
 		json.dumps(
-			{"tax_dict": tax_dict, "settings_modified": str(settings_modified)}, sort_keys=True, default=str
+			{"tax_dict": tax_dict, "settings_modified": str(settings_modified), "company": doc.company},
+			sort_keys=True, default=str,
 		).encode()
 	).hexdigest()
 	cached = frappe.cache().get_value(cache_key)
@@ -1542,7 +1548,7 @@ def get_region_exemption(customer: str, address: str | None = None):
 	lock the per-transaction override, so a sale that is already exempt says so
 	before it is saved. Changes no tax on its own.
 	"""
-	frappe.has_permission("Customer", "read", throw=True)
+	frappe.has_permission("Customer", "read", doc=customer, throw=True)
 
 	exemption_type, state = _customer_master_exemption(customer, address)
 	if not exemption_type:

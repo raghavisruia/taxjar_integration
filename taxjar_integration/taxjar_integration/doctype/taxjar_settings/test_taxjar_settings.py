@@ -1204,8 +1204,8 @@ class TestSetSalesTaxCache(UnitTestCase):
 	show it.
 	"""
 
-	def _run(self, cache, settings_modified):
-		doc = _make_doc(taxes=[])
+	def _run(self, cache, settings_modified, company="Test Co"):
+		doc = _make_doc(taxes=[], company=company)
 		tax_data = MagicMock(amount_to_collect=85.0)
 		tax_data.breakdown.line_items = []
 		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
@@ -1246,6 +1246,18 @@ class TestSetSalesTaxCache(UnitTestCase):
 
 		self._run(cache, "2026-08-25 10:00:00")
 		second_call = self._run(cache, "2026-08-25 10:00:05")
+
+		second_call.assert_called_once()
+
+	def test_different_companies_do_not_share_the_cache(self):
+		"""Two companies can hold different TaxJar credentials (see
+		get_company_config). An identical cart/address for both must not let
+		the second company's document reuse the first company's cached
+		result - that would compute its tax through the wrong TaxJar account."""
+		cache = _fake_cache()
+
+		self._run(cache, "2026-08-25 10:00:00", company="Company A")
+		second_call = self._run(cache, "2026-08-25 10:00:00", company="Company B")
 
 		second_call.assert_called_once()
 
@@ -3905,6 +3917,21 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		self.assertEqual(lookup([], "NJ"), {"exemption_type": "Wholesale", "state": None})
 		# "Non Exempt" is a real master value meaning not exempt.
 		self.assertEqual(lookup(["FL"], "FL", exemption_type="Non Exempt"), {})
+
+	def test_permission_check_is_scoped_to_the_requested_customer(self):
+		"""A doctype-level "can read Customer" check is not enough here: a user
+		with general Customer read access but no user-permission grant for this
+		specific record must not learn its exemption_type/regions through this
+		endpoint. has_permission must be record-scoped (doc=customer), not just
+		checked against the Customer doctype in the abstract."""
+		mod = "taxjar_integration.taxjar_integration.taxjar_integration"
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_region_exemption
+
+		with patch(f"{mod}.frappe.has_permission") as mock_has_permission, \
+		     patch(f"{mod}._customer_master_exemption", return_value=(None, None)):
+			get_region_exemption("CUST-0001", "ADDR-0001")
+
+		mock_has_permission.assert_called_once_with("Customer", "read", doc="CUST-0001", throw=True)
 
 	def test_customer_exemption_is_region_scoped(self):
 		"""A customer exempt only in Florida is not exempt on a New Jersey
