@@ -64,6 +64,7 @@ class TaxJarSettings(Document):
 				"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.validate_taxjar_tokens",
 				user=frappe.session.user,
 				queue="short",
+				enqueue_after_commit=True,
 				now=frappe.flags.in_test,
 			)
 
@@ -72,6 +73,7 @@ class TaxJarSettings(Document):
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
 				queue="short",
+				enqueue_after_commit=True,
 				now=frappe.flags.in_test,
 			)
 
@@ -85,6 +87,7 @@ class TaxJarSettings(Document):
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.regional.united_states.sync_all_company_tax_templates",
 				queue="short",
+				enqueue_after_commit=True,
 				now=frappe.flags.in_test,
 			)
 
@@ -116,6 +119,8 @@ class TaxJarSettings(Document):
 
 		self.set("nexus", [])
 
+		# Clears `nexus`; iterates `company_config`. Different tables.
+		# nosemgrep: frappe-modifying-child-tables-while-iterating
 		for config in self.company_config:
 			client = get_client(config.company)
 			if not client:

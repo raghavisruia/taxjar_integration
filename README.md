@@ -30,7 +30,7 @@ bench --site <site-name> migrate
 ## Dependency Management
 
 - Runtime dependencies are defined in [project.dependencies] in pyproject.toml.
-- setup.py is retained for compatibility with older install flows.
+- pyproject.toml is the only build definition; there is no setup.py.
 - requirements.txt is a compatibility stub and not the source of truth.
 
 ## Basic Configuration

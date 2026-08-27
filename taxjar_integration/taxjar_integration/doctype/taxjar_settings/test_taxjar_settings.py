@@ -1184,7 +1184,14 @@ class TestSetSalesTaxCache(UnitTestCase):
 		tax_data.breakdown.line_items = []
 		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		# The cache key reads TaxJar Settings.modified through get_single_value,
+		# the same call the enabled flag uses - so the stub answers per field
+		# rather than returning one constant, or the key stops varying and the
+		# cache-busting this class exists to prove would look broken.
+		def _single_value(doctype, fieldname, *args, **kwargs):
+			return settings_modified if fieldname == "modified" else 1
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", side_effect=_single_value), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
@@ -11693,3 +11700,35 @@ class TestUninstall(UnitTestCase):
 			uninstall.remove_guided_setup_alert()
 
 		self.assertEqual(deleter.call_args[0][:2], ("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK))
+
+
+# ── Company deletion ─────────────────────────────────────────────────────────
+
+
+class TestCompanyDeletionHooks(UnitTestCase):
+
+	def test_taxjar_config_survives_delete_company_transactions(self):
+		"""Transaction Deletion Record collects every doctype with a Company
+		link and deletes its rows. Its collector applies no istable filter, so
+		the TaxJar Settings child tables are in scope - and deleting them would
+		take the company's stored API credential with it. They are
+		configuration, not transactions.
+		"""
+		from erpnext.setup.doctype.transaction_deletion_record.transaction_deletion_record import (
+			get_doctypes_to_be_ignored,
+		)
+
+		ignored = get_doctypes_to_be_ignored()
+		for doctype in ("TaxJar API Credential", "TaxJar Company Config", "TaxJar Nexus"):
+			self.assertIn(doctype, ignored, f"{doctype} would be wiped by a company transaction delete")
+
+	def test_company_delete_is_still_blocked_while_taxjar_is_configured(self):
+		"""The opposite call: these rows are a deliberate configuration choice,
+		so a Company delete should stop and name TaxJar Settings rather than
+		silently orphan an encrypted credential. Asserted as the absence of an
+		ignore_links_on_delete entry, since that is what would change it."""
+		from taxjar_integration import hooks
+
+		self.assertNotIn(
+			"TaxJar Settings", getattr(hooks, "ignore_links_on_delete", [])
+		)

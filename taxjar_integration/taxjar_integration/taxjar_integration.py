@@ -942,7 +942,7 @@ def set_sales_tax(doc, method):
 	# without this a stale success for the same cart/address (from before the
 	# token changed) would keep being served for up to five minutes with no
 	# call to TaxJar at all, silently masking a broken token.
-	settings_modified = frappe.db.get_value("TaxJar Settings", "TaxJar Settings", "modified")
+	settings_modified = frappe.db.get_single_value("TaxJar Settings", "modified")
 	cache_key = "taxjar_tax:" + hashlib.md5(
 		json.dumps(
 			{"tax_dict": tax_dict, "settings_modified": str(settings_modified)}, sort_keys=True, default=str
@@ -1319,6 +1319,8 @@ def get_taxjar_breakdown_html(doc):
 		except (TypeError, ValueError):
 			data = None
 
+	# The template path is a literal in this repo, never caller-supplied.
+	# nosemgrep: frappe-ssti
 	html = frappe.render_template(
 		"templates/includes/taxjar_breakup.html",
 		dict(

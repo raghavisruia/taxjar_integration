@@ -195,6 +195,34 @@ scheduler_events = {
 # auto_cancel_exempted_doctypes = ["Auto Repeat"]
 
 
+# Company deletion
+# ----------------
+#
+# "Delete Company Transactions" (Transaction Deletion Record) collects every
+# doctype with a Link to Company and deletes its rows for that company. Its
+# collector applies no istable filter, so without this it reaches into the
+# TaxJar Settings child tables and silently deletes the company's TaxJar
+# configuration - credentials included - as though it were transaction data.
+# It is configuration, and it outlives the transactions, so it is ignored here
+# alongside ERPNext's own Mode of Payment Account / Item Default / Party
+# Account entries.
+company_data_to_be_ignored = [
+	"TaxJar API Credential",
+	"TaxJar Company Config",
+	"TaxJar Nexus",
+]
+
+# Deliberately NOT declaring ignore_links_on_delete for "TaxJar Settings".
+#
+# Deleting a Company that is still configured for TaxJar is blocked, and the
+# error names TaxJar Settings, which is the behaviour we want: these rows are a
+# deliberate configuration choice, not an incidental log. frappe and erpnext
+# reserve ignore_links_on_delete for records like Communication, Version and
+# Tax Withholding Entry. Ignoring the link here would instead leave orphaned
+# rows - including an encrypted API credential - pointing at a company that no
+# longer exists.
+
+
 # User Data Protection
 # --------------------
 
