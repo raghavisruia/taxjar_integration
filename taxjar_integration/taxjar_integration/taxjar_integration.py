@@ -249,7 +249,7 @@ def enqueue_taxjar_sync(doc, method):
 		invoice_name=doc.name,
 		queue="short",
 		enqueue_after_commit=True,
-		job_id=f"taxjar_transaction_{doc.name}",
+		job_id=f"taxjar_transaction_create_{doc.name}",
 		deduplicate=True,
 		now=frappe.flags.in_test,
 	)
@@ -265,18 +265,28 @@ def enqueue_taxjar_delete(doc, method):
 	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
 	_publish_transaction_update(doc.name, "Queued")
 
-	# Same job_id as enqueue_taxjar_sync(): if the create job for this invoice is
-	# still queued when it gets cancelled, deduplicate=True drops this enqueue
-	# rather than letting both run out of order. The queued create job still
-	# runs sync_transaction_to_taxjar, which re-reads docstatus and defers to
-	# delete_transaction_from_taxjar itself - so nothing is lost, and a delete
-	# can never race a not-yet-created order onto a false "already gone" 404.
+	# Deliberately its own job_id, not shared with enqueue_taxjar_sync(): a
+	# shared job_id used to make deduplicate=True silently drop this enqueue
+	# whenever the create job was still QUEUED *or* STARTED - and RQ only
+	# clears STARTED once the create worker fully exits, well after it takes
+	# its last look at docstatus. A cancellation committing in that gap got
+	# its delete dropped with nothing left to notice: the create had already
+	# set status Synced, so there was no Failed row for the retry cron to
+	# pick up either - the transaction stayed stranded in TaxJar for good.
+	# Running independently is safe because both workers already treat a
+	# cancellation as authoritative over their own stale read: this delete
+	# defers to a genuinely not-yet-created order with a handled 404 (see
+	# delete_transaction_from_taxjar), and sync_transaction_to_taxjar checks
+	# docstatus both on entry and again right after its create call,
+	# deleting what it just made if the invoice was cancelled meanwhile. At
+	# worst the two race into a redundant, idempotent double delete - never
+	# a dropped one.
 	frappe.enqueue(
 		"taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction_from_taxjar",
 		invoice_name=doc.name,
 		queue="short",
 		enqueue_after_commit=True,
-		job_id=f"taxjar_transaction_{doc.name}",
+		job_id=f"taxjar_transaction_delete_{doc.name}",
 		deduplicate=True,
 		now=frappe.flags.in_test,
 	)

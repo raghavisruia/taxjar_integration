@@ -5590,13 +5590,15 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		mock_enqueue.assert_called_once()
 		call_kwargs = mock_enqueue.call_args[1]
 		self.assertTrue(call_kwargs["deduplicate"])
-		self.assertEqual(call_kwargs["job_id"], f"taxjar_transaction_{doc.name}")
+		self.assertEqual(call_kwargs["job_id"], f"taxjar_transaction_create_{doc.name}")
 
-	def test_shares_job_id_with_enqueue_taxjar_delete(self):
-		"""A cancel racing a still-queued create must dedupe against it, not run
-		alongside it - otherwise a delete can 404 against an order the create
-		hasn't made yet, read that as "already gone", and never retry once the
-		create finally does succeed."""
+	def test_does_not_share_job_id_with_enqueue_taxjar_delete(self):
+		"""A shared job_id let deduplicate=True silently drop a cancel's delete
+		enqueue whenever the create job was still STARTED - including in the gap
+		after the create worker's last docstatus check but before it exits, which
+		left the invoice's transaction stranded in TaxJar with no Failed status
+		for the retry cron to catch. Each operation must get its own job_id so a
+		delete is never dropped, only ever run redundantly alongside a create."""
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 		mock_client = MagicMock()
@@ -5609,7 +5611,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 			enqueue_taxjar_delete(doc, None)
 			delete_job_id = mock_enqueue.call_args[1]["job_id"]
 
-		self.assertEqual(sync_job_id, delete_job_id)
+		self.assertNotEqual(sync_job_id, delete_job_id)
 
 
 class TestEnqueueTaxjarDelete(UnitTestCase):
@@ -5633,9 +5635,9 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 
 		doc.db_set.assert_called_once_with("taxjar_sync_status", "Queued", update_modified=False)
 		mock_enqueue.assert_called_once()
-		# Same job_id as enqueue_taxjar_sync() for this invoice - see the comment
-		# there on why a queued create must dedupe against a cancel, not race it.
-		self.assertEqual(mock_enqueue.call_args[1]["job_id"], f"taxjar_transaction_{doc.name}")
+		# Its own job_id, not shared with enqueue_taxjar_sync() - see the comment
+		# there on why a cancel's delete must never dedupe against a create job.
+		self.assertEqual(mock_enqueue.call_args[1]["job_id"], f"taxjar_transaction_delete_{doc.name}")
 
 
 class TestIsTaxjarEnabledForCompany(UnitTestCase):
