@@ -4992,6 +4992,64 @@ class TestSyncTransactionCompliance(UnitTestCase):
 
 		mock_status.assert_called_with("SINV-TEST-001", "Synced")
 
+	def _fresh_docstatus_stub(self, invoice_name, docstatus):
+		"""frappe.db.get_value has plenty of other callers within a single
+		sync_transaction_to_taxjar() run (frappe's own doctype-controller
+		lookups included) - only the exact re-check this fix added should be
+		stubbed, everything else must reach the real implementation."""
+		real_get_value = frappe.db.get_value
+
+		def fake_get_value(*args, **kwargs):
+			doctype = kwargs.get("doctype", args[0] if len(args) > 0 else None)
+			name = kwargs.get("name", args[1] if len(args) > 1 else None)
+			fieldname = kwargs.get("fieldname", args[2] if len(args) > 2 else None)
+			if doctype == "Sales Invoice" and name == invoice_name and fieldname == "docstatus":
+				return docstatus
+			return real_get_value(*args, **kwargs)
+
+		return fake_get_value
+
+	def test_deletes_if_cancelled_while_create_was_in_flight(self):
+		"""doc is read once at the top of the function - if the invoice gets
+		cancelled while create_order() is still running, that stale doc can't
+		reflect it. A concurrent delete job may have already 404'd against an
+		order that didn't exist yet and treated that as done, so this worker
+		must notice the cancellation itself and clean up what it just created."""
+		doc = self._make_submit_doc()
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		           side_effect=self._fresh_docstatus_stub("SINV-TEST-001", 2)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction_from_taxjar") as mock_delete, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		mock_delete.assert_called_once_with("SINV-TEST-001")
+
+	def test_no_cleanup_delete_when_still_submitted(self):
+		"""The common case - no cancellation raced the create - must not trigger
+		the extra delete call."""
+		doc = self._make_submit_doc()
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+		           side_effect=self._fresh_docstatus_stub("SINV-TEST-001", 1)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_transaction_from_taxjar") as mock_delete, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			sync_transaction_to_taxjar("SINV-TEST-001")
+
+		mock_delete.assert_not_called()
+
 
 class TestDeleteTransactionCompliance(UnitTestCase):
 
