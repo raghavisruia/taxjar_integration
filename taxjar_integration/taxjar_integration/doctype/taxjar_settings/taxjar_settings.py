@@ -774,6 +774,27 @@ def get_custom_fields():
 				description="",
 			),
 		],
+		# Print-time toggle for the "US Sales Tax Invoice" print format's
+		# jurisdiction-by-jurisdiction breakdown table. Lives on Print Settings
+		# rather than as a field on Sales Invoice itself, same convention
+		# erpnext's own compact_item_print/print_taxes_with_zero_amount use
+		# (erpnext.setup.install.create_print_setting_custom_fields) - it is a
+		# print-run preference, not document data, and this way it shows up in
+		# the print preview's Settings sidebar for free, with no client script.
+		"Print Settings": [
+			dict(
+				fieldname="taxjar_show_tax_breakdown",
+				fieldtype="Check",
+				insert_after="print_taxes_with_zero_amount",
+				label="Show Detailed TaxJar Tax Breakdown",
+				default="1",
+				description=(
+					"Applies to print formats built for TaxJar, such as the US "
+					"Sales Tax Invoice - includes the jurisdiction-by-jurisdiction "
+					"tax breakdown table."
+				),
+			),
+		],
 	}
 
 
@@ -784,6 +805,36 @@ def make_custom_fields(update=True):
 		"Sales Invoice", "return_against", "no_copy", "0", "Check",
 		for_doctype=False,
 	)
+
+	_backfill_print_settings_defaults()
+
+
+def _backfill_print_settings_defaults():
+	"""A Check custom field's `default` only applies to a document created
+	fresh via .new_doc() - Print Settings is a Single that already exists on
+	every site (frappe creates it at site creation, long before this app is
+	installed), so create_custom_fields() alone leaves
+	taxjar_show_tax_breakdown reading back as unchecked forever, silently
+	contradicting its declared default="1".
+
+	Checked via a raw query against the Singles table, not get_single_value()/
+	db.exists() - for a Check field, cast_fieldtype() maps a missing row to 0
+	the same as an explicit 0, so get_single_value() can never tell "never
+	set" apart from "someone unchecked it", and using it here would
+	re-assert 1 over that choice on every migrate. db.exists() is no better:
+	confirmed directly against this site that both it and db.get_value()
+	raise/no-op on "Singles", since the QB builder's default order-by-creation
+	assumes a real doctype table, and Singles has no such column. Only a plain
+	SELECT against the row itself tells "never set" apart from "set to 0",
+	so this backfills the very first time only and leaves any later value
+	alone.
+	"""
+	row_exists = frappe.db.sql(
+		"select 1 from `tabSingles` where doctype=%s and field=%s limit 1",
+		("Print Settings", "taxjar_show_tax_breakdown"),
+	)
+	if not row_exists:
+		frappe.db.set_single_value("Print Settings", "taxjar_show_tax_breakdown", 1)
 
 
 _EXEMPT_FROM_SALES_TAX_DOCTYPES = ("Quotation", "Sales Order", "Sales Invoice", "Customer")

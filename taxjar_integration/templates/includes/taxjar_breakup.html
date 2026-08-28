@@ -1,3 +1,16 @@
+{#
+	Trims trailing zeros from the fractional part only (never the integer
+	part - a naive rstrip("0") on the whole "10.000" string would wrongly
+	collapse it to "1"), so a round rate reads as "6%" and an odd one still
+	shows what it needs to ("6.25%").
+#}
+{% macro fmt_rate(rate) %}
+	{%- set s = "%.3f"|format((rate or 0) * 100) -%}
+	{%- set whole, frac = s.split(".") -%}
+	{%- set frac = frac.rstrip("0") -%}
+	{{- whole if not frac else whole ~ "." ~ frac -}}
+{% endmacro %}
+
 {% macro tax_breakup_table(rows, totals, table_currency) %}
 <div class="tax-break-up" style="overflow-x: auto;">
 	<table class="table table-bordered table-hover">
@@ -6,7 +19,7 @@
 				<th class="text-left">{{ _("Jurisdiction") }}</th>
 				<th class="text-left">{{ _("Name") }}</th>
 				<th class="text-right">{{ _("Rate") }}</th>
-				<th class="text-right">{{ _("Tax Amount") }}</th>
+				<th class="text-right">{{ _("Tax") }}</th>
 			</tr>
 		</thead>
 		<tbody>
@@ -14,16 +27,16 @@
 			<tr>
 				<td><strong>{{ row.jurisdiction | e }}</strong></td>
 				<td>{{ (row.name or "") | e }}</td>
-				<td class="text-right">{{ "%.3f"|format((row.rate or 0) * 100) }}%</td>
-				<td class="text-right">{{ frappe.utils.fmt_money(row.tax_amount, None, table_currency) }}</td>
+				<td class="text-right">{{ fmt_rate(row.rate) }}%</td>
+				<td class="text-right" style="white-space: nowrap;">{{ frappe.utils.fmt_money(row.tax_amount, None, table_currency) }}</td>
 			</tr>
 			{% endfor %}
 		</tbody>
 		<tfoot>
 			<tr style="font-weight:bold">
 				<td colspan="2" class="text-right">{{ _("Total") }}</td>
-				<td class="text-right">{{ "%.3f"|format((totals.rate or 0) * 100) }}%</td>
-				<td class="text-right">{{ frappe.utils.fmt_money(totals.amount_to_collect or 0, None, table_currency) }}</td>
+				<td class="text-right">{{ fmt_rate(totals.rate) }}%</td>
+				<td class="text-right" style="white-space: nowrap;">{{ frappe.utils.fmt_money(totals.amount_to_collect or 0, None, table_currency) }}</td>
 			</tr>
 		</tfoot>
 	</table>

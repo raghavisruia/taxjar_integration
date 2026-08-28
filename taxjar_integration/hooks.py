@@ -77,10 +77,16 @@ doctype_js = {
 # ----------
 
 # add methods and filters to jinja environment
-# jinja = {
-#	"methods": "taxjar_integration.utils.jinja_methods",
-#	"filters": "taxjar_integration.utils.jinja_filters"
-# }
+#
+# get_company_config: exposed so the "US Sales Tax Invoice" print format can
+# identify which Sales Taxes and Charges row is the TaxJar sales-tax row and
+# which is the shipping row (company_config.tax_account_head /
+# shipping_account_head) without re-deriving that lookup in the template.
+jinja = {
+	"methods": [
+		"taxjar_integration.taxjar_integration.taxjar_integration.get_company_config",
+	],
+}
 
 # Installation
 # ------------
