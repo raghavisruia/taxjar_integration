@@ -730,10 +730,22 @@ def get_line_item_dict(item, docstatus):
 	# this line's proportional share of any document-level Additional
 	# Discount (except the Grand Total + cash/non-trade mode, where net_amount
 	# is deliberately left untouched and discount correctly computes to 0).
+	#
+	# Clamped to [0, list_amount] on a normal sale, but a credit note/return
+	# has qty < 0, which makes list_amount (and so the "natural" discount
+	# range) negative too - unit_price stays positive and quantity carries
+	# the sign unmodified (see get_tax_data's amount formula below), so
+	# discount has to be allowed to go negative in step with list_amount for
+	# `unit_price * quantity - discount` to still reconstruct net_amount.
+	# min(max(discount, 0), list_amount) assumed list_amount >= 0 and
+	# silently clamped a real -$21.40 return-line discount to -$1000
+	# instead, which then failed the `discount > 0` check below and got
+	# dropped from the TaxJar payload entirely - the return was taxed on
+	# the full undiscounted amount instead of the discounted one.
 	list_rate = max(flt(item.get("rate_with_margin")), flt(item.get("price_list_rate")), flt(item.get("rate")))
 	list_amount = list_rate * flt(item.get("qty"))
 	discount = list_amount - flt(item.get("net_amount"))
-	discount = min(max(discount, 0), list_amount)
+	discount = max(min(discount, max(0, list_amount)), min(0, list_amount))
 
 	# product_identifier is the Item master's own name - item_code is what
 	# the row is fetched from and, by this app's autoname convention
@@ -759,7 +771,10 @@ def get_line_item_dict(item, docstatus):
 		unit_price=list_rate,
 	)
 
-	if discount > 0:
+	# Not `> 0` - a return's meaningful discount value is negative (it moves
+	# in the same direction as list_amount/net_amount there), and `> 0`
+	# would drop it from the payload exactly like the clamp above used to.
+	if discount:
 		tax_dict["discount"] = discount
 
 	if docstatus == 1:
