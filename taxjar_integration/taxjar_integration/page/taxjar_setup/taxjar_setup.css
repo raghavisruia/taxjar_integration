@@ -43,15 +43,14 @@
 	min-height: 420px;
 }
 
-/* Rail first, then the divider, then the step's heading and its description -
-   the rail is page-level chrome (where am I in the wizard), the heading is the
-   step's own content, and the divider is the line between the two. It read the
-   other way round while the heading was inside .ts-head, which put a per-step
-   title above the rail that describes every step.
+/* Rail first, then the step's heading and its description - the rail is
+   page-level chrome (where am I in the wizard), the heading is the step's own
+   content. It read the other way round while the heading was inside .ts-head,
+   which put a per-step title above the rail that describes every step.
 
    .ts-title sits between the header and the body rather than inside .ts-body
    because every _render_*() replaces .ts-body's contents wholesale. */
-.taxjar-setup .ts-head { padding: 24px 0 28px; border-bottom: 1px solid var(--border-color); }
+.taxjar-setup .ts-head { padding: 24px 0 28px; }
 .taxjar-setup .ts-title { margin: 24px 0 0; font-size: 24px; font-weight: 700; }
 
 .taxjar-setup .ts-body { padding: 16px 0 28px; flex: 1; }
