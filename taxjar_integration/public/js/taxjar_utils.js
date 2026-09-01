@@ -374,8 +374,46 @@ taxjar_integration._show_foreign_tax_rows_dialog = function (frm, rows, ack_hash
 	d.show();
 };
 
+// The `input[type="radio"]` element already gets frappe's own filled-circle
+// treatment (frappe/public/scss/element/radio.scss) - no need to re-skin it.
+// What the plain <table> didn't have was any row-level affordance, so the
+// dot was the only thing on the row that looked clickable even though the
+// whole `<tr>` already carries the click handler below. Reusing the
+// --bg-blue "lit" treatment from .taxjar-address-lit (render_addresses,
+// above) instead of inventing a new selected-state color.
+taxjar_integration._inject_address_picker_styles = function () {
+	if (document.getElementById("taxjar-address-picker-styles")) return;
+	const style = document.createElement("style");
+	style.id = "taxjar-address-picker-styles";
+	style.textContent = `
+		.taxjar-address-table thead th {
+			background-color: var(--subtle-fg);
+		}
+		.taxjar-address-table .taxjar-address-row:hover {
+			background-color: var(--subtle-fg);
+		}
+		.taxjar-address-table .taxjar-address-row-selected,
+		.taxjar-address-table .taxjar-address-row-selected:hover {
+			background-color: var(--bg-blue);
+		}
+		.taxjar-address-table .taxjar-address-radio-cell {
+			width: 36px;
+			text-align: center;
+			vertical-align: middle;
+		}
+		.taxjar-address-table .taxjar-address-radio-cell input[type="radio"] {
+			margin: 0 !important;
+		}
+	`;
+	document.head.appendChild(style);
+};
+
 taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 	let selected = null;
+	// Nothing to compare against with one address, and an all-blank column
+	// is just noise - only show it once it's actually telling the user
+	// something (at least one Yes to weigh against the others).
+	let show_preferred_col = addresses.length > 1 && addresses.some((addr) => addr.is_shipping_address);
 
 	let table_rows = addresses
 		.map((addr, idx) => {
@@ -386,16 +424,20 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 			if (idx === 0) selected = addr.name;
 
 			return `<tr data-address="${frappe.utils.escape_html(addr.name)}"
-					style="cursor:pointer">
-				<td style="width:30px;text-align:center">
+					class="taxjar-address-row ${idx === 0 ? "taxjar-address-row-selected" : ""}">
+				<td class="taxjar-address-radio-cell">
 					<input type="radio" name="taxjar_addr" value="${frappe.utils.escape_html(addr.name)}" ${checked}>
 				</td>
 				<td>${frappe.utils.escape_html(addr.address_title || addr.name)}</td>
 				<td>${frappe.utils.escape_html(addr_parts)}</td>
 				<td>${frappe.utils.escape_html(addr.address_type || "")}</td>
-				<td style="text-align:center">
+				${
+					show_preferred_col
+						? `<td style="text-align:center">
 					${addr.is_shipping_address ? frappe.ui.badge.html({ label: "Yes", theme: "green", size: "sm" }) : ""}
-				</td>
+				</td>`
+						: ""
+				}
 			</tr>`;
 		})
 		.join("");
@@ -403,20 +445,22 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 	let html = `
 		<p class="text-muted">${__("A shipping address is required for sales tax calculation. Select an existing address or add a new one.")}</p>
 		<div style="max-height:300px;overflow-y:auto;margin-top:10px">
-			<table class="table table-bordered table-hover">
-				<thead style="background-color:var(--subtle-fg)">
+			<table class="table table-hover taxjar-address-table">
+				<thead>
 					<tr>
-						<th style="width:30px"></th>
+						<th style="width:36px"></th>
 						<th>${__("Title")}</th>
 						<th>${__("Address")}</th>
 						<th>${__("Type")}</th>
-						<th style="text-align:center">${__("Preferred Shipping")}</th>
+						${show_preferred_col ? `<th style="text-align:center">${__("Preferred Shipping")}</th>` : ""}
 					</tr>
 				</thead>
 				<tbody>${table_rows}</tbody>
 			</table>
 		</div>
 	`;
+
+	taxjar_integration._inject_address_picker_styles();
 
 	let d = new frappe.ui.Dialog({
 		title: __("Select Shipping Address"),
@@ -457,12 +501,16 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 
 	d.$wrapper.on("click", "tr[data-address]", function () {
 		let addr_name = $(this).data("address");
-		d.$wrapper.find('input[name="taxjar_addr"][value="' + addr_name + '"]').prop("checked", true);
-		selected = addr_name;
+		d.$wrapper
+			.find('input[name="taxjar_addr"][value="' + addr_name + '"]')
+			.prop("checked", true)
+			.trigger("change");
 	});
 
 	d.$wrapper.on("change", 'input[name="taxjar_addr"]', function () {
 		selected = $(this).val();
+		d.$wrapper.find("tr[data-address]").removeClass("taxjar-address-row-selected");
+		$(this).closest("tr").addClass("taxjar-address-row-selected");
 	});
 
 	d.show();
