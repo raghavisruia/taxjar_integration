@@ -54,6 +54,35 @@ taxjar_integration.show_taxjar_sync_error = function (title, message) {
 	frappe.msgprint({ title, message: html, indicator: "red" });
 };
 
+// ── Nexus-missing warning ──
+// Deliberately its own frappe.ui.Dialog rather than frappe.msgprint: msgprint
+// reuses a single page-global dialog (frappe.msg_dialog), and any ajax
+// response that carries a (possibly empty) _server_messages envelope makes
+// request.js call frappe.hide_msgprint() and wipe it out from under whoever
+// is showing it - see frappe/public/js/frappe/request.js. This warning is
+// raised right before frm.save(), which itself fires several more requests
+// (validate-hook xcalls, the save call), so it needs a dialog those can't
+// silently clear.
+taxjar_integration.show_nexus_missing_dialog = function (state, state_code) {
+	const message =
+		__("The state {0} ({1}) is not in your TaxJar Nexus list.", [state, state_code]) +
+		"<br><br>" +
+		__("Please add it to your TaxJar account at {0} to enable tax calculation for this state.", [
+			'<a href="https://app.taxjar.com/account#states" target="_blank">https://app.taxjar.com/account#states</a>',
+		]);
+
+	const d = new frappe.ui.Dialog({
+		title: __("Nexus Missing"),
+		indicator: "orange",
+		primary_action_label: __("Close"),
+		primary_action() {
+			d.hide();
+		},
+	});
+	d.$body.append(`<div>${message}</div>`);
+	d.show();
+};
+
 // One frappe.ui.form MultiCheck field per country (US states, CA provinces),
 // each with its own built-in "Select All"/"Unselect All" buttons - real desk
 // controls rather than a hand-built checkbox grid. `selected` is a Set of
@@ -480,17 +509,21 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 				return;
 			}
 
-			frm.set_value("shipping_address_name", selected);
+			// Wait for the shipping_address_name trigger (nexus check
+			// included) to finish before saving, so a "Nexus Missing"
+			// warning isn't racing frm.save()'s own reload. Returning the
+			// promise also lets the dialog disable/spin the button meanwhile.
+			return frm.set_value("shipping_address_name", selected).then(function () {
+				if (d.get_value("mark_as_shipping")) {
+					frappe.xcall(
+						"taxjar_integration.taxjar_integration.taxjar_integration.mark_address_as_shipping",
+						{ address_name: selected }
+					);
+				}
 
-			if (d.get_value("mark_as_shipping")) {
-				frappe.xcall(
-					"taxjar_integration.taxjar_integration.taxjar_integration.mark_address_as_shipping",
-					{ address_name: selected }
-				);
-			}
-
-			d.hide();
-			frm.save();
+				d.hide();
+				frm.save();
+			});
 		},
 		secondary_action_label: __("Add New Address"),
 		secondary_action() {

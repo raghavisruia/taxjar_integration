@@ -36,22 +36,23 @@ frappe.ui.form.on("Sales Invoice", {
 	shipping_address_name(frm) {
 		taxjar_integration.apply_region_exemption(frm);
 
-		if (frm.doc.shipping_address_name) {
-			frappe.call({
-				method: "taxjar_integration.taxjar_integration.taxjar_integration.check_nexus",
-				args: { shipping_address_name: frm.doc.shipping_address_name },
-				callback(r) {
-					if (r.message) {
-						let msg = __("The state {0} ({1}) is not in your TaxJar Nexus list.", [r.message.state, r.message.state_code]);
-						msg += "<br><br>";
-						msg += __("Please add it to your TaxJar account at {0} to enable tax calculation for this state.", [
-							'<a href="https://app.taxjar.com/account#states" target="_blank">https://app.taxjar.com/account#states</a>'
-						]);
-						frappe.msgprint({ title: __("Nexus Missing"), message: msg, indicator: "orange" });
-					}
-				}
-			});
+		if (!frm.doc.shipping_address_name) {
+			return;
 		}
+
+		// Returning this promise (rather than firing-and-forgetting) lets
+		// frm.set_value("shipping_address_name", ...) callers await it, so
+		// the nexus check finishes - and the warning dialog is already up -
+		// before a caller-driven frm.save() starts.
+		return frappe.call({
+			method: "taxjar_integration.taxjar_integration.taxjar_integration.check_nexus",
+			args: { shipping_address_name: frm.doc.shipping_address_name },
+			callback(r) {
+				if (r.message) {
+					taxjar_integration.show_nexus_missing_dialog(r.message.state, r.message.state_code);
+				}
+			}
+		});
 	}
 });
 
