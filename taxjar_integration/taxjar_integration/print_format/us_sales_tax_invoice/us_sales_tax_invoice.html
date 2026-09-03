@@ -235,11 +235,6 @@
 				{% endif %}
 				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if print_settings.taxjar_show_tax_breakdown else '' }}">
 					<div class="taxjar-status-line">{{ tj_source_line }}</div>
-					{% if doc.taxjar_has_nexus and doc.taxjar_tax_source == "origin" and doc.taxjar_ship_from %}
-					<div>
-						<span class="text-bold">{{ _("Ship From") }}:</span> {{ doc.taxjar_ship_from }}
-					</div>
-					{% endif %}
 					{% if is_exempt %}
 					{% set customer_exemption_type = frappe.db.get_value("Customer", doc.customer, "taxjar_exemption_type") %}
 					<div>
