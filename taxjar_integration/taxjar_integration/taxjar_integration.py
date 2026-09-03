@@ -171,7 +171,8 @@ def _is_taxjar_logging_enabled():
 		return cached_value
 
 	try:
-		enabled = cint(frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging") or 1)
+		stored_value = frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging")
+		enabled = 1 if stored_value is None else cint(stored_value)
 	except Exception:
 		enabled = 1
 
