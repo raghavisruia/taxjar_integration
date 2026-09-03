@@ -7182,6 +7182,12 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 
 		name = customers[0]["name"]
 		original = customers[0]["taxjar_exemption_type"]
+		# Captured, not just the type: restoring a region-scoped type without
+		# its regions is not a saveable state, so a run where the customer's
+		# real original type requires regions would fail here rather than
+		# leaving it stuck on this test's own "Government"/TX,ON. Same
+		# capture-and-guard as test_clearing_the_type_clears_its_regions.
+		original_regions = get_exempt_regions(name)
 		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
 		with patch(f"{mod}.frappe.enqueue"):
@@ -7193,7 +7199,9 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		self.assertEqual({r["state"] for r in get_exempt_regions(name)}, {"TX", "ON"})
 
 		with patch(f"{mod}.frappe.enqueue"):
-			configure_exemption([name], original or "")
+			regions = [{"country": r["country"], "state": r["state"]} for r in original_regions]
+			if original not in _EXEMPTION_TYPES_REQUIRING_REGIONS or regions:
+				configure_exemption([name], original or "", regions)
 
 	def test_clearing_the_type_clears_its_regions(self):
 		"""An exempt region without an exemption type means nothing, so it is

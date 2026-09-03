@@ -2420,7 +2420,16 @@ def on_customer_validate(doc, method):
 	outside a raw db write, so the DB's current value is unconditionally
 	authoritative - restoring only applied when the form's copy was blank,
 	which is exactly the one case ("Queued", not "") this bug does not produce.
+
+	_validate_exempt_regions() runs unconditionally, create or update: it has
+	nothing to do with stale sync fields, and gating it behind is_new() used to
+	let a region-scoped exemption type save with zero regions on its first
+	insert - the very state the dialog's own "Select at least one exempt
+	region" message says can never be saved - only to be rejected on the next,
+	otherwise-unrelated save of the same record.
 	"""
+	_validate_exempt_regions(doc)
+
 	if doc.is_new():
 		return
 
@@ -2434,8 +2443,6 @@ def on_customer_validate(doc, method):
 		db_val = db_values.get(field) or ""
 		if doc.get(field) != db_val:
 			doc.set(field, db_val)
-
-	_validate_exempt_regions(doc)
 
 
 # Single source of truth: derive from SUPPORTED_STATE_CODES so exempt-region
