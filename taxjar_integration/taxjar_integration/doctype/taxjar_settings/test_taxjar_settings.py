@@ -10466,7 +10466,6 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		css = self._setup_css()
 		for selector in (
 			".taxjar-setup .ts-fieldnote {",
-			".taxjar-setup .ts-lede {",
 			".taxjar-setup .ts-retention-row .ts-fieldnote,",
 		):
 			rule = css.split(selector)[1].split("}")[0]
@@ -10688,7 +10687,7 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		""""Leave blank to keep the saved token." was the extra description
 		line that made an already-saved credential's Live token field taller
 		than Company - removed rather than compensated for, since the
-		placeholder ("...ending in 2429") already conveys there's a stored
+		placeholder ("••••••••••••2429") already conveys there's a stored
 		token."""
 		js = self._js()
 		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t_render_cred_action")[0]

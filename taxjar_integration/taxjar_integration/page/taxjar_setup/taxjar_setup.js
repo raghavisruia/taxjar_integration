@@ -223,31 +223,30 @@ class TaxJarSetup {
 		const chartOfAccountsUrl = `${frappe.urllib.get_base_url()}/app/account/view/tree`;
 
 		this.$body.html(`
-			<p class="ts-lede">${__("Before proceeding,")}</p>
 			<ul class="ts-check">
 				<li>
 					<a class="ts-check-link" href="https://app.taxjar.com/api_sign_up" target="_blank" rel="noopener noreferrer">
 						<span class="ts-check-num">1</span>
-						<span class="ts-check-text"><b>${__("Sign Up for TaxJar")}</b>${icon}</span>
+						<span class="ts-check-text">${__("Sign Up for TaxJar")}${icon}</span>
 					</a>
 				</li>
 				<li>
 					<a class="ts-check-link" href="https://app.taxjar.com/account#api-access" target="_blank" rel="noopener noreferrer">
 						<span class="ts-check-num">2</span>
-						<span class="ts-check-text"><b>${__("Get API Token from TaxJar")}</b>${icon}</span>
+						<span class="ts-check-text">${__("Get API Token from TaxJar")}${icon}</span>
 					</a>
 				</li>
 				<li>
 					<a class="ts-check-link" href="https://app.taxjar.com/account#states" target="_blank" rel="noopener noreferrer">
 						<span class="ts-check-num">3</span>
-						<span class="ts-check-text"><b>${__("Configure Nexus in TaxJar")}</b>${icon}</span>
+						<span class="ts-check-text">${__("Configure Nexus in TaxJar")}${icon}</span>
 					</a>
 				</li>
 				<li>
 					<a class="ts-check-link" href="${chartOfAccountsUrl}" target="_blank" rel="noopener noreferrer">
 						<span class="ts-check-num">4</span>
 						<span class="ts-check-text">
-							<b>${__("Review Ledger Accounts")}</b>${icon}
+							${__("Review Ledger Accounts")}${icon}
 							<ul class="ts-check-sub">
 								<li>${__("Sales Tax Payable")}</li>
 								<li>${__("Shipping and Freight Income")}</li>
@@ -515,7 +514,7 @@ class TaxJarSetup {
 				fieldtype: "Password", fieldname: "token",
 				label: this._modeIsLive ? __("Live token") : __("Sandbox token"),
 				reqd: !cred.token_last4,
-				placeholder: cred.token_last4 ? __("•••••••••••• (ending in {0})", [cred.token_last4]) : "",
+				placeholder: cred.token_last4 ? "••••••••••••" + cred.token_last4 : "",
 			},
 			render_input: true,
 		});
