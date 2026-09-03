@@ -4242,20 +4242,33 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		self.assertIn('__("Yes, but transaction is marked as exempt")', fn)
 
 	def test_only_the_sentence_answer_opts_into_wrapping(self):
-		"""frappe.ui.badge (es-badge) defaults to nowrap/fit-content - fine for
-		single words, but "Yes, but transaction is marked as exempt" needs to
-		wrap inside the card instead of overflowing it. Unlike the old
-		indicator-pill treatment, there's no dot to re-centre and no fixed
-		height to relax - the override just lets that one badge's text wrap,
-		scoped to badges inside the status cards generally (every card answer
-		goes through the same frappe.ui.badge.html() call, so there's no
-		separate "wrap" flag to set per card any more)."""
+		"""frappe.ui.badge (es-badge) defaults to nowrap/fit-content with a
+		fixed one-line height, overflow: clip, a stadium border-radius and
+		line-height: 1, all tuned for one line of text - fine for single
+		words, but "Yes, but transaction is marked as exempt" needs to wrap
+		inside the card instead of overflowing it. White-space alone lets the
+		text wrap onto a second line while the rest of the base rule still
+		fights it: fixed height + clip crop the second line outside the
+		pill's own background, the stadium corners (meant for a short single
+		line) curve in close enough to crowd wrapped text against them, and
+		line-height: 1 leaves the two lines touching. min-height (not height)
+		keeps single-line badges the same size they always were - the corner
+		and line-height relaxations are applied unconditionally too since
+		they look identical on a single-line badge either way. Scoped to
+		badges inside the status cards generally (every card answer goes
+		through the same frappe.ui.badge.html() call, so there's no separate
+		"wrap" flag to set per card any more)."""
 		js = self._read_js("taxjar_utils.js")
 		styles = js.split("_inject_status_card_styles = function () {")[1].split("\n};")[0]
 
 		self.assertIn(".taxjar-status-card-a .es-badge {", styles)
 		rule = styles.split(".taxjar-status-card-a .es-badge {")[1].split("}")[0]
 		self.assertIn("white-space: normal;", rule)
+		self.assertIn("height: auto;", rule)
+		self.assertIn("overflow: visible;", rule)
+		self.assertIn("min-height:", rule)
+		self.assertIn("border-radius: var(--radius-lg);", rule)
+		self.assertIn("line-height: 1.4;", rule)
 
 		# The old opt-in wrap class and its indicator-pill-specific fixes are
 		# gone entirely, not just renamed.
@@ -9129,6 +9142,21 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		anchor = fn.split("<a")[1].split("</a>")[0]
 		self.assertIn("Configure TaxJar", anchor)
 		self.assertIn("icon", anchor)
+
+	def test_not_enabled_link_only_renders_for_a_united_states_company(self):
+		"""TaxJar is a US sales-tax service - the guided setup wizard this link
+		points at has nothing to offer a company whose country isn't United
+		States, so the link must check the company's country before rendering
+		rather than assuming every company it's asked about is a candidate."""
+		fn = self._not_enabled_fn()
+		self.assertIn('frappe.db.get_value("Company", frm.doc.company, "country")', fn)
+		self.assertIn('!== "United States"', fn)
+
+		# The guard must sit before the section is built/inserted, not after -
+		# otherwise the section briefly exists for a non-US company.
+		guard_pos = fn.index('!== "United States"')
+		section_pos = fn.index("taxjar-sync-sidebar-pill-section")
+		self.assertLess(guard_pos, section_pos)
 
 	def test_draft_shows_submit_to_sync_label(self):
 		fn = self._render_fn()

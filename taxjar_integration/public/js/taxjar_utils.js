@@ -784,7 +784,6 @@ taxjar_integration._inject_status_card_styles = function () {
 		.taxjar-status-card-q {
 			font-size: var(--text-sm);
 			margin-bottom: 8px;
-			font-style: italic;
 		}
 		.taxjar-status-card-a {
 			font-size: var(--text-lg);
@@ -793,11 +792,27 @@ taxjar_integration._inject_status_card_styles = function () {
 		/* es-badge defaults to white-space: nowrap with a fit-content width -
 		   fine for "Yes"/"Skipped", but "Yes, but transaction is marked as
 		   exempt" needs to wrap inside the card instead of overflowing it.
-		   No dot to re-centre and no fixed height to fight, unlike
-		   indicator-pill's old wrap hack here - just let the text wrap. */
+		   Its base rule also fixes height to one line and clips anything past
+		   it, so height/overflow need overriding too, not just white-space -
+		   otherwise a wrapped second line renders outside the pill's own
+		   background instead of growing it. min-height (not height) keeps
+		   single-line badges the same size they always were.
+		   border-radius: full and line-height: 1 both come from the base rule
+		   tuned for one line - carried into a two-line box, the stadium-shaped
+		   corners curve in close enough to crowd the text against them, and the
+		   tight line-height leaves the two lines touching. Both are toned down
+		   here rather than only in the wrapped case, since a single-line badge
+		   looks identical either way. */
 		.taxjar-status-card-a .es-badge {
 			white-space: normal;
 			text-align: left;
+			height: auto;
+			min-height: calc(var(--spacing) * 5);
+			overflow: visible;
+			padding-block: calc(var(--spacing) * 0.75);
+			padding-inline: calc(var(--spacing) * 2);
+			border-radius: var(--radius-lg);
+			line-height: 1.4;
 		}
 		.taxjar-status-arrow {
 			display: flex;
@@ -1033,18 +1048,29 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 // report, so no "TaxJar Status" label and no pill, just a plain link to go
 // fix it. Distinct from the "Excluded" pill (below), which covers a
 // company that IS enabled but hasn't reached _set_sync_status yet.
+//
+// Only rendered for a United States company - TaxJar is a US sales-tax
+// service and the guided setup wizard it links to has nothing to offer a
+// non-US company, so the link would just be a dead end for one.
 taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
-	const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
-	const $section = $(`
-		<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
-			<a
-				href="/app/taxjar-setup"
-				class="taxjar-not-enabled-link"
-				style="display: inline-flex; align-items: center; gap: 4px; text-decoration: underline dotted; text-underline-offset: 3px;"
-			>${__("Configure TaxJar")}${icon}</a>
-		</div>
-	`);
-	$(document).find(".form-sidebar .sidebar-meta-details").after($section);
+	const docname = frm.doc.name;
+
+	frappe.db.get_value("Company", frm.doc.company, "country").then((r) => {
+		if (frm.doc.name !== docname) return;
+		if ((r.message || {}).country !== "United States") return;
+
+		const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
+		const $section = $(`
+			<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
+				<a
+					href="/app/taxjar-setup"
+					class="taxjar-not-enabled-link"
+					style="display: inline-flex; align-items: center; gap: 4px; text-decoration: underline dotted; text-underline-offset: 3px;"
+				>${__("Configure TaxJar")}${icon}</a>
+			</div>
+		`);
+		$(document).find(".form-sidebar .sidebar-meta-details").after($section);
+	});
 };
 
 taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
