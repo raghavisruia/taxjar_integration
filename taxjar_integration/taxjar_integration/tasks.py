@@ -1,6 +1,7 @@
 import frappe
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
+	TAXJAR_MAX_SYNC_RETRIES,
 	_is_taxjar_enabled,
 	company_creates_transactions,
 	get_client,
@@ -67,6 +68,11 @@ def retry_failed_taxjar_syncs():
 	minutes burns API quota and keeps rewriting Sync Error with whatever TaxJar
 	objects to that hour, which reads as an error that "keeps changing". Those wait
 	for the Retry button on the Transactions page instead.
+
+	Also capped at TAXJAR_MAX_SYNC_RETRIES consecutive Failed outcomes
+	(taxjar_sync_retry_count, bumped by _set_sync_status) - a retryable failure
+	that keeps recurring stops being auto-retried too, rather than being
+	re-enqueued every 15 minutes forever. The Retry button is unaffected.
 	"""
 	if not _is_taxjar_enabled():
 		return
@@ -76,6 +82,7 @@ def retry_failed_taxjar_syncs():
 		filters={
 			"taxjar_sync_status": "Failed",
 			"taxjar_sync_retryable": 1,
+			"taxjar_sync_retry_count": ("<", TAXJAR_MAX_SYNC_RETRIES),
 			"docstatus": ("in", (1, 2)),
 		},
 		fields=["name", "company"],
@@ -97,13 +104,17 @@ def retry_failed_taxjar_syncs():
 def retry_failed_taxjar_customer_syncs():
 	"""Every 15 min: re-enqueue Customers whose last TaxJar sync failed in a way a
 	retry could clear - see retry_failed_taxjar_syncs() for why the rest are left
-	alone."""
+	alone, and for the same TAXJAR_MAX_SYNC_RETRIES cap on consecutive failures."""
 	if not _is_taxjar_enabled():
 		return
 
 	failed_customers = frappe.get_all(
 		"Customer",
-		filters={"taxjar_customer_sync_status": "Failed", "taxjar_customer_sync_retryable": 1},
+		filters={
+			"taxjar_customer_sync_status": "Failed",
+			"taxjar_customer_sync_retryable": 1,
+			"taxjar_customer_sync_retry_count": ("<", TAXJAR_MAX_SYNC_RETRIES),
+		},
 		pluck="name",
 		limit=50,
 	)

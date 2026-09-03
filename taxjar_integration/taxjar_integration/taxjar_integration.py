@@ -454,20 +454,28 @@ def _set_sync_status(invoice_name, status, error=None, retryable=False):
 	could clear - see classify_taxjar_error(). It is what retry_failed_taxjar_syncs()
 	filters on, so a permanently-rejected document stops being re-sent every 15
 	minutes and waits for the Retry button instead.
+
+	Each Failed outcome also bumps taxjar_sync_retry_count; any other status
+	resets it to 0. retry_failed_taxjar_syncs() stops re-enqueueing once that
+	count reaches TAXJAR_MAX_SYNC_RETRIES, so a document TaxJar keeps rejecting
+	doesn't get auto-retried forever.
 	"""
 	if error and retryable:
 		error = f"{error} Automatic retry is scheduled."
 
-	frappe.db.set_value(
-		"Sales Invoice", invoice_name,
-		{
-			"taxjar_sync_status": status,
-			"taxjar_sync_error": error or "",
-			"taxjar_sync_retryable": 1 if status == "Failed" and retryable else 0,
-			"taxjar_last_synced": frappe.utils.now() if status == "Synced" else None,
-		},
-		update_modified=False,
-	)
+	fields = {
+		"taxjar_sync_status": status,
+		"taxjar_sync_error": error or "",
+		"taxjar_sync_retryable": 1 if status == "Failed" and retryable else 0,
+		"taxjar_last_synced": frappe.utils.now() if status == "Synced" else None,
+	}
+	if status == "Failed":
+		prior_count = cint(frappe.db.get_value("Sales Invoice", invoice_name, "taxjar_sync_retry_count"))
+		fields["taxjar_sync_retry_count"] = prior_count + 1
+	else:
+		fields["taxjar_sync_retry_count"] = 0
+
+	frappe.db.set_value("Sales Invoice", invoice_name, fields, update_modified=False)
 	frappe.publish_realtime(
 		"taxjar_invoice_sync_update",
 		{"taxjar_sync_status": status},
@@ -1952,6 +1960,16 @@ def _get_taxjar_customer_id(doc):
 # only picks up documents this classification flagged retryable.
 TAXJAR_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
+# Ceiling on how many times the 15-min cron will re-enqueue the same document.
+# taxjar_sync_retry_count/taxjar_customer_sync_retry_count count consecutive
+# Failed outcomes (any source - initial attempt, cron, or a manual Retry) and
+# reset to 0 on the next non-Failed status; retry_failed_taxjar_syncs() and
+# retry_failed_taxjar_customer_syncs() (tasks.py) stop picking a document up
+# once its count reaches this, so a document TaxJar keeps rejecting doesn't
+# get re-sent forever. The Retry buttons on the Transactions/Customers pages
+# are unaffected - a human asking for it explicitly can always retry again.
+TAXJAR_MAX_SYNC_RETRIES = 5
+
 TAXJAR_STATUS_MESSAGES = {
 	400: "TaxJar rejected the request as malformed",
 	403: "This TaxJar account is not allowed to make that request",
@@ -2196,18 +2214,26 @@ def _set_customer_sync_status(customer_name, status, error=None, retryable=False
 	Reached from on_customer_update (fires on ordinary Customer saves, not
 	just a submit/cancel event), the 15-min cron retry, and the Customers
 	page's bulk sync. ``retryable`` gates the 15-min cron the same way it does
-	for invoices - see _set_sync_status().
+	for invoices, and so does taxjar_customer_sync_retry_count - see
+	_set_sync_status().
 	"""
 	if error and retryable:
 		error = f"{error} Automatic retry is scheduled."
 
+	fields = {
+		"taxjar_customer_sync_status": status,
+		"taxjar_customer_sync_error": error or "",
+		"taxjar_customer_sync_retryable": 1 if status == "Failed" and retryable else 0,
+	}
+	if status == "Failed":
+		prior_count = cint(frappe.db.get_value("Customer", customer_name, "taxjar_customer_sync_retry_count"))
+		fields["taxjar_customer_sync_retry_count"] = prior_count + 1
+	else:
+		fields["taxjar_customer_sync_retry_count"] = 0
+
 	frappe.db.set_value(
 		"Customer", customer_name,
-		{
-			"taxjar_customer_sync_status": status,
-			"taxjar_customer_sync_error": error or "",
-			"taxjar_customer_sync_retryable": 1 if status == "Failed" and retryable else 0,
-		},
+		fields,
 		update_modified=False,
 	)
 	frappe.publish_realtime(

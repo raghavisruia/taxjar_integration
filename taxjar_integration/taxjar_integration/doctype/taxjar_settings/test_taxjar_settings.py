@@ -3515,7 +3515,8 @@ class TestSetSyncStatusRealtime(UnitTestCase):
 		about - a client that reload_doc()s in response to the event needs
 		the write to have actually happened first."""
 		calls = []
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value",
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value",
 		           side_effect=lambda *a, **k: calls.append("db_write")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime",
 		           side_effect=lambda *a, **k: calls.append("publish")):
@@ -3553,13 +3554,80 @@ class TestSetCustomerSyncStatusRealtime(UnitTestCase):
 
 	def test_publishes_after_the_db_write(self):
 		calls = []
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value",
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value=0), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value",
 		           side_effect=lambda *a, **k: calls.append("db_write")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime",
 		           side_effect=lambda *a, **k: calls.append("publish")):
 			_set_customer_sync_status("CUST-TEST-001", "Failed", error="timeout")
 
 		self.assertEqual(calls, ["db_write", "publish", "publish"])
+
+
+class TestSetSyncStatusRetryCount(UnitTestCase):
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_failed_increments_retry_count(self):
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=2), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_sync_status("SINV-TEST-001", "Failed", error="timeout", retryable=True)
+
+		fields = mock_set.call_args[0][2]
+		self.assertEqual(fields["taxjar_sync_retry_count"], 3)
+
+	def test_first_failure_starts_at_one(self):
+		"""No prior stored count (a new invoice's first-ever failure) reads back
+		as None from the db - must not crash trying to add 1 to it."""
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=None), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_sync_status("SINV-TEST-001", "Failed", error="boom", retryable=True)
+
+		fields = mock_set.call_args[0][2]
+		self.assertEqual(fields["taxjar_sync_retry_count"], 1)
+
+	def test_synced_resets_retry_count(self):
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=4), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_sync_status("SINV-TEST-001", "Synced")
+
+		fields = mock_set.call_args[0][2]
+		self.assertEqual(fields["taxjar_sync_retry_count"], 0)
+
+	def test_excluded_resets_retry_count(self):
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=4), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_sync_status("SINV-TEST-001", "Excluded")
+
+		fields = mock_set.call_args[0][2]
+		self.assertEqual(fields["taxjar_sync_retry_count"], 0)
+
+
+class TestSetCustomerSyncStatusRetryCount(UnitTestCase):
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_failed_increments_retry_count(self):
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=1), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_customer_sync_status("CUST-TEST-001", "Failed", error="timeout", retryable=True)
+
+		fields = mock_set.call_args[0][2]
+		self.assertEqual(fields["taxjar_customer_sync_retry_count"], 2)
+
+	def test_synced_resets_retry_count(self):
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=3), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_customer_sync_status("CUST-TEST-001", "Synced")
+
+		fields = mock_set.call_args[0][2]
+		self.assertEqual(fields["taxjar_customer_sync_retry_count"], 0)
 
 
 # ── Realtime notification: the Transactions / Customers desk pages ─────────
@@ -3575,7 +3643,8 @@ class TestTransactionsPageRealtime(UnitTestCase):
 	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
 
 	def test_publishes_doctype_room_event_with_name_and_status(self):
-		with patch(f"{self.MOD}.frappe.db.set_value"), \
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=0), \
+		     patch(f"{self.MOD}.frappe.db.set_value"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
 			_set_sync_status("SINV-TEST-001", "Failed", error="boom")
 
@@ -11559,6 +11628,33 @@ class TestRetryCronOnlyPicksUpRetryableFailures(UnitTestCase):
 
 		self.assertEqual(
 			mock_get_all.call_args.kwargs["filters"]["taxjar_customer_sync_retryable"], 1
+		)
+
+	def test_invoice_query_filters_on_the_retry_count_cap(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_syncs
+		from taxjar_integration.taxjar_integration.taxjar_integration import TAXJAR_MAX_SYNC_RETRIES
+
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=[]) as mock_get_all:
+			retry_failed_taxjar_syncs()
+
+		self.assertEqual(
+			mock_get_all.call_args.kwargs["filters"]["taxjar_sync_retry_count"],
+			("<", TAXJAR_MAX_SYNC_RETRIES),
+		)
+
+	def test_customer_query_filters_on_the_retry_count_cap(self):
+		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+		from taxjar_integration.taxjar_integration.taxjar_integration import TAXJAR_MAX_SYNC_RETRIES
+
+		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=[]) as mock_get_all, \
+		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_single", return_value=MagicMock(company_config=[])):
+			retry_failed_taxjar_customer_syncs()
+
+		self.assertEqual(
+			mock_get_all.call_args.kwargs["filters"]["taxjar_customer_sync_retry_count"],
+			("<", TAXJAR_MAX_SYNC_RETRIES),
 		)
 
 

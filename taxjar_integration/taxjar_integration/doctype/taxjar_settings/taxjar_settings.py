@@ -665,6 +665,22 @@ def get_custom_fields():
 				no_copy=1,
 				allow_on_submit=1,
 			),
+			dict(
+				# Consecutive Failed count, bumped by _set_sync_status() and reset
+				# on any other status. retry_failed_taxjar_syncs() stops
+				# re-enqueueing once this reaches TAXJAR_MAX_SYNC_RETRIES - the
+				# Retry button on the Transactions page is unaffected. Hidden for
+				# the same reason as taxjar_sync_retryable above.
+				fieldname="taxjar_sync_retry_count",
+				fieldtype="Int",
+				insert_after="taxjar_sync_retryable",
+				label="TaxJar Retry Count",
+				default="0",
+				read_only=1,
+				hidden=1,
+				no_copy=1,
+				allow_on_submit=1,
+			),
 		],
 		"Customer": [
 			# ── TaxJar Tax Exemption (summary card + sync status) ──
@@ -772,6 +788,17 @@ def get_custom_fields():
 				depends_on="eval: doc.taxjar_exemption_type && doc.taxjar_exemption_type !== 'Non Exempt'",
 				hidden=1,
 				description="",
+			),
+			dict(
+				# Customer-side twin of taxjar_sync_retry_count - see its comment.
+				fieldname="taxjar_customer_sync_retry_count",
+				fieldtype="Int",
+				insert_after="taxjar_exempt_regions",
+				label="TaxJar Retry Count",
+				default="0",
+				read_only=1,
+				hidden=1,
+				no_copy=1,
 			),
 		],
 		# Print-time toggle for the "US Sales Tax Invoice" print format's
