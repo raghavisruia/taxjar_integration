@@ -9421,43 +9421,72 @@ class TestFormatAddressShort(UnitTestCase):
 
 class TestComputeProductTaxable(UnitTestCase):
 
-	def _make_item_with_ptc(self, ptc=None):
-		item = _FakeItem()
-		item.product_tax_category = ptc
-		return item
+	def _make_tax_data(self, line_items):
+		"""line_items: list of (id, taxable_amount)."""
+		tax_data = MagicMock()
+		tax_data.breakdown.line_items = [
+			MagicMock(id=line_id, taxable_amount=taxable_amount)
+			for line_id, taxable_amount in line_items
+		]
+		return tax_data
 
 	def test_all_taxable(self):
 		doc = _make_doc()
-		doc.items = [self._make_item_with_ptc("20010"), self._make_item_with_ptc("31000")]
-		status, reason = _compute_product_taxable(doc)
+		doc.items = [_FakeItem(idx=1, net_amount=100.0), _FakeItem(idx=2, net_amount=50.0)]
+		tax_data = self._make_tax_data([(1, 100.0), (2, 50.0)])
+		status, reason = _compute_product_taxable(doc, tax_data)
 		self.assertEqual(status, "Yes")
 		self.assertIn("2 of 2", reason)
 
 	def test_all_exempt(self):
+		"""A line TaxJar returned taxable_amount 0 for - the item is genuinely
+		exempt (e.g. a product tax code TaxJar zero-rates), not merely taxed at
+		a 0% local rate - is reported "No", not "Yes"."""
 		doc = _make_doc()
-		doc.items = [self._make_item_with_ptc("99999"), self._make_item_with_ptc("99999")]
-		status, reason = _compute_product_taxable(doc)
+		doc.items = [_FakeItem(idx=1, net_amount=100.0), _FakeItem(idx=2, net_amount=50.0)]
+		tax_data = self._make_tax_data([(1, 0.0), (2, 0.0)])
+		status, reason = _compute_product_taxable(doc, tax_data)
 		self.assertEqual(status, "No")
 		self.assertIn("0 of 2", reason)
 
 	def test_partially_taxable(self):
 		doc = _make_doc()
-		doc.items = [self._make_item_with_ptc("20010"), self._make_item_with_ptc("99999")]
-		status, reason = _compute_product_taxable(doc)
+		doc.items = [_FakeItem(idx=1, net_amount=100.0), _FakeItem(idx=2, net_amount=50.0)]
+		tax_data = self._make_tax_data([(1, 100.0), (2, 0.0)])
+		status, reason = _compute_product_taxable(doc, tax_data)
 		self.assertEqual(status, "Partially")
 		self.assertIn("1 of 2", reason)
 
 	def test_no_items(self):
 		doc = _make_doc()
 		doc.items = []
-		status, reason = _compute_product_taxable(doc)
+		tax_data = self._make_tax_data([])
+		status, reason = _compute_product_taxable(doc, tax_data)
 		self.assertEqual(status, "")
 
-	def test_no_ptc_counts_as_taxable(self):
+	def test_missing_breakdown_line_counts_as_taxable(self):
+		"""No matching breakdown line for an item (e.g. tax_data is None,
+		as on the exempt-customer/no-nexus path) falls back to the item's
+		own net_amount, i.e. fully taxable - preserving the old default."""
 		doc = _make_doc()
-		doc.items = [self._make_item_with_ptc(None)]
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)):
-			status, reason = _compute_product_taxable(doc)
+		doc.items = [_FakeItem(idx=1, net_amount=0.0)]
+		status, reason = _compute_product_taxable(doc, None)
+		self.assertEqual(status, "Yes")
+
+	def test_no_usd_rate_uses_taxable_amount_directly(self):
+		doc = _make_doc()
+		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
+		tax_data = self._make_tax_data([(1, 100.0)])
+		status, reason = _compute_product_taxable(doc, tax_data, usd_rate=None)
+		self.assertEqual(status, "Yes")
+
+	def test_usd_rate_converts_taxable_amount_back_to_doc_currency(self):
+		"""taxable_amount comes back from TaxJar in USD; dividing by usd_rate
+		mirrors how tax_collectable is converted back to doc currency."""
+		doc = _make_doc()
+		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
+		tax_data = self._make_tax_data([(1, 200.0)])
+		status, reason = _compute_product_taxable(doc, tax_data, usd_rate=2.0)
 		self.assertEqual(status, "Yes")
 
 

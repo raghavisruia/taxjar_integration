@@ -1040,7 +1040,7 @@ def set_sales_tax(doc, method):
 
 		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
 
-		product_status, product_reason = _compute_product_taxable(doc)
+		product_status, product_reason = _compute_product_taxable(doc, tax_data, usd_rate)
 		to_state = tax_dict.get("to_state", "")
 		# The status matrix reports what the CUSTOMER MASTER says, not the
 		# effective outcome: a transaction-level override used to flip this to
@@ -1152,16 +1152,31 @@ def _format_address_short(tax_dict, prefix):
 	return result.strip()
 
 
-def _compute_product_taxable(doc):
-	"""Return (status, reason) for product taxability based on item tax categories."""
+def _compute_product_taxable(doc, tax_data, usd_rate=None):
+	"""Return (status, reason) for product taxability, read back from TaxJar's
+	own per-line taxable_amount rather than guessed from the item's tax
+	category code - a real exemption category (e.g. "81100" for books) looks
+	just like an ordinary taxable one by code alone, but TaxJar has already
+	worked out, per line and per jurisdiction, how much of it was taxable."""
 	total = len(doc.items)
 	if not total:
 		return "", ""
+
+	taxable_by_idx = {}
+	for line in (tax_data.breakdown.line_items if (tax_data and tax_data.breakdown) else []):
+		idx = cint(line.id) - 1
+		if 0 <= idx < total:
+			taxable_amount = flt(line.taxable_amount)
+			if usd_rate:
+				taxable_amount = flt(taxable_amount / usd_rate)
+			taxable_by_idx[idx] = taxable_amount
+
 	taxable_count = 0
-	for item in doc.items:
-		ptc = _get_item_product_tax_category(item)
-		if not ptc or ptc != "99999":
+	for idx, item in enumerate(doc.items):
+		net_amount = flt(item.get("net_amount"))
+		if taxable_by_idx.get(idx, 0) >= net_amount - 0.01:
 			taxable_count += 1
+
 	if taxable_count == total:
 		return "Yes", f"{taxable_count} of {total} items taxable"
 	elif taxable_count == 0:
