@@ -8756,7 +8756,7 @@ class TestGetTaxjarBreakdownHtml(UnitTestCase):
 		_store_breakdown_data(tax_data, doc)
 		doc.taxjar_freight_taxable = 1
 		html = get_taxjar_breakdown_html(doc)
-		self.assertNotIn("Is shipping charges taxable?", html)
+		self.assertNotIn("Are shipping charges taxable?", html)
 		self.assertNotIn("indicator-pill", html)
 
 	def test_jurisdiction_and_name_are_html_escaped(self):
@@ -9016,7 +9016,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 		js = self._read_js("taxjar_utils.js")
 		fn = js.split("render_shipping_taxability = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("taxjar_freight_taxable", fn)
-		self.assertIn("Is shipping charges taxable?", fn)
+		self.assertIn("Are shipping charges taxable?", fn)
 		self.assertIn("frappe.ui.badge.html(", fn)
 		self.assertNotIn("indicator-pill", fn)
 		self.assertIn('__("Yes")', fn)

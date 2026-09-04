@@ -966,7 +966,7 @@ taxjar_integration.render_shipping_taxability = function (frm) {
 	const badge = frappe.ui.badge.html({ label, theme: taxable ? "green" : "gray" });
 	wrapper.show().html(`
 		<div style="margin-bottom: 10px; font-size: var(--text-md); display: flex; align-items: center; gap: 8px;">
-			<span class="text-muted">${__("Is shipping charges taxable?")}</span>
+			<span class="text-muted">${__("Are shipping charges taxable?")}</span>
 			${badge}
 		</div>
 	`);
