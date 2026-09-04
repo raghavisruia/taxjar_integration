@@ -4779,6 +4779,17 @@ class TestDeskPageChromeJS(UnitTestCase):
 		with open(os.path.normpath(path)) as f:
 			return f.read()
 
+	def _read_scss(self):
+		"""The shared desk stylesheet the components in public/js/components
+		are styled by (app_include_css in hooks.py)."""
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..",
+			"public", "scss", "taxjar_integration.bundle.scss",
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
 	def test_no_dependency_on_india_compliance(self):
 		"""india_compliance is in this bench but installed on no site, so any
 		reference to its namespace would be undefined at runtime."""
@@ -4952,9 +4963,9 @@ class TestDeskPageChromeJS(UnitTestCase):
 				self.assertNotIn('__("Showing {0} - {1} of {2}"', js)
 
 	def test_the_card_is_the_click_target_and_says_so(self):
-		"""The pointer cursor is the only affordance now that the underline is
-		gone, so the whole card has to be clickable - a pointer over dead space
-		would be advertising something that is not there."""
+		"""The cursor and the hover colour are the whole affordance now that the
+		underline is gone, so the whole card has to be clickable - a pointer
+		over dead space would be advertising something that is not there."""
 		strip = self._read_component("summary_strip")
 		self.assertIn('$card\n\t\t\t\t\t.addClass("taxjar-summary-clickable")', strip)
 		self.assertIn('$card.on("click", activate)', strip)
@@ -4963,19 +4974,36 @@ class TestDeskPageChromeJS(UnitTestCase):
 		self.assertNotIn('.attr("title"', strip)
 		self.assertNotIn("Show only these", strip)
 
-		import os
-		scss_path = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "..",
-			"public", "scss", "taxjar_integration.bundle.scss",
-		))
-		with open(scss_path) as f:
-			rule = f.read().split(".taxjar-summary-clickable {")[1].split("\n}")[0]
+		rule = self._read_scss().split(".taxjar-summary-clickable {")[1].split("\n}")[0]
 		self.assertIn("cursor: pointer", rule)
 		# No underline and no background block - both were tried and dropped.
 		self.assertNotIn("border-bottom", rule)
 		self.assertNotIn("background-color", rule)
 		# The active drill-down still has to be visible.
 		self.assertIn('&[aria-pressed="true"] .summary-value', rule)
+
+	def test_hovering_a_card_deepens_the_number_it_counts(self):
+		"""The cursor only says "clickable" once the pointer is already on the
+		card, and a row of figures gives nothing to compare against. The number
+		deepening on hover answers that without adding furniture to the strip -
+		hence colour only, no underline or background."""
+		scss = self._read_scss()
+		rule = scss.split(".taxjar-summary-clickable {")[1].split("\n}")[0]
+		hover = rule.split("&:hover .summary-value {")[1].split("\n\t}")[0]
+
+		# The neutral counts (Total, Non-Exempted, Not Configured) deepen too.
+		self.assertIn("color: var(--heading-color);", hover)
+		for token in ("--green-700", "--blue-700", "--red-700"):
+			self.assertIn(token, hover)
+
+	def test_the_dark_hover_step_goes_lighter_not_deeper(self):
+		"""The dark palette shifts the whole scale darker rather than inverting
+		it (--green-500 is #43ac79 light, #117846 dark), so a deeper tone there
+		would cut contrast against the page instead of raising it."""
+		scss = self._read_scss()
+		dark = scss.split('[data-theme="dark"] .taxjar-summary-clickable:hover .summary-value {')[1].split("\n}")[0]
+		for token in ("--green-300", "--blue-300", "--red-300"):
+			self.assertIn(token, dark)
 
 	def test_a_total_card_is_clickable(self):
 		"""A Total's key is the empty string - "no filter, show all of it". A

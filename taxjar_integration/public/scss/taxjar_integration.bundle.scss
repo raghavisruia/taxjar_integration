@@ -179,11 +179,36 @@
 	}
 }
 
-// The whole card is the click target; the pointer cursor is the only thing
-// advertising it. No underline and no background - the row is a dense line of
-// figures, and decorating each one competes with the numbers themselves.
+// The whole card is the click target. No underline and no background - the row
+// is a dense line of figures, and decorating each one competes with the numbers
+// themselves - so the number's own colour deepens instead. That reads as
+// "clickable" without adding any furniture to the strip, and unlike the pointer
+// cursor it is visible from the moment the pointer crosses the card.
 .taxjar-summary-clickable {
 	cursor: pointer;
+
+	.summary-value {
+		transition: color 100ms ease-in-out;
+	}
+
+	// Resting tones are frappe's own (.summary-value.green etc. in
+	// desk/report.scss, all -500), so the strip still matches every other
+	// report summary in the desk; only the hover step is ours.
+	&:hover .summary-value {
+		color: var(--heading-color);
+
+		&.green {
+			color: var(--green-700);
+		}
+
+		&.blue {
+			color: var(--blue-700);
+		}
+
+		&.red {
+			color: var(--red-700);
+		}
+	}
 
 	&:focus-visible {
 		outline: 1px solid var(--primary);
@@ -194,6 +219,25 @@
 	// below is showing a subset.
 	&[aria-pressed="true"] .summary-value {
 		font-weight: 800;
+	}
+}
+
+// The dark palette shifts the whole scale darker rather than inverting it
+// (--green-500 is #43ac79 in light and #117846 in dark), so going deeper there
+// would mean less contrast against the page, not more. The hover step goes the
+// other way instead; the neutral value needs no such flip, since
+// --heading-color follows the theme on its own.
+[data-theme="dark"] .taxjar-summary-clickable:hover .summary-value {
+	&.green {
+		color: var(--green-300);
+	}
+
+	&.blue {
+		color: var(--blue-300);
+	}
+
+	&.red {
+		color: var(--red-300);
 	}
 }
 
