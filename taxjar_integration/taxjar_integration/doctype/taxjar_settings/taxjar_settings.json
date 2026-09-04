@@ -25,6 +25,7 @@
   "nexus_html",
   "product_tax_category_section",
   "update_product_tax_category_btn",
+  "product_tax_categories_last_synced",
   "product_tax_category_html",
   "section_nexus_raw",
   "nexus"
@@ -132,6 +133,13 @@
    "fieldname": "update_product_tax_category_btn",
    "fieldtype": "Button",
    "label": "Update Product Tax Category List"
+  },
+  {
+   "fieldname": "product_tax_categories_last_synced",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Product Tax Categories Last Synced",
+   "read_only": 1
   },
   {
    "fieldname": "product_tax_category_html",

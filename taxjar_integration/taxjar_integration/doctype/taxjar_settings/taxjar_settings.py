@@ -5,6 +5,7 @@
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 _CODE_RE = re.compile(r"^[A-Z]{2}$")
@@ -175,14 +176,27 @@ class TaxJarSettings(Document):
 
 	@frappe.whitelist()
 	def get_product_tax_category_summary(self):
-		"""Live count and most-recent modification time for Product Tax Category rows,
-		rendered next to the "Nexus & Product Category" tab. Reads straight off the
-		table rather than a separate tracking field, so it's correct whether rows came
-		from the install-time seed or the weekly TaxJar sync (tasks.sync_product_tax_categories).
+		"""Live count and last-fetched time for Product Tax Category rows, rendered
+		on the "Nexus & Product Category" tab and the page of the same name.
+
+		`last_updated` is when the list last came from TaxJar (stamped by
+		fetch_and_insert_categories), falling back to the most recently modified
+		row for a site whose categories predate that stamp - the install-time
+		seed, or any sync before this field existed. Read from the database, not
+		off `self`, so a summary returned right after a fetch reflects it.
 		"""
+		last_synced = frappe.db.get_single_value(
+			"TaxJar Settings", "product_tax_categories_last_synced"
+		)
+		# An unwritten Datetime single comes back as datetime.min, not None -
+		# get_single_value() casts through get_datetime(None) (database.py) - so
+		# a plain truthiness check would never reach the fallback.
+		if last_synced == datetime.min:
+			last_synced = None
+
 		return {
 			"count": frappe.db.count("Product Tax Category"),
-			"last_updated": frappe.db.get_value(
+			"last_updated": last_synced or frappe.db.get_value(
 				"Product Tax Category", filters={}, fieldname="modified", order_by="modified desc"
 			),
 		}
@@ -307,6 +321,15 @@ def fetch_and_insert_categories(client):
 		}
 		for category in categories
 	])
+
+	# create_tax_categories() only inserts codes that are missing, so a fetch
+	# that finds nothing new leaves every row's `modified` untouched - which is
+	# why "when did this list last come from TaxJar" needs recording separately
+	# rather than being read back off the rows. Stamped here rather than in
+	# either caller so the weekly job and the manual button can't disagree.
+	frappe.db.set_single_value(
+		"TaxJar Settings", "product_tax_categories_last_synced", frappe.utils.now()
+	)
 
 
 # Single source of truth: the leading "" yields a blank first option in the Select.

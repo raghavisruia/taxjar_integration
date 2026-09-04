@@ -2,6 +2,7 @@
 # See license.txt
 
 import json
+from datetime import datetime
 
 from unittest.mock import DEFAULT, MagicMock, patch
 
@@ -7701,10 +7702,14 @@ class TestProductTaxCategorySummary(UnitTestCase):
 	"""Tests for TaxJarSettings.get_product_tax_category_summary(), rendered on the
 	renamed 'Nexus & Product Category' tab."""
 
+	MOD = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
 	def setUp(self):
 		self.settings = frappe.get_single("TaxJar Settings")
 
 	def test_count_matches_table_and_last_updated_matches_max_modified(self):
+		"""last_updated only reads the rows on a site that has never recorded a
+		fetch, hence the unwritten (datetime.min) stamp here."""
 		row = frappe.get_doc({
 			"doctype": "Product Tax Category",
 			"product_tax_code": "TEST_SUMMARY_ROW",
@@ -7713,7 +7718,8 @@ class TestProductTaxCategorySummary(UnitTestCase):
 		}).insert(ignore_permissions=True)
 		self.addCleanup(frappe.db.delete, "Product Tax Category", {"product_tax_code": "TEST_SUMMARY_ROW"})
 
-		summary = self.settings.get_product_tax_category_summary()
+		with patch(self.MOD + ".frappe.db.get_single_value", return_value=datetime.min):
+			summary = self.settings.get_product_tax_category_summary()
 
 		self.assertEqual(summary["count"], frappe.db.count("Product Tax Category"))
 		self.assertEqual(
@@ -7738,11 +7744,57 @@ class TestProductTaxCategorySummary(UnitTestCase):
 			return real_get_value(doctype, *args, **kwargs)
 
 		with patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.count", side_effect=fake_count), \
+		     patch(self.MOD + ".frappe.db.get_single_value", return_value=datetime.min), \
 		     patch("taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.frappe.db.get_value", side_effect=fake_get_value):
 			summary = self.settings.get_product_tax_category_summary()  # must not raise
 
 		self.assertEqual(summary["count"], 0)
 		self.assertIsNone(summary["last_updated"])
+
+	def test_last_updated_prefers_the_recorded_fetch_time(self):
+		"""create_tax_categories() only inserts codes that are missing, so a
+		fetch that finds nothing new leaves every row's `modified` untouched -
+		read off the rows alone, "Synced ..." never moved after a sync."""
+		stamp = datetime(2026, 9, 4, 1, 18, 48)
+
+		with patch(self.MOD + ".frappe.db.get_single_value", return_value=stamp):
+			summary = self.settings.get_product_tax_category_summary()
+
+		self.assertEqual(summary["last_updated"], stamp)
+
+	def test_unwritten_fetch_time_falls_back_to_the_newest_row(self):
+		"""get_single_value() casts an unwritten Datetime single through
+		get_datetime(None), which is datetime.min rather than None - so a plain
+		truthiness check would report the year 1 instead of falling back."""
+		with patch(self.MOD + ".frappe.db.get_single_value", return_value=datetime.min):
+			summary = self.settings.get_product_tax_category_summary()
+
+		self.assertEqual(
+			summary["last_updated"],
+			frappe.db.get_value(
+				"Product Tax Category", filters={}, fieldname="modified", order_by="modified desc"
+			),
+		)
+
+	def test_fetch_records_when_the_list_came_from_taxjar(self):
+		"""Stamped inside fetch_and_insert_categories so the weekly job and the
+		manual button can't disagree about it."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			fetch_and_insert_categories,
+		)
+
+		client = MagicMock()
+		client.categories.return_value = []
+
+		with patch(self.MOD + ".create_tax_categories"), patch(self.MOD + ".log_taxjar_call"), \
+		     patch(self.MOD + ".frappe.db.set_single_value") as mock_set:
+			fetch_and_insert_categories(client)
+
+		mock_set.assert_called_once()
+		self.assertEqual(
+			mock_set.call_args[0][:2],
+			("TaxJar Settings", "product_tax_categories_last_synced"),
+		)
 
 	def test_js_formats_last_updated_via_user_timezone_not_comment_when(self):
 		"""comment_when()/prettyDate() blanks the display whenever it computes a
