@@ -15,11 +15,44 @@ WORKSPACE = "TaxJar Integration"
 
 # Lucide icon names shown next to each sidebar card group. Cards without an entry
 # fall back to no icon.
-SIDEBAR_CARD_ICONS = {
-	"Setup": "settings",
-	"Manage": "layers",
-	"Sync": "refresh-cw",
-}
+# The desk left sidebar, authored here rather than derived from the workspace's
+# own cards. The two answer different questions: the workspace page groups by
+# what a thing IS (Setup / Manage / Sync), while the sidebar is a standing
+# navigation list ordered by how often each page is opened - so a link can sit
+# in one group on the page and another in the sidebar, and renaming a card must
+# not silently rename a sidebar group.
+#
+# `icon` must be a symbol id in frappe's bundled lucide sprite
+# (frappe/public/icons/lucide/icons.svg): an unknown name resolves to nothing
+# and renders blank rather than failing loudly. `keep_closed` renders the group
+# collapsed - everything under Other is reference material, reached
+# occasionally and as often from a link elsewhere as from here, so it opens on
+# request rather than pushing the day-to-day pages down the list.
+SIDEBAR_GROUPS = [
+	{
+		"label": "Setup",
+		"icon": "settings",
+		"links": [
+			("TaxJar Setup", "taxjar-setup", "Page"),
+			("Customer Tax Exemption", "taxjar-customers", "Page"),
+			("Nexus & Product Category", "taxjar-nexus", "Page"),
+		],
+	},
+	{
+		"label": "Reports",
+		"icon": "file-text",
+		"links": [("TaxJar Transaction Sync", "taxjar-transactions", "Page")],
+	},
+	{
+		"label": "Other",
+		"icon": "ellipsis",
+		"keep_closed": True,
+		"links": [
+			("TaxJar API Logs", "TaxJar API Log", "DocType"),
+			("TaxJar API Settings", "TaxJar Settings", "DocType"),
+		],
+	},
+]
 
 GUIDED_SETUP_ALERT_BLOCK = "TaxJar Guided Setup Alert"
 
@@ -228,43 +261,25 @@ def keep_guided_setup_alert(doc, method):
 
 
 def sync_taxjar_workspace_sidebar():
-	"""(Re)build the desk left sidebar so it mirrors the workspace's card groups.
+	"""(Re)build the desk left sidebar from SIDEBAR_GROUPS.
 
 	The grouped sidebar lives on ``Workspace.sidebar_items`` (a child table on the
-	workspace itself): each card (Card Break) becomes a collapsible Section Break
-	and its links become nested child items. This is NOT the standalone
+	workspace itself): each group becomes a collapsible Section Break and its
+	links become nested child items. This is NOT the standalone
 	``Workspace Sidebar`` doctype - that was merged into ``Workspace`` earlier in
 	v16 (see ``frappe.patches.v16_0.migrate_workspace_sidebar_to_workspace`` and
 	``frappe.boot.get_sidebar_items``, which explicitly says "the legacy Workspace
-	Sidebar doctype is no longer read here"). The workspace is the single source
-	of truth, so this runs on every install/migrate and stays in lockstep with
-	the card layout.
+	Sidebar doctype is no longer read here").
+
+	SIDEBAR_GROUPS is the source of truth, not the workspace's own cards: the
+	sidebar is a standing navigation list and the cards group by kind, so the two
+	are grouped, ordered and labelled differently on purpose. This runs on every
+	install/migrate, so an edit up there reaches already-migrated sites too.
 	"""
 	if not frappe.db.exists("Workspace", WORKSPACE):
 		return
 
 	ws = frappe.get_doc("Workspace", WORKSPACE)
-
-	# Card display order comes from the content blocks; the links table holds the
-	# Card Break -> child-link grouping.
-	content = frappe.parse_json(ws.content or "[]")
-	card_order = [
-		block["data"]["card_name"]
-		for block in content
-		if block.get("type") == "card" and block.get("data", {}).get("card_name")
-	]
-
-	grouped = {}
-	current = None
-	for link in ws.links:
-		if link.type == "Card Break":
-			current = link.label
-			grouped.setdefault(current, [])
-		elif link.type == "Link" and current and link.link_to:
-			grouped[current].append(link)
-
-	# Honour the visual (content) order, then any card only present in links.
-	ordered_cards = card_order + [card for card in grouped if card not in card_order]
 
 	# A Home entry routes back to the workspace itself, mirroring core desk sidebars.
 	items = [{
@@ -274,23 +289,21 @@ def sync_taxjar_workspace_sidebar():
 		"link_type": "Workspace",
 		"icon": "house",
 	}]
-	for card in ordered_cards:
-		links = grouped.get(card)
-		if not links:
-			continue
+	for group in SIDEBAR_GROUPS:
 		items.append({
 			"type": "Section Break",
-			"label": card,
-			"icon": SIDEBAR_CARD_ICONS.get(card),
+			"label": group["label"],
+			"icon": group.get("icon"),
 			"collapsible": 1,
+			"keep_closed": 1 if group.get("keep_closed") else 0,
 			"indent": 1,
 		})
-		for link in links:
+		for label, link_to, link_type in group["links"]:
 			items.append({
 				"type": "Link",
-				"label": link.label,
-				"link_to": link.link_to,
-				"link_type": link.link_type,
+				"label": label,
+				"link_to": link_to,
+				"link_type": link_type,
 				"child": 1,
 				"collapsible": 1,
 			})

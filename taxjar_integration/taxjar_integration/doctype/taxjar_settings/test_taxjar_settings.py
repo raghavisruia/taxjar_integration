@@ -8559,16 +8559,16 @@ class TestWorkspaceBranding(UnitTestCase):
 		ws = self._workspace()
 		self.assertEqual(ws["icon"], "coins")
 
-	def test_sidebar_mirrors_card_groups(self):
-		"""The generated sidebar mirrors the workspace card groups: each card
-		becomes a Section Break with its links as nested children, in the card
-		display (content) order.
+	def test_sidebar_is_built_from_its_own_structure_not_the_cards(self):
+		"""The sidebar is a standing navigation list; the workspace's cards group
+		by kind. They are grouped, ordered and labelled differently on purpose,
+		so renaming a card must not rename a sidebar group.
 
 		The sidebar lives on ``Workspace.sidebar_items`` - a child table on the
 		workspace itself - not the standalone ``Workspace Sidebar`` doctype, which
 		was merged into ``Workspace`` earlier in v16 and is no longer read by
 		frappe.boot.get_sidebar_items."""
-		from taxjar_integration.install import sync_taxjar_workspace_sidebar
+		from taxjar_integration.install import SIDEBAR_GROUPS, sync_taxjar_workspace_sidebar
 
 		sync_taxjar_workspace_sidebar()
 		doc = frappe.get_doc("Workspace", "TaxJar Integration")
@@ -8581,13 +8581,98 @@ class TestWorkspaceBranding(UnitTestCase):
 				structure.append(current)
 			elif item.type == "Link" and current is not None:
 				self.assertTrue(item.child)
-				current["children"].append(item.link_to)
+				current["children"].append((item.label, item.link_to))
 
-		self.assertEqual([g["group"] for g in structure], ["Setup", "Manage", "Sync"])
-		groups = {g["group"]: g["children"] for g in structure}
-		self.assertEqual(groups["Setup"], ["taxjar-setup", "TaxJar Settings", "TaxJar API Log"])
-		self.assertEqual(groups["Manage"], ["taxjar-customers", "taxjar-nexus"])
-		self.assertEqual(groups["Sync"], ["taxjar-transactions"])
+		self.assertEqual(
+			structure,
+			[
+				{
+					"group": group["label"],
+					"children": [(label, link_to) for label, link_to, _ in group["links"]],
+				}
+				for group in SIDEBAR_GROUPS
+			],
+		)
+
+		self.assertEqual([g["group"] for g in structure], ["Setup", "Reports", "Other"])
+		groups = {g["group"]: [link_to for _, link_to in g["children"]] for g in structure}
+		self.assertEqual(
+			groups["Setup"], ["taxjar-setup", "taxjar-customers", "taxjar-nexus"]
+		)
+		self.assertEqual(groups["Reports"], ["taxjar-transactions"])
+		self.assertEqual(groups["Other"], ["TaxJar API Log", "TaxJar Settings"])
+
+	def test_the_workspace_cards_keep_their_own_grouping(self):
+		"""Restructuring the sidebar must leave the workspace page alone - the
+		two were derived from one list once, and this is what stops that
+		coupling coming back."""
+		ws = self._workspace()
+		cards, current = {}, None
+		for link in ws["links"]:
+			if link["type"] == "Card Break":
+				current = link["label"]
+				cards[current] = []
+			elif link["type"] == "Link":
+				cards[current].append(link["link_to"])
+
+		self.assertEqual(
+			cards,
+			{
+				"Manage": ["taxjar-customers", "taxjar-nexus"],
+				"Report": ["taxjar-transactions"],
+				"Other": ["TaxJar API Log"],
+			},
+		)
+
+		# Display order comes from the content blocks, not the links table.
+		import json as _json
+		self.assertEqual(
+			[
+				block["data"]["card_name"]
+				for block in _json.loads(ws["content"])
+				if block.get("type") == "card"
+			],
+			["Manage", "Report", "Other"],
+		)
+
+	def test_only_the_reference_group_starts_closed(self):
+		"""Everything under Other is reference material reached occasionally -
+		it opens on request rather than pushing the day-to-day pages down."""
+		from taxjar_integration.install import SIDEBAR_GROUPS, sync_taxjar_workspace_sidebar
+
+		sync_taxjar_workspace_sidebar()
+		doc = frappe.get_doc("Workspace", "TaxJar Integration")
+
+		closed = {
+			item.label for item in doc.sidebar_items
+			if item.type == "Section Break" and item.keep_closed
+		}
+		self.assertEqual(closed, {"Other"})
+		self.assertEqual(
+			closed, {g["label"] for g in SIDEBAR_GROUPS if g.get("keep_closed")}
+		)
+
+		# Every group still opens and closes - only the starting state differs.
+		for item in doc.sidebar_items:
+			if item.type == "Section Break":
+				self.assertTrue(item.collapsible, item.label)
+
+	def test_group_icons_exist_in_the_bundled_lucide_sprite(self):
+		"""An icon name frappe's sprite does not define resolves to nothing and
+		renders blank rather than failing loudly - see the Home entry's own
+		regression below."""
+		import os
+		from taxjar_integration.install import SIDEBAR_GROUPS
+
+		sprite = os.path.join(
+			frappe.get_app_path("frappe"), "public", "icons", "lucide", "icons.svg"
+		)
+		with open(sprite) as f:
+			svg = f.read()
+
+		for group in SIDEBAR_GROUPS:
+			with self.subTest(group=group["label"]):
+				self.assertIn(f'id="icon-{group["icon"]}"', svg)
 
 	def test_home_entry_uses_an_icon_that_exists_in_the_bundled_lucide_sprite(self):
 		"""Regression guard: the desk sidebar resolves an icon name straight to
@@ -8606,15 +8691,14 @@ class TestWorkspaceBranding(UnitTestCase):
 	def test_link_cards(self):
 		ws = self._workspace()
 		cards = {l["label"] for l in ws["links"] if l["type"] == "Card Break"}
-		self.assertEqual(cards, {"Setup", "Manage", "Sync"})
+		self.assertEqual(cards, {"Manage", "Report", "Other"})
 
 	def test_link_targets(self):
 		ws = self._workspace()
 		targets = {l["link_to"] for l in ws["links"] if l["type"] == "Link"}
 		self.assertEqual(
 			targets,
-			{"TaxJar Settings", "taxjar-customers", "taxjar-transactions",
-			 "TaxJar API Log", "taxjar-setup", "taxjar-nexus"},
+			{"taxjar-customers", "taxjar-nexus", "taxjar-transactions", "TaxJar API Log"},
 		)
 
 	def test_apps_screen_title_branded(self):
