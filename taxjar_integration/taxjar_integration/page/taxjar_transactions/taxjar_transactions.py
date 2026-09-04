@@ -17,35 +17,41 @@ _TAXJAR_INVOICE_COLUMN = "taxjar_sync_status"
 
 _DOC_STATUS_LABELS = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 
-# The page's two tabs: what TaxJar has, and what it does not.
-INCLUDED_SCOPE = "included"
-EXCLUDED_SCOPE = "excluded"
-
-# Summary-only scopes. The strip counts drafts and submitted docs separately
-# even though the Excluded tab lists them together.
-SUBMITTED_SCOPE = "submitted"
+# The page's five tabs, one per state a transaction can be in. Between them
+# they partition the table: every invoice in range lands in exactly one, so a
+# row can never go missing by being in none of them.
+FAILED_SCOPE = "failed"
+QUEUED_SCOPE = "queued"
+NOT_APPLICABLE_SCOPE = "not_applicable"
 DRAFT_SCOPE = "draft"
+SYNCED_SCOPE = "synced"
+
+# Summary-only: the strip counts the submitted statuses in one grouped query.
+SUBMITTED_SCOPE = "submitted"
 
 # The statuses a transaction can only reach by actually being sent.
-_INCLUDED_STATUSES = ("Synced", "Queued", "Failed")
+_SENT_STATUSES = ("Synced", "Queued", "Failed")
+
+# Cancelled sits with Submitted throughout: it was sent to TaxJar, and the
+# cancellation is itself something to have been synced.
+_SUBMITTED = ("in", (1, 2))
 
 _SCOPE_CONDITIONS = {
-	INCLUDED_SCOPE: {
-		"docstatus": ("in", (1, 2)),
-		"taxjar_sync_status": ("in", _INCLUDED_STATUSES),
+	FAILED_SCOPE: {"docstatus": _SUBMITTED, "taxjar_sync_status": "Failed"},
+	QUEUED_SCOPE: {"docstatus": _SUBMITTED, "taxjar_sync_status": "Queued"},
+	# Submitted and deliberately not sent. "not in" rather than "= Excluded" so
+	# a row whose status was never written still lands somewhere: frappe wraps a
+	# nullable field in IFNULL for this operator (query.py:1971), so a NULL
+	# counts as not applicable instead of falling out of every tab.
+	NOT_APPLICABLE_SCOPE: {
+		"docstatus": _SUBMITTED,
+		"taxjar_sync_status": ("not in", _SENT_STATUSES),
 	},
-	# Everything TaxJar never received: drafts (nothing syncs before submit,
-	# see enqueue_taxjar_sync's on_submit hook) and submitted docs deliberately
-	# left out. Deliberately not filtered on docstatus - the two live together
-	# here, told apart by the tab's Status column.
-	#
-	# "not in" rather than "= Excluded" so a row whose status was never written
-	# still lands somewhere: frappe wraps a nullable field in IFNULL for this
-	# operator (query.py:1971), so a NULL counts as excluded instead of falling
-	# out of both tabs.
-	EXCLUDED_SCOPE: {"taxjar_sync_status": ("not in", _INCLUDED_STATUSES)},
-	SUBMITTED_SCOPE: {"docstatus": ("in", (1, 2))},
+	# Nothing syncs before submit (see enqueue_taxjar_sync's on_submit hook),
+	# so a draft's sync status says nothing and is not filtered on.
 	DRAFT_SCOPE: {"docstatus": 0},
+	SYNCED_SCOPE: {"docstatus": _SUBMITTED, "taxjar_sync_status": "Synced"},
+	SUBMITTED_SCOPE: {"docstatus": _SUBMITTED},
 }
 
 
@@ -57,7 +63,7 @@ def _taxjar_invoice_fields_ready():
 def get_transactions(
 	filters: dict | str | None = None,
 	page: int | str = 1,
-	scope: str = INCLUDED_SCOPE,
+	scope: str = FAILED_SCOPE,
 	page_size: int | str = PAGE_SIZE,
 ):
 	frappe.has_permission("Sales Invoice", "read", throw=True)
@@ -118,12 +124,6 @@ def get_summary(filters: dict | str | None = None):
 		return not_configured_response()
 
 	filters = parse_filters(filters)
-	# The strip is what you drill *from*, so a status drill-down must not feed
-	# back into it - honouring it here would collapse every other number to zero
-	# the moment one was clicked. Enforced at the endpoint, not just by what the
-	# page happens to send.
-	filters.pop("sync_status", None)
-	filters.pop("excluded_kind", None)
 
 	# Aggregate counts in SQL instead of pulling every row into Python.
 	rows = frappe.get_list(
@@ -193,8 +193,8 @@ def bulk_retry(invoices: list | str):
 	return {"queued": queued}
 
 
-def _build_conditions(filters, scope=INCLUDED_SCOPE):
-	conditions = dict(_SCOPE_CONDITIONS.get(scope, _SCOPE_CONDITIONS[INCLUDED_SCOPE]))
+def _build_conditions(filters, scope=FAILED_SCOPE):
+	conditions = dict(_SCOPE_CONDITIONS.get(scope, _SCOPE_CONDITIONS[FAILED_SCOPE]))
 
 	if filters.get("company"):
 		conditions["company"] = filters["company"]
@@ -208,17 +208,6 @@ def _build_conditions(filters, scope=INCLUDED_SCOPE):
 		conditions["posting_date"] = (">=", from_date)
 	elif to_date:
 		conditions["posting_date"] = ("<=", to_date)
-
-	if filters.get("sync_status"):
-		conditions["taxjar_sync_status"] = filters["sync_status"]
-
-	# Drilled in from the Excluded group of the summary strip: which half of
-	# that tab to show.
-	excluded_kind = filters.get("excluded_kind")
-	if excluded_kind == "Draft":
-		conditions["docstatus"] = 0
-	elif excluded_kind == "Not Applicable":
-		conditions["docstatus"] = ("in", (1, 2))
 
 	transaction_type = filters.get("transaction_type")
 	if transaction_type:

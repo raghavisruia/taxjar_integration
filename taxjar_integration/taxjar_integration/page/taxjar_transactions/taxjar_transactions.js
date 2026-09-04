@@ -36,30 +36,35 @@ const DOC_STATUS_COLORS = { Submitted: "blue", Cancelled: "red" };
 
 const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
 
-// The two tabs: what TaxJar has, and what it never received. The Excluded tab
-// holds both drafts and submitted-but-not-applicable rows, told apart by its
-// Status column. Nothing there has been acted on, so it carries no sync status,
-// no checkboxes and no bulk actions.
-const INCLUDED_TAB = "included";
-const EXCLUDED_TAB = "excluded";
-
-// The two halves of the Excluded tab, as the summary drills into them.
-const KIND_DRAFT = "Draft";
-const KIND_NOT_APPLICABLE = "Not Applicable";
+// One tab per state a transaction can be in, ordered by how much attention it
+// wants: what needs fixing first, what is still moving, then the two resting
+// states and finally the one that needs nothing. Together they partition the
+// table - every invoice in range is in exactly one - and each is the population
+// of the summary card above it, so the strip and the tabs cannot disagree.
+const FAILED_TAB = "failed";
+const QUEUED_TAB = "queued";
+const NOT_APPLICABLE_TAB = "not_applicable";
+const DRAFT_TAB = "draft";
+const SYNCED_TAB = "synced";
 
 const TABS = [
-	{ name: INCLUDED_TAB, label: __("Included"), is_active: true },
-	{ name: EXCLUDED_TAB, label: __("Excluded") },
+	{ name: FAILED_TAB, label: __("Failed"), is_active: true },
+	{ name: QUEUED_TAB, label: __("Queued") },
+	{ name: NOT_APPLICABLE_TAB, label: __("Not Applicable") },
+	{ name: DRAFT_TAB, label: __("Draft") },
+	{ name: SYNCED_TAB, label: __("Synced") },
 ];
+
+// The tabs holding rows TaxJar actually received. Only these have a sync
+// status worth a column, and only these can be retried.
+const SENT_TABS = [FAILED_TAB, QUEUED_TAB, SYNCED_TAB];
 
 class TaxJarTransactionSync {
 	constructor(page) {
 		this.page = page;
 		this.current_page = 1;
 		this.page_size = 20;
-		this.active_tab = INCLUDED_TAB;
-		this.status_filter = null;
-		this.excluded_kind = null;
+		this.active_tab = FAILED_TAB;
 		this.column_search = {};
 
 		// Built once so on_hide() has the same reference to pass to
@@ -220,10 +225,9 @@ class TaxJarTransactionSync {
 	enter_tab(name) {
 		this.active_tab = name;
 		this.current_page = 1;
-		this.status_filter = null;
-		this.excluded_kind = null;
-		// The Draft card doubles as the Draft tab's own indicator.
-		this.summary?.set_active(name === EXCLUDED_TAB ? EXCLUDED_TAB : null);
+		// Each card counts exactly one tab's population, so the strip follows
+		// the tabs rather than filtering them.
+		this.summary?.set_active(name);
 	}
 
 	// silent: true - enter_tab() runs the state side of the switch itself,
@@ -257,9 +261,10 @@ class TaxJarTransactionSync {
 
 	// ── Data ──────────────────────────────────────────────────────────────
 
-	// What the page is scoped to. The summary counts describe exactly this
-	// population, which is why the status drill-down is NOT part of it - see
-	// get_filters().
+	// What the page is scoped to: company, dates, type and the inline column
+	// search. Which tab is open is NOT part of it - the tab is sent separately
+	// as the scope, so the summary can count every tab's population under the
+	// same filters while the table shows one of them.
 	get_scope_filters() {
 		const filters = {};
 
@@ -282,26 +287,8 @@ class TaxJarTransactionSync {
 		return filters;
 	}
 
-	// The scope plus the status drill-down, which only the table honours.
-	// Feeding it to the summary too would make clicking "Failed" collapse every
-	// other number to zero - the strip is what you drill *from*, so it has to
-	// keep standing still while you do.
-	get_filters() {
-		const filters = this.get_scope_filters();
-
-		if (this.status_filter && this.active_tab === INCLUDED_TAB) {
-			filters.sync_status = this.status_filter;
-		}
-
-		if (this.excluded_kind && this.active_tab === EXCLUDED_TAB) {
-			filters.excluded_kind = this.excluded_kind;
-		}
-
-		return filters;
-	}
-
 	refresh() {
-		const filters = this.get_filters();
+		const filters = this.get_scope_filters();
 
 		Promise.all([
 			frappe.xcall(
@@ -310,7 +297,7 @@ class TaxJarTransactionSync {
 			),
 			frappe.xcall(
 				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_summary",
-				{ filters: this.get_scope_filters() }
+				{ filters }
 			),
 		]).then(([data, summary]) => {
 			if (data.not_configured) {
@@ -334,9 +321,9 @@ class TaxJarTransactionSync {
 			{
 				label: __("Included"),
 				cards: [
-					{ label: __("Synced"), value: summary.submitted.synced, value_key: "Synced", indicator: "green" },
-					{ label: __("Queued"), value: summary.submitted.queued, value_key: "Queued", indicator: "blue" },
-					{ label: __("Failed"), value: summary.submitted.failed, value_key: "Failed", indicator: "red" },
+					{ label: __("Synced"), value: summary.submitted.synced, value_key: SYNCED_TAB, indicator: "green" },
+					{ label: __("Queued"), value: summary.submitted.queued, value_key: QUEUED_TAB, indicator: "blue" },
+					{ label: __("Failed"), value: summary.submitted.failed, value_key: FAILED_TAB, indicator: "red" },
 				],
 			},
 			{
@@ -344,13 +331,13 @@ class TaxJarTransactionSync {
 				// submitted yet, or submitted and deliberately not sent.
 				label: __("Excluded"),
 				cards: [
-					{ label: __("Draft"), value: summary.draft.total, value_key: KIND_DRAFT },
+					{ label: __("Draft"), value: summary.draft.total, value_key: DRAFT_TAB },
 					{
 						// The stored status is "Excluded" - the group heading
 						// already says that, so the card names the case instead.
 						label: __("Not Applicable"),
 						value: summary.submitted.excluded,
-						value_key: KIND_NOT_APPLICABLE,
+						value_key: NOT_APPLICABLE_TAB,
 						indicator: "grey",
 					},
 				],
@@ -371,22 +358,17 @@ class TaxJarTransactionSync {
 		this.summary.set_active(active);
 	}
 
+	// Every card counts one tab, so clicking one opens that tab rather than
+	// filtering the current one. The strip toggles its own selection off when
+	// the active card is clicked again; there is no "no tab" state to go to,
+	// so that just re-asserts where we already are.
 	on_summary_select(card) {
-		// The Excluded counts are not sync statuses - they pick which half of
-		// the Excluded tab to show.
-		if (card?.value_key === KIND_DRAFT || card?.value_key === KIND_NOT_APPLICABLE) {
-			this.go_to_tab(EXCLUDED_TAB);
-			this.excluded_kind = card.value_key;
-			this.summary.set_active(card.value_key);
-			this.refresh();
+		if (!card) {
+			this.summary.set_active(this.active_tab);
 			return;
 		}
 
-		if (this.active_tab !== INCLUDED_TAB) this.go_to_tab(INCLUDED_TAB);
-
-		// "" is the Total card: a filter of nothing, i.e. show everything.
-		this.status_filter = card?.value_key || null;
-		this.current_page = 1;
+		this.go_to_tab(card.value_key);
 		this.refresh();
 	}
 
@@ -417,24 +399,9 @@ class TaxJarTransactionSync {
 			},
 		];
 
-		// Which half of the Excluded tab a row belongs to. Only this tab mixes
-		// the two; everywhere else it would read the same on every row.
-		if (this.active_tab === EXCLUDED_TAB) {
-			columns.push({
-				label: __("Status"),
-				fieldname: "doc_status",
-				resizable: false,
-				_html: (value) =>
-					frappe.ui.badge.html({
-						label: value === "Draft" ? __("Draft") : __("Not Applicable"),
-						theme: "gray",
-					}),
-			});
-		}
-
-		// Both only mean something on the Included tab. Nothing in Excluded has
-		// a sync status - it is defined as the rows that never got one.
-		if (this.active_tab === INCLUDED_TAB) {
+		// Submitted or Cancelled. Not on the Draft tab, where every row would
+		// read "Draft" - the tab already says so.
+		if (this.active_tab !== DRAFT_TAB) {
 			columns.push({
 				label: __("Transaction Status"),
 				fieldname: "doc_status",
@@ -443,6 +410,13 @@ class TaxJarTransactionSync {
 						? frappe.ui.badge.html({ label: __(value), theme: DOC_STATUS_COLORS[value] || "gray" })
 						: "",
 			});
+		}
+
+		// Every row on a sent tab carries the status the tab is named after, so
+		// the column is not there to say which - it is there for the detail
+		// hanging off the pill: the failure reason, or when it last synced.
+		// Nothing on the other two tabs has a sync status at all.
+		if (SENT_TABS.includes(this.active_tab)) {
 			columns.push({
 				label: __("Sync Status"),
 				fieldname: "taxjar_sync_status",
@@ -468,7 +442,9 @@ class TaxJarTransactionSync {
 				columns: this.get_columns(),
 				data: this.invoices,
 				options: {
-					checkboxColumn: key === INCLUDED_TAB,
+					// Retry is the only bulk action, so selection is offered
+					// exactly where it can be run.
+					checkboxColumn: key === FAILED_TAB,
 					noDataMessage: __("No transactions found"),
 				},
 				on_check_row: () => this.update_bulk_state(),
@@ -575,42 +551,32 @@ class TaxJarTransactionSync {
 		return this.datatable?.get_checked_items().filter(Boolean) || [];
 	}
 
-	// The menu names the eligible subset up front ("Retry 2 Failed") and the
-	// counter spells out the gap, so a mixed selection can't silently drop
-	// rows the way a bare "Retry Selected" did.
+	// Only the Failed tab offers selection, and every row on it is retryable -
+	// the tab is the eligibility filter that the old "{n} retryable" counter
+	// used to be, back when Failed rows sat mixed in with Synced and Queued.
 	update_bulk_state() {
-		if (this.active_tab !== INCLUDED_TAB) {
+		if (this.active_tab !== FAILED_TAB) {
 			this.$tab_actions.hide();
 			return;
 		}
 		this.$tab_actions.show();
 
 		const checked = this.get_checked();
-		const failed = checked.filter((row) => row.taxjar_sync_status === "Failed");
 
-		this.$selection_count.text(
-			checked.length
-				? __("{0} selected · {1} retryable", [checked.length, failed.length])
-				: ""
-		);
-
+		this.$selection_count.text(checked.length ? __("{0} selected", [checked.length]) : "");
 		this.bulk_action.set_items(
-			failed.length ? [{ label: __("Resync with TaxJar"), action: () => this.bulk_retry(failed) }] : []
+			checked.length
+				? [{ label: __("Resync with TaxJar"), action: () => this.bulk_retry(checked) }]
+				: []
 		);
-
-		if (checked.length && !failed.length) {
-			this.bulk_action.disabled_title = __("Nothing in this selection can be retried");
-			this.bulk_action.toggle_disabled(true);
-		} else {
-			this.bulk_action.disabled_title = __("Select one or more records to run an action");
-		}
+		this.bulk_action.disabled_title = __("Select one or more records to run an action");
 	}
 
-	bulk_retry(failed) {
+	bulk_retry(rows) {
 		frappe
 			.xcall(
 				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.bulk_retry",
-				{ invoices: failed.map((row) => row.name) }
+				{ invoices: rows.map((row) => row.name) }
 			)
 			.then((r) => {
 				frappe.show_alert({

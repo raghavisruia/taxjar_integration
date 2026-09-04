@@ -5154,28 +5154,34 @@ class TestDeskPageChromeJS(UnitTestCase):
 	def test_summary_ignores_the_status_drill_down(self):
 		"""The strip is what you drill *from*. If clicking Failed also narrowed
 		the counts, every other number would collapse to zero and there would be
-		nothing left to drill from."""
-		for page in self.TABBED_PAGES:
-			with self.subTest(page=page):
-				js = self._read_page_js(page)
-				scope_fn = js.split("get_scope_filters() {")[1].split("\n\t}\n")[0]
-				self.assertNotIn("sync_status", scope_fn)
-				# The table gets the drill-down; the summary gets the scope only.
-				filters_fn = js.split("\tget_filters() {")[1].split("\n\t}\n")[0]
-				self.assertIn("sync_status", filters_fn)
-				self.assertIn("get_summary", js.split("{ filters: this.get_scope_filters() }")[0])
+		nothing left to drill from.
+
+		Only the Customers page still lays a status filter over its tabs; the
+		Transactions page gives each status a tab of its own, so the tab is the
+		filter and there is nothing to keep out of the summary."""
+		js = self._read_page_js("taxjar_customers")
+		scope_fn = js.split("get_scope_filters() {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("sync_status", scope_fn)
+		# The table gets the drill-down; the summary gets the scope only.
+		filters_fn = js.split("\tget_filters() {")[1].split("\n\t}\n")[0]
+		self.assertIn("sync_status", filters_fn)
+		self.assertIn("get_summary", js.split("{ filters: this.get_scope_filters() }")[0])
+
+		# Nothing is layered over the scope there, so there is no second filter
+		# builder to get wrong.
+		self.assertNotIn("get_filters()", self._read_page_js("taxjar_transactions"))
 
 	def test_summary_endpoints_drop_the_status_filter(self):
-		"""Enforced at the endpoint, not just by what the page happens to send."""
-		for module in (
-			"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions",
-			"taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers",
-		):
-			with self.subTest(module=module):
-				import importlib
-				import inspect
-				source = inspect.getsource(importlib.import_module(module).get_summary)
-				self.assertIn('filters.pop("sync_status", None)', source)
+		"""Enforced at the endpoint, not just by what the page happens to send.
+		The Transactions endpoint has no such filter to drop - see
+		test_a_client_sent_status_filter_cannot_override_the_tab."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			get_summary,
+		)
+
+		self.assertIn('filters.pop("sync_status", None)', inspect.getsource(get_summary))
 
 	def test_summary_cards_filter_and_toggle(self):
 		"""Clicking a number drills into it; clicking it again clears, so a
@@ -6558,61 +6564,92 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			self.assertEqual(conditions["posting_date"], (">=", "2026-01-01"))
 
 	def test_build_conditions_scopes_by_tab(self):
-		"""The tabs partition the table: Included is what TaxJar actually
-		received, Excluded is everything else - drafts and submitted rows left
-		out alike, which is why it carries no docstatus of its own."""
+		"""The five tabs partition the table: every invoice in range lands in
+		exactly one, so a row can never go missing by being in none of them."""
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
 			DRAFT_SCOPE,
-			EXCLUDED_SCOPE,
-			INCLUDED_SCOPE,
+			FAILED_SCOPE,
+			NOT_APPLICABLE_SCOPE,
+			QUEUED_SCOPE,
 			SUBMITTED_SCOPE,
+			SYNCED_SCOPE,
 			_build_conditions,
 		)
 
-		included = _build_conditions({}, INCLUDED_SCOPE)
-		self.assertEqual(included["docstatus"], ("in", (1, 2)))
-		self.assertEqual(included["taxjar_sync_status"], ("in", ("Synced", "Queued", "Failed")))
+		submitted = ("in", (1, 2))
+		for scope, status in (
+			(FAILED_SCOPE, "Failed"),
+			(QUEUED_SCOPE, "Queued"),
+			(SYNCED_SCOPE, "Synced"),
+		):
+			with self.subTest(scope=scope):
+				conditions = _build_conditions({}, scope)
+				self.assertEqual(conditions["docstatus"], submitted)
+				self.assertEqual(conditions["taxjar_sync_status"], status)
 
-		excluded = _build_conditions({}, EXCLUDED_SCOPE)
-		self.assertEqual(excluded["taxjar_sync_status"], ("not in", ("Synced", "Queued", "Failed")))
-		# No docstatus: drafts and submitted-but-excluded rows live together.
-		self.assertNotIn("docstatus", excluded)
+		# Submitted and deliberately not sent. "not in", so a row whose status
+		# was never written still lands here rather than in no tab at all.
+		na = _build_conditions({}, NOT_APPLICABLE_SCOPE)
+		self.assertEqual(na["docstatus"], submitted)
+		self.assertEqual(na["taxjar_sync_status"], ("not in", ("Synced", "Queued", "Failed")))
 
-		# Summary-only scopes, which still count the two separately.
-		self.assertEqual(_build_conditions({}, SUBMITTED_SCOPE)["docstatus"], ("in", (1, 2)))
-		self.assertEqual(_build_conditions({}, DRAFT_SCOPE)["docstatus"], 0)
-		# Callers that omit the scope get the Included tab.
-		self.assertEqual(_build_conditions({})["docstatus"], ("in", (1, 2)))
-
-	def test_excluded_kind_splits_the_excluded_tab(self):
-		"""Drilling in from the Draft or Not Applicable card narrows the tab to
-		that half."""
-		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
-			EXCLUDED_SCOPE,
-			_build_conditions,
-		)
-
-		draft = _build_conditions({"excluded_kind": "Draft"}, EXCLUDED_SCOPE)
+		# Nothing syncs before submit, so a draft's status says nothing.
+		draft = _build_conditions({}, DRAFT_SCOPE)
 		self.assertEqual(draft["docstatus"], 0)
+		self.assertNotIn("taxjar_sync_status", draft)
 
-		na = _build_conditions({"excluded_kind": "Not Applicable"}, EXCLUDED_SCOPE)
-		self.assertEqual(na["docstatus"], ("in", (1, 2)))
+		# Summary-only scope: every submitted row, counted by status.
+		self.assertEqual(_build_conditions({}, SUBMITTED_SCOPE)["docstatus"], submitted)
+
+		# Callers that omit the scope get the first tab.
+		self.assertEqual(_build_conditions({}), _build_conditions({}, FAILED_SCOPE))
+
+	def test_the_tabs_cover_every_invoice_exactly_once(self):
+		"""Two tabs claiming the same row (or none claiming it) is the failure
+		this partition exists to prevent, so it is asserted rather than argued."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			DRAFT_SCOPE,
+			FAILED_SCOPE,
+			NOT_APPLICABLE_SCOPE,
+			QUEUED_SCOPE,
+			SYNCED_SCOPE,
+			_build_conditions,
+		)
+
+		def matches(conditions, docstatus, status):
+			for field, value in conditions.items():
+				actual = docstatus if field == "docstatus" else status
+				if isinstance(value, tuple):
+					operator, operand = value
+					if operator == "in" and actual not in operand:
+						return False
+					if operator == "not in" and actual in operand:
+						return False
+				elif actual != value:
+					return False
+			return True
+
+		scopes = [FAILED_SCOPE, QUEUED_SCOPE, NOT_APPLICABLE_SCOPE, DRAFT_SCOPE, SYNCED_SCOPE]
+		conditions = {scope: _build_conditions({}, scope) for scope in scopes}
+
+		for docstatus in (0, 1, 2):
+			for status in ("Synced", "Queued", "Failed", "Excluded", None):
+				with self.subTest(docstatus=docstatus, status=status):
+					claimed = [s for s in scopes if matches(conditions[s], docstatus, status)]
+					self.assertEqual(len(claimed), 1, claimed)
 
 	def test_get_transactions_passes_the_scope_through(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
-			EXCLUDED_SCOPE,
+			DRAFT_SCOPE,
 			get_transactions,
 		)
 
 		with patch(f"{self.MOD}.frappe.db.has_column", return_value=True), patch(
 			f"{self.MOD}.frappe.get_list", return_value=[]
 		), patch(f"{self.MOD}.permitted_count", return_value=0) as mock_count:
-			get_transactions(filters={}, page=1, scope=EXCLUDED_SCOPE)
+			get_transactions(filters={}, page=1, scope=DRAFT_SCOPE)
 
-		self.assertEqual(
-			mock_count.call_args[0][1]["taxjar_sync_status"],
-			("not in", ("Synced", "Queued", "Failed")),
-		)
+		self.assertEqual(mock_count.call_args[0][1]["docstatus"], 0)
 
 	def test_build_conditions_date_range(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import _build_conditions
@@ -6634,9 +6671,14 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		conditions = _build_conditions({})
 		self.assertEqual(conditions["docstatus"], ("in", (1, 2)))
 
-	def test_build_conditions_with_company_and_sync_status(self):
-		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import _build_conditions
-		conditions = _build_conditions({"company": "Test Co", "sync_status": "Failed"})
+	def test_a_client_sent_status_filter_cannot_override_the_tab(self):
+		"""Each tab is one status, so there is no drill-down filter left to
+		honour - and an unrecognised key must not reach the query."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			_build_conditions,
+		)
+
+		conditions = _build_conditions({"company": "Test Co", "sync_status": "Synced"})
 		self.assertEqual(conditions["company"], "Test Co")
 		self.assertEqual(conditions["taxjar_sync_status"], "Failed")
 
@@ -6652,15 +6694,17 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			result = get_transactions(filters={}, page=-5)
 		self.assertEqual(result["page"], 1)
 
-	def test_retry_action_offered_only_for_failed_rows(self):
-		"""The action itself is scoped to the Failed rows in the selection, and
-		the "{n} retryable" counter beside it spells out how many of the
-		selected rows that actually is."""
+	def test_retry_is_offered_only_where_every_row_can_be_retried(self):
+		"""The Failed tab is the eligibility filter now - it is what the old
+		"{n} retryable" counter had to spell out when Failed rows sat mixed in
+		with Synced and Queued."""
 		js = self._transactions_js()
 		bulk_fn = js.split("update_bulk_state() {")[1].split("\n\t}\n")[0]
+		self.assertIn("if (this.active_tab !== FAILED_TAB) {", bulk_fn)
 		self.assertIn('__("Resync with TaxJar")', bulk_fn)
-		self.assertIn('__("{0} selected · {1} retryable"', bulk_fn)
-		self.assertIn('row.taxjar_sync_status === "Failed"', bulk_fn)
+		self.assertIn('__("{0} selected"', bulk_fn)
+		# No per-row status test left: the tab already did it.
+		self.assertNotIn('taxjar_sync_status === "Failed"', bulk_fn)
 		self.assertIn("bulk_retry", js)
 
 	def _transactions_js(self):
@@ -6691,22 +6735,61 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		self.assertNotIn('__("Last Synced")', columns_fn)
 		self.assertNotIn('__("Error")', columns_fn)
 
-	def test_sync_status_column_only_on_the_included_tab(self):
-		"""Excluded is defined as the rows that never got a sync status, so the
-		column would read empty on every one of them."""
+	def test_sync_status_column_only_on_the_sent_tabs(self):
+		"""Draft and Not Applicable are defined as the rows that never got a
+		sync status, so the column would read empty on every one of them. On a
+		sent tab it is not there to say which status - the tab is named after
+		it - but for the detail on the pill: the failure reason, or when it
+		last synced."""
 		columns_fn = self._columns_fn()
-		self.assertIn("if (this.active_tab === INCLUDED_TAB) {", columns_fn)
-		sync_block = columns_fn.split("if (this.active_tab === INCLUDED_TAB) {")[1]
+		self.assertIn("if (SENT_TABS.includes(this.active_tab)) {", columns_fn)
+		sync_block = columns_fn.split("if (SENT_TABS.includes(this.active_tab)) {")[1]
 		self.assertIn('__("Sync Status")', sync_block)
-		# Transaction Status is gated the same way: on the Draft tab every row
-		# would read "Draft".
-		self.assertIn('__("Transaction Status")', sync_block)
 
-	def test_excluded_tab_has_no_checkbox_column(self):
-		"""Nothing there has been sent, so there is no bulk action to run on it
-		and offering selection would lead nowhere."""
 		js = self._transactions_js()
-		self.assertIn("checkboxColumn: key === INCLUDED_TAB", js)
+		self.assertIn("const SENT_TABS = [FAILED_TAB, QUEUED_TAB, SYNCED_TAB];", js)
+
+	def test_transaction_status_column_off_the_draft_tab(self):
+		"""Every row there would read "Draft", which the tab already says."""
+		columns_fn = self._columns_fn()
+		self.assertIn("if (this.active_tab !== DRAFT_TAB) {", columns_fn)
+		block = columns_fn.split("if (this.active_tab !== DRAFT_TAB) {")[1]
+		self.assertIn('__("Transaction Status")', block)
+
+	def test_only_the_failed_tab_has_a_checkbox_column(self):
+		"""Retry is the only bulk action, so selection is offered exactly where
+		it can be run."""
+		js = self._transactions_js()
+		self.assertIn("checkboxColumn: key === FAILED_TAB", js)
+
+	def test_the_five_tabs_and_their_order(self):
+		"""Ordered by how much attention each state wants: what needs fixing
+		first, what is still moving, then the resting states."""
+		js = self._transactions_js()
+		tabs = js.split("const TABS = [")[1].split("];")[0]
+
+		order = ["Failed", "Queued", "Not Applicable", "Draft", "Synced"]
+		indexes = [tabs.index('__("%s")' % label) for label in order]
+		self.assertEqual(indexes, sorted(indexes))
+		# The first tab is the one that opens.
+		self.assertIn('{ name: FAILED_TAB, label: __("Failed"), is_active: true }', tabs)
+		self.assertNotIn("Included", tabs)
+		self.assertNotIn("Excluded", tabs)
+
+	def test_a_summary_card_opens_its_own_tab(self):
+		"""Each card counts exactly one tab's population, so clicking one is
+		navigation rather than a filter laid over the current tab."""
+		js = self._transactions_js()
+		fn = js.split("on_summary_select(card) {")[1].split("\n\t}\n")[0]
+		self.assertIn("this.go_to_tab(card.value_key)", fn)
+		# The strip toggles its selection off when the active card is clicked
+		# again; there is no "no tab" state, so that re-asserts where we are.
+		self.assertIn("this.summary.set_active(this.active_tab)", fn)
+
+		# The card keys are tab names, or go_to_tab would be handed a status.
+		summary_fn = js.split("render_summary(summary) {")[1].split("\n\t}\n")[0]
+		for key in ("SYNCED_TAB", "QUEUED_TAB", "FAILED_TAB", "DRAFT_TAB", "NOT_APPLICABLE_TAB"):
+			self.assertIn(f"value_key: {key}", summary_fn)
 
 	def _sync_status_cell_fn(self):
 		js = self._transactions_js()
