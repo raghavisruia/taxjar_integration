@@ -599,6 +599,12 @@ def get_custom_fields():
 			*_make_status_fields("taxjar_tab", allow_on_submit=True),
 			*_marketplace_fields(),
 			dict(
+				# Draft docs never reach set_sales_tax's sync path (see
+				# enqueue_taxjar_sync's on_submit hook), so there is no sync
+				# state to report yet and every field in here is hidden - the
+				# section itself goes with them rather than standing empty
+				# above a "submit to sync" placeholder. The sidebar pill still
+				# says so for a draft.
 				fieldname="taxjar_sync_section",
 				fieldtype="Section Break",
 				# Chained behind the marketplace section, which claims
@@ -606,24 +612,12 @@ def get_custom_fields():
 				insert_after="taxjar_skip_transaction_sync",
 				label="Transaction Sync",
 				allow_on_submit=1,
-			),
-			dict(
-				# Draft docs never reach set_sales_tax's sync path (see
-				# enqueue_taxjar_sync's on_submit hook) - showing the Sync Status
-				# Select at its "Excluded" default there reads as "TaxJar
-				# doesn't apply to this invoice" rather than "not submitted yet",
-				# so this replaces the Select/Last Synced fields entirely while
-				# a draft, same message the sidebar pill shows for consistency.
-				fieldname="taxjar_sync_draft_message_html",
-				fieldtype="HTML",
-				insert_after="taxjar_sync_section",
-				options='<p class="text-muted">TaxJar: Submit to sync</p>',
-				depends_on="eval: doc.docstatus === 0",
+				depends_on="eval: doc.docstatus !== 0",
 			),
 			dict(
 				fieldname="taxjar_sync_status",
 				fieldtype="Select",
-				insert_after="taxjar_sync_draft_message_html",
+				insert_after="taxjar_sync_section",
 				label="Sync Status",
 				options="Excluded\nQueued\nSynced\nFailed",
 				default="Excluded",

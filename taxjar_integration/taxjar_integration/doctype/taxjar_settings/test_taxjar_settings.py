@@ -5581,21 +5581,49 @@ class TestSalesInvoiceCustomFields(UnitTestCase):
 		self.assertTrue(f.get("read_only"))
 
 	def test_sync_status_hidden_while_draft(self):
-		"""Replaced by taxjar_sync_draft_message_html while a draft - showing
-		the "Excluded" default there read as "TaxJar doesn't apply"
-		rather than "not submitted yet"."""
+		"""A draft never reaches the sync path, so its "Excluded" default read
+		as "TaxJar doesn't apply" rather than "not submitted yet"."""
 		fields = self._get_si_field_defs()
 		self.assertEqual(fields["taxjar_sync_status"]["depends_on"], "eval: doc.docstatus === 1")
 		self.assertEqual(fields["taxjar_last_synced"]["depends_on"], "eval: doc.docstatus === 1")
 
-	def test_sync_draft_message_field(self):
+	def test_whole_sync_section_hidden_while_draft(self):
+		"""Every field inside it is hidden on a draft, so the section heading
+		went with them rather than standing alone above a placeholder."""
 		fields = self._get_si_field_defs()
-		f = fields["taxjar_sync_draft_message_html"]
-		self.assertEqual(f["fieldtype"], "HTML")
-		self.assertEqual(f["depends_on"], "eval: doc.docstatus === 0")
-		self.assertIn("TaxJar: Submit to sync", f["options"])
-		self.assertEqual(f["insert_after"], "taxjar_sync_section")
-		self.assertEqual(fields["taxjar_sync_status"]["insert_after"], "taxjar_sync_draft_message_html")
+		self.assertEqual(fields["taxjar_sync_section"]["depends_on"], "eval: doc.docstatus !== 0")
+
+	def test_sync_draft_message_field_is_gone(self):
+		"""The "TaxJar: Submit to sync" placeholder it rendered only existed to
+		fill the section on a draft; the section now hides itself instead. The
+		sidebar pill still says so."""
+		fields = self._get_si_field_defs()
+		self.assertNotIn("taxjar_sync_draft_message_html", fields)
+		self.assertEqual(fields["taxjar_sync_status"]["insert_after"], "taxjar_sync_section")
+
+	def test_sync_draft_message_field_removed_by_patch(self):
+		"""after_migrate re-runs make_custom_fields but never deletes what it no
+		longer lists, so an already-migrated site needs the patch."""
+		import os
+		patches = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
+		))
+		with open(patches) as f:
+			self.assertIn(
+				"taxjar_integration.patches.remove_sync_draft_message_field", f.read()
+			)
+
+		from taxjar_integration.patches.remove_sync_draft_message_field import execute
+
+		mod = "taxjar_integration.patches.remove_sync_draft_message_field"
+		with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
+			f"{mod}.frappe.delete_doc"
+		) as mock_delete, patch(f"{mod}.frappe.clear_cache"):
+			execute()
+
+		mock_delete.assert_called_once_with(
+			"Custom Field", "Sales Invoice-taxjar_sync_draft_message_html", ignore_missing=True
+		)
 
 	def test_sync_error_field(self):
 		fields = self._get_si_field_defs()
