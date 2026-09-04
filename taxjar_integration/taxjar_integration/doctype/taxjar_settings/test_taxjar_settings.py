@@ -5978,49 +5978,55 @@ class TestSalesInvoiceCustomFields(UnitTestCase):
 		self.assertEqual(reason["depends_on"], condition)
 		self.assertEqual(reason["mandatory_depends_on"], condition)
 
-	def test_marketplace_fields_gated_on_the_marketplace_checkbox(self):
-		"""None of the three mean anything on an ordinary invoice, so none of
-		them can be set without the checkbox first."""
+	def test_the_marketplace_section_is_gone(self):
+		"""The feature it was laid out for - an invoice a marketplace already
+		raised, priced and filed - is not in this release, and nothing ever
+		read its two skip flags, so the fields only offered settings that did
+		nothing."""
 		fields = self._get_si_field_defs()
-		condition = "eval: doc.taxjar_is_marketplace_invoice == 1"
-
-		self.assertEqual(fields["taxjar_marketplace_section"]["fieldtype"], "Section Break")
-		self.assertEqual(fields["taxjar_is_marketplace_invoice"]["fieldtype"], "Check")
-
-		platform = fields["taxjar_marketplace_platform"]
-		self.assertEqual(platform["fieldtype"], "Data")
-		self.assertEqual(platform["depends_on"], condition)
-		# The one that is also required once the invoice is a marketplace one.
-		self.assertEqual(platform["mandatory_depends_on"], condition)
-
-		for fieldname in ("taxjar_skip_tax_calculation", "taxjar_skip_transaction_sync"):
+		for fieldname in (
+			"taxjar_marketplace_section",
+			"taxjar_is_marketplace_invoice",
+			"taxjar_marketplace_platform",
+			"taxjar_marketplace_cb",
+			"taxjar_skip_tax_calculation",
+			"taxjar_skip_transaction_sync",
+		):
 			with self.subTest(fieldname=fieldname):
-				field = fields[fieldname]
-				self.assertEqual(field["fieldtype"], "Check")
-				self.assertEqual(field["depends_on"], condition)
-				# A checkbox is never "required" - only shown or not.
-				self.assertIsNone(field.get("mandatory_depends_on"))
+				self.assertNotIn(fieldname, fields)
 
-	def test_marketplace_section_precedes_transaction_sync(self):
-		"""Two fields cannot share one insert_after, so Transaction Sync is
-		chained behind the marketplace block rather than left on
-		taxjar_status_html."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings import taxjar_settings
+		self.assertFalse(hasattr(taxjar_settings, "_marketplace_fields"))
+
+	def test_transaction_sync_follows_the_status_block(self):
+		"""It was chained behind the marketplace section only because two fields
+		cannot share one insert_after; with that gone it goes back to the block
+		it actually follows."""
 		fields = self._get_si_field_defs()
-		self.assertEqual(fields["taxjar_marketplace_section"]["insert_after"], "taxjar_status_html")
-		self.assertEqual(fields["taxjar_sync_section"]["insert_after"], "taxjar_skip_transaction_sync")
+		self.assertEqual(fields["taxjar_sync_section"]["insert_after"], "taxjar_status_html")
 
-	def test_marketplace_fields_are_sales_invoice_only(self):
-		"""A marketplace has already raised the invoice - there is no quotation
-		or order stage for one."""
-		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
-			get_custom_fields,
+	def test_marketplace_fields_removed_by_patch(self):
+		"""after_migrate re-runs make_custom_fields but never deletes what it no
+		longer lists, so an already-migrated site keeps the whole section."""
+		import os
+		patches = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
+		))
+		with open(patches) as f:
+			self.assertIn("taxjar_integration.patches.remove_marketplace_fields", f.read())
+
+		from taxjar_integration.patches.remove_marketplace_fields import _FIELDNAMES, execute
+
+		mod = "taxjar_integration.patches.remove_marketplace_fields"
+		with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
+			f"{mod}.frappe.delete_doc"
+		) as mock_delete, patch(f"{mod}.frappe.clear_cache"):
+			execute()
+
+		self.assertEqual(
+			[call.args[1] for call in mock_delete.call_args_list],
+			[f"Sales Invoice-{fieldname}" for fieldname in _FIELDNAMES],
 		)
-		import inspect
-
-		source = inspect.getsource(get_custom_fields)
-		self.assertEqual(source.count("_marketplace_fields()"), 1)
-		sales_invoice_block = source.split('"Sales Invoice": [')[1]
-		self.assertIn("_marketplace_fields()", sales_invoice_block)
 
 	def test_sync_status_field(self):
 		fields = self._get_si_field_defs()

@@ -504,66 +504,6 @@ def _transaction_exemption_fields():
 	]
 
 
-def _marketplace_fields():
-	"""Sales Invoice only: an invoice a marketplace already raised and priced,
-	sent to ERPNext purely for the books.
-
-	The two skip flags exist because such an invoice must not be re-priced or
-	re-filed - the marketplace is the seller of record and has already collected
-	and remitted the tax. Both are gated on the marketplace checkbox rather than
-	standing alone, so they cannot be set on an ordinary invoice.
-
-	Fields only, no behaviour: nothing reads these yet.
-	"""
-	is_marketplace = "eval: doc.taxjar_is_marketplace_invoice == 1"
-
-	return [
-		dict(
-			fieldname="taxjar_marketplace_section",
-			fieldtype="Section Break",
-			insert_after="taxjar_status_html",
-			label="Marketplace",
-			description=(
-				"Invoices which are already generated on marketplace & are sent "
-				"to ERPNext for accounting"
-			),
-		),
-		dict(
-			fieldname="taxjar_is_marketplace_invoice",
-			fieldtype="Check",
-			insert_after="taxjar_marketplace_section",
-			label="Is marketplace generated invoice?",
-		),
-		dict(
-			fieldname="taxjar_marketplace_platform",
-			fieldtype="Data",
-			insert_after="taxjar_is_marketplace_invoice",
-			label="Marketplace Platform Name",
-			depends_on=is_marketplace,
-			mandatory_depends_on=is_marketplace,
-		),
-		dict(
-			fieldname="taxjar_marketplace_cb",
-			fieldtype="Column Break",
-			insert_after="taxjar_marketplace_platform",
-		),
-		dict(
-			fieldname="taxjar_skip_tax_calculation",
-			fieldtype="Check",
-			insert_after="taxjar_marketplace_cb",
-			label="Skip sales tax calculation?",
-			depends_on=is_marketplace,
-		),
-		dict(
-			fieldname="taxjar_skip_transaction_sync",
-			fieldtype="Check",
-			insert_after="taxjar_skip_tax_calculation",
-			label="Skip sending transaction to TaxJar?",
-			depends_on=is_marketplace,
-		),
-	]
-
-
 def get_custom_fields():
 	"""The app's custom fields, keyed by doctype.
 
@@ -620,7 +560,6 @@ def get_custom_fields():
 				label="TaxJar",
 			),
 			*_make_status_fields("taxjar_tab", allow_on_submit=True),
-			*_marketplace_fields(),
 			dict(
 				# Draft docs never reach set_sales_tax's sync path (see
 				# enqueue_taxjar_sync's on_submit hook), so there is no sync
@@ -630,9 +569,7 @@ def get_custom_fields():
 				# says so for a draft.
 				fieldname="taxjar_sync_section",
 				fieldtype="Section Break",
-				# Chained behind the marketplace section, which claims
-				# taxjar_status_html - two fields cannot share one insert_after.
-				insert_after="taxjar_skip_transaction_sync",
+				insert_after="taxjar_status_html",
 				label="Transaction Sync",
 				allow_on_submit=1,
 				depends_on="eval: doc.docstatus !== 0",
