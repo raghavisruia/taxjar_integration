@@ -34,12 +34,13 @@
    "type": "Link"
   },
   {
+   "dependencies": "",
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Product Tax Category",
+   "label": "Nexus & Product Category",
    "link_count": 0,
-   "link_to": "Product Tax Category",
-   "link_type": "DocType",
+   "link_to": "taxjar-nexus",
+   "link_type": "Page",
    "onboard": 0,
    "type": "Link"
   },
@@ -106,7 +107,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-07-20 12:30:00.000000",
+ "modified": "2026-09-04 23:59:59.000000",
  "modified_by": "Administrator",
  "module": "TaxJar Integration",
  "name": "TaxJar Integration",

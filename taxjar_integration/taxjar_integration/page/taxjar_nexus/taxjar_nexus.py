@@ -1,0 +1,62 @@
+"""Server APIs for the Nexus & Product Category desk page (/app/taxjar-nexus).
+
+Both lists also live on the TaxJar Settings form's own "Nexus & Product
+Category" tab; this page is the same two summaries without the surrounding
+settings form. Every write here delegates to the doctype's own method, which
+already carries the write-permission check, the TaxJar call and the save - so
+this module never re-implements either fetch, and the two entry points can
+never drift apart.
+"""
+
+import frappe
+
+SETTINGS = "TaxJar Settings"
+
+
+def _summary(settings):
+	"""Everything the page renders, in one round trip: the nexus child table
+	(grouped by company on the client, same as the settings form does it), when
+	it last came from TaxJar, and the Product Tax Category count."""
+	return {
+		"nexus": [
+			{
+				"company": row.company,
+				"region": row.region,
+				"region_code": row.region_code,
+				"country": row.country,
+				"country_code": row.country_code,
+			}
+			for row in settings.nexus or []
+		],
+		"nexus_last_synced": settings.nexus_last_synced,
+		"product_tax_categories": settings.get_product_tax_category_summary(),
+	}
+
+
+@frappe.whitelist()
+def get_summary():
+	frappe.has_permission(SETTINGS, "read", throw=True)
+
+	return _summary(frappe.get_single(SETTINGS))
+
+
+@frappe.whitelist(methods=["POST"])
+def update_nexus_list():
+	"""The page's "Update Nexus List" button. update_nexus_list() checks write
+	permission itself and saves, so the reloaded summary below reflects what
+	TaxJar just returned."""
+	settings = frappe.get_single(SETTINGS)
+	settings.update_nexus_list()
+
+	return _summary(settings)
+
+
+@frappe.whitelist(methods=["POST"])
+def refresh_product_tax_categories():
+	"""The page's "Update Product Tax Category List" button. Same delegation as
+	update_nexus_list above - the doctype method checks write permission and
+	turns a TaxJar error into a readable message."""
+	settings = frappe.get_single(SETTINGS)
+	settings.refresh_product_tax_categories()
+
+	return _summary(settings)

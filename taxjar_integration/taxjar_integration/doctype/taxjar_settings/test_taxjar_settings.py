@@ -2118,11 +2118,24 @@ class TestAddressClientScript(UnitTestCase):
 # ── Nexus HTML renderer — JS content ─────────────────────────────────────────
 
 class TestNexusHtmlRenderer(UnitTestCase):
-	"""Structural tests for the nexus grouped-HTML renderer in taxjar_settings.js."""
+	"""Structural tests for the nexus grouped-HTML renderer.
+
+	The markup itself lives in the shared bundle (public/js/taxjar_utils.js) so
+	the settings form's Nexus tab and the standalone Nexus & Product Category
+	page draw the same thing; taxjar_settings.js only wires this form's
+	wrappers into it. Hence the two readers below."""
 
 	def _read_js(self):
 		import os
 		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.js")
+		with open(path) as f:
+			return f.read()
+
+	def _read_utils_js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js",
+		))
 		with open(path) as f:
 			return f.read()
 
@@ -2149,7 +2162,7 @@ class TestNexusHtmlRenderer(UnitTestCase):
 		self.assertIn("function _render_nexus_last_synced(frm) {", js)
 		fn = js.split("function _render_nexus_last_synced(frm) {")[1].split("\n}\n")[0]
 		self.assertIn("frm.fields_dict.update_nexus_list_btn", fn)
-		self.assertIn("_format_last_synced(frm.doc.nexus_last_synced)", fn)
+		self.assertIn("taxjar_integration.format_last_synced(frm.doc.nexus_last_synced)", fn)
 		# Re-rendered, not appended blind - a second click must replace the
 		# text rather than stack a duplicate span next to the first.
 		self.assertIn("find('.taxjar-nexus-last-synced').remove();", fn)
@@ -2179,32 +2192,213 @@ class TestNexusHtmlRenderer(UnitTestCase):
 	def test_last_synced_reuses_the_product_tax_category_formatter(self):
 		"""Both Nexus and Product Tax Category answer "when did this list last
 		come from TaxJar" - one shared helper rather than two copies of the
-		str_to_user/Never fallback, which is what this used to be.
+		str_to_user/Never fallback, which is what this used to be. It sits in
+		the shared bundle now, so the standalone page reads the same one.
 		"""
-		js = self._read_js()
-		self.assertEqual(js.count("function _format_last_synced(value) {"), 1)
-		self.assertIn("const last_updated = _format_last_synced(summary.last_updated);", js)
-		self.assertIn("_format_last_synced(frm.doc.nexus_last_synced)", js)
+		utils = self._read_utils_js()
+		self.assertEqual(utils.count("taxjar_integration.format_last_synced = function"), 1)
+		self.assertIn("taxjar_integration.format_last_synced(summary.last_updated)", utils)
+		self.assertIn(
+			"taxjar_integration.format_last_synced(frm.doc.nexus_last_synced)", self._read_js()
+		)
 
-	def test_settings_js_groups_by_company(self):
+	def test_renderer_groups_by_company(self):
 		"""Renderer must group nexus rows by company."""
-		js = self._read_js()
-		self.assertIn("by_company", js)
+		self.assertIn("by_company", self._read_utils_js())
 
-	def test_settings_js_renders_region_and_code_columns(self):
-		js = self._read_js()
+	def test_renderer_renders_region_and_code_columns(self):
+		js = self._read_utils_js()
 		self.assertIn("region_code", js)
 		self.assertIn("country_code", js)
 
-	def test_settings_js_has_empty_state_message(self):
-		"""When nexus is empty, a helpful message must be shown."""
-		js = self._read_js()
-		self.assertIn("No nexus regions loaded", js)
+	def test_category_summary_names_its_own_refresh_schedule(self):
+		"""The list keeps itself current (tasks.sync_product_tax_categories runs
+		weekly - see hooks.scheduler_events), so the box says so rather than
+		leaving a stale-looking count to be re-synced by hand."""
+		self.assertIn(
+			'__("(Updates are automatically fetched every week)")', self._read_utils_js()
+		)
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.tasks.sync_product_tax_categories",
+			frappe.get_hooks("scheduler_events")["weekly"],
+		)
 
-	def test_settings_js_overflow_x_auto_for_responsiveness(self):
+	def test_renderer_has_empty_state_message(self):
+		"""When nexus is empty, a helpful message must be shown."""
+		self.assertIn("No nexus regions loaded", self._read_utils_js())
+
+	def test_renderer_overflow_x_auto_for_responsiveness(self):
 		"""Table wrapper must use overflow-x: auto for narrow-screen support."""
+		self.assertIn("overflow-x: auto", self._read_utils_js())
+
+	def test_settings_form_only_wires_the_shared_renderers(self):
+		"""Two callers, one copy of the markup - the settings form hands the
+		shared renderer its own field wrappers and nothing more."""
 		js = self._read_js()
-		self.assertIn("overflow-x: auto", js)
+		self.assertIn(
+			"taxjar_integration.render_nexus_cards(frm.fields_dict.nexus_html.$wrapper", js
+		)
+		self.assertIn("taxjar_integration.render_product_tax_category_summary(", js)
+		# The markup itself is gone from here, not copied.
+		self.assertNotIn("taxjar-nexus-card", js)
+		self.assertNotIn("No nexus regions loaded", js)
+
+
+# ── Nexus & Product Category page (/app/taxjar-nexus) ────────────────────────
+
+_NEXUS_PAGE_MODULE = "taxjar_integration.taxjar_integration.page.taxjar_nexus.taxjar_nexus"
+
+
+class TestNexusPage(UnitTestCase):
+	"""The standalone page showing the same two summaries as the TaxJar
+	Settings form's "Nexus & Product Category" tab."""
+
+	def _page_dir(self):
+		import os
+		return os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_nexus",
+		))
+
+	def _read(self, filename):
+		import os
+		with open(os.path.join(self._page_dir(), filename)) as f:
+			return f.read()
+
+	def test_page_json_declares_a_standard_page(self):
+		import json
+		data = json.loads(self._read("taxjar_nexus.json"))
+		self.assertEqual(data["standard"], "Yes")
+		self.assertEqual(data["name"], "taxjar-nexus")
+		self.assertEqual(data["title"], "Nexus & Product Category")
+		self.assertEqual(data["module"], "TaxJar Integration")
+
+	def test_page_role_matches_the_permission_its_data_needs(self):
+		"""Every endpoint reads TaxJar Settings, which only System Manager can
+		read - a wider role here would put the page in someone's sidebar only
+		for it to fail on open."""
+		import json
+		data = json.loads(self._read("taxjar_nexus.json"))
+		self.assertEqual({r["role"] for r in data["roles"]}, {"System Manager"})
+
+	def test_page_js_renders_through_the_shared_renderers(self):
+		"""Same markup as the settings form's tab, from one place."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("taxjar_integration.render_nexus_cards(", js)
+		self.assertIn("taxjar_integration.render_product_tax_category_summary(", js)
+		self.assertIn("taxjar_integration.format_last_synced(", js)
+
+	def test_page_js_fetches_on_show_not_in_the_constructor(self):
+		"""Desk pages are cached in frappe.pages[name]; a constructor-time fetch
+		would leave a revisit showing whatever it loaded the first time."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn('frappe.pages["taxjar-nexus"].on_page_show', js)
+		show_handler = js.split('frappe.pages["taxjar-nexus"].on_page_show')[1].split("};")[0]
+		self.assertIn("refresh()", show_handler)
+
+	def test_each_section_syncs_from_an_icon_button_not_a_labelled_one(self):
+		"""Same control as the guided setup wizard's Sync Nexus step: an
+		icon-only refresh button on the right of the section header, with
+		"Synced <when>" beside it - not the settings form's labelled
+		"Update Nexus List" / "Update Product Tax Category List" buttons."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn('icon: "refresh-cw"', js)
+		self.assertNotIn("Update Nexus List", js)
+		self.assertNotIn("Update Product Tax Category List", js)
+		# Both post to this page's own endpoints, which delegate to the doctype.
+		self.assertIn(_NEXUS_PAGE_MODULE, js)
+		self.assertIn("update_nexus_list", js)
+		self.assertIn("refresh_product_tax_categories", js)
+
+	def test_synced_caption_falls_back_to_the_absolute_date(self):
+		"""comment_when() is prettyDate, which returns "" for anything it works
+		out to be in the future - which is what a just-written timestamp looks
+		like once System Settings' timezone runs ahead of the browser's. The
+		caption must not blank out there."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_render_synced($section, when) {")[1].split("\n\t}")[0]
+		self.assertIn("frappe.datetime.comment_when(when)", fn)
+		self.assertIn("|| taxjar_integration.format_last_synced(when)", fn)
+		self.assertIn('__("Synced {0}"', fn)
+
+	def test_synced_caption_is_set_as_html(self):
+		"""comment_when() returns a whole <span class="frappe-timestamp"> element,
+		not a bare string - text() rendered it as visible markup."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_render_synced($section, when) {")[1].split("\n\t}")[0]
+		self.assertIn('.html(relative ?', fn)
+		self.assertNotIn(".text(", fn)
+
+	def test_category_box_does_not_repeat_the_header_caption(self):
+		"""The section header carries "Synced ..." on this page, so the shared
+		summary box is asked to drop its own "Last updated" line - unlike on
+		the settings form, where the box is the only place it can go."""
+		self.assertIn("show_last_updated: false", self._read("taxjar_nexus.js"))
+
+	def test_requests_go_through_xcall_so_finally_actually_runs(self):
+		"""frappe.call returns a jQuery jqXHR, and a jQuery 3 Deferred has
+		.always() but no .finally() - the sync chain threw on it and left the
+		button spinning forever. xcall returns a native Promise."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("frappe.xcall(", js)
+		self.assertNotIn("frappe.call(", js)
+
+	def test_sync_reports_progress_on_the_button_itself(self):
+		"""Same as the wizard's fetch button - no desk-wide freeze dialog for
+		what is a per-company round trip to TaxJar."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn('attr("aria-busy", "true")', js)
+		self.assertNotIn("freeze", js)
+		# The icon-only button needs the framework's spinner rule helped along.
+		self.assertIn('.es-button[aria-busy="true"] > svg', self._read("taxjar_nexus.css"))
+
+	def test_get_summary_returns_both_lists(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_nexus.taxjar_nexus import get_summary
+
+		result = get_summary()
+		self.assertIn("nexus", result)
+		self.assertIn("nexus_last_synced", result)
+		self.assertIn("count", result["product_tax_categories"])
+
+	def test_get_summary_requires_read_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_nexus.taxjar_nexus import get_summary
+
+		with patch(_NEXUS_PAGE_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, get_summary)
+
+	def test_updates_delegate_to_the_doctype_methods(self):
+		"""Not a second copy of the TaxJar call - the doctype methods carry the
+		write-permission check, the fetch and the save."""
+		from taxjar_integration.taxjar_integration.page.taxjar_nexus import taxjar_nexus
+
+		settings = MagicMock()
+		with patch(_NEXUS_PAGE_MODULE + ".frappe.get_single", return_value=settings), patch(
+			_NEXUS_PAGE_MODULE + "._summary", return_value={}
+		):
+			taxjar_nexus.update_nexus_list()
+			taxjar_nexus.refresh_product_tax_categories()
+
+		settings.update_nexus_list.assert_called_once_with()
+		settings.refresh_product_tax_categories.assert_called_once_with()
+
+	def test_workspace_links_the_page_under_manage(self):
+		import json, os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"workspace", "taxjar_integration", "taxjar_integration.json",
+		))
+		links = json.load(open(path))["links"]
+
+		card = None
+		for link in links:
+			if link["type"] == "Card Break":
+				card = link["label"]
+			elif link.get("link_to") == "taxjar-nexus":
+				self.assertEqual(card, "Manage")
+				self.assertEqual(link["link_type"], "Page")
+				break
+		else:
+			self.fail("workspace has no link to taxjar-nexus")
+
 
 
 # ── Phase 1: sync_nexus_list scheduled task ──────────────────────────────────
@@ -7804,18 +7998,24 @@ class TestProductTaxCategorySummary(UnitTestCase):
 		via moment-timezone and just formats it, with no comparison against the
 		browser's local clock at all, so it can't hit that guard."""
 		import os
-		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.js")
-		with open(path) as f:
+		utils_path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js",
+		))
+		with open(utils_path) as f:
+			utils = f.read()
+		with open(os.path.join(os.path.dirname(__file__), "taxjar_settings.js")) as f:
 			js = f.read()
 
-		# The call now lives in the shared _format_last_synced() helper (Nexus
-		# and Product Tax Category ask the same question), so assert the route
-		# rather than one inlined call site.
-		formatter = js.split("function _format_last_synced(value) {")[1].split("}")[0]
+		# The call now lives in the shared taxjar_integration.format_last_synced()
+		# helper (Nexus and Product Tax Category ask the same question, on both
+		# the settings tab and the standalone page), so assert the route rather
+		# than one inlined call site.
+		formatter = utils.split("taxjar_integration.format_last_synced = function (value) {")[1].split("}")[0]
 		self.assertIn("frappe.datetime.str_to_user(value)", formatter)
-		self.assertIn("_format_last_synced(summary.last_updated)", js)
+		self.assertIn("taxjar_integration.format_last_synced(summary.last_updated)", utils)
 		# Only as the comment explaining why it is not used - never as a call.
 		self.assertNotIn("frappe.datetime.comment_when(", js)
+		self.assertNotIn("frappe.datetime.comment_when(", utils)
 
 
 class TestRefreshProductTaxCategories(UnitTestCase):
@@ -8113,7 +8313,7 @@ class TestWorkspaceBranding(UnitTestCase):
 		self.assertEqual([g["group"] for g in structure], ["Setup", "Manage", "Sync"])
 		groups = {g["group"]: g["children"] for g in structure}
 		self.assertEqual(groups["Setup"], ["taxjar-setup", "TaxJar Settings", "TaxJar API Log"])
-		self.assertEqual(groups["Manage"], ["taxjar-customers", "Product Tax Category"])
+		self.assertEqual(groups["Manage"], ["taxjar-customers", "taxjar-nexus"])
 		self.assertEqual(groups["Sync"], ["taxjar-transactions"])
 
 	def test_home_entry_uses_an_icon_that_exists_in_the_bundled_lucide_sprite(self):
@@ -8140,8 +8340,8 @@ class TestWorkspaceBranding(UnitTestCase):
 		targets = {l["link_to"] for l in ws["links"] if l["type"] == "Link"}
 		self.assertEqual(
 			targets,
-			{"TaxJar Settings", "Product Tax Category", "taxjar-customers",
-			 "taxjar-transactions", "TaxJar API Log", "taxjar-setup"},
+			{"TaxJar Settings", "taxjar-customers", "taxjar-transactions",
+			 "TaxJar API Log", "taxjar-setup", "taxjar-nexus"},
 		)
 
 	def test_apps_screen_title_branded(self):

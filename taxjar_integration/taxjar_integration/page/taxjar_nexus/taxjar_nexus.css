@@ -1,0 +1,46 @@
+/* Only the page's own chrome lives here - the nexus cards and the category
+   summary box carry their own styles from public/js/taxjar_utils.js, which is
+   also what the TaxJar Settings form's Nexus tab renders. */
+
+.taxjar-nexus-page {
+	padding: 15px;
+}
+
+/* Two sections on one page, told apart by a divider rather than a card each -
+   same as the section breaks they mirror on the settings form. */
+.taxjar-nexus-section + .taxjar-nexus-section {
+	margin-top: 24px;
+	padding-top: 24px;
+	border-top: 1px solid var(--border-color);
+}
+
+/* Title on the left, "Synced ..." and the refresh control pushed to the far
+   edge, so they line up with the right edge of the table below - the guided
+   setup wizard's Sync Nexus step (.ts-nexusaction) laid out the same way. */
+.taxjar-nexus-section-head {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-bottom: 16px;
+}
+
+.taxjar-nexus-section-title {
+	margin-right: auto;
+	font-size: var(--text-3xl);
+	font-weight: var(--font-weight-bold);
+	color: var(--heading-color);
+}
+
+.taxjar-nexus-synced {
+	font-size: var(--text-sm);
+	white-space: nowrap;
+}
+
+/* The icon-only sync button has no loading_label span, so the framework's own
+   aria-busy rule (which only hides the icon alongside that span) never fires
+   here - hide it ourselves or the icon and spinner show together. Same fix as
+   the wizard's own fetch button. */
+.taxjar-nexus-sync-mount .es-button[aria-busy="true"] > svg {
+	display: none;
+}
