@@ -693,7 +693,7 @@ taxjar_integration.render_status_cards = function (frm) {
 	const card1 = {
 		question: __("Do you have a nexus here?"),
 		answer: has_nexus ? __("Yes") : __("No"),
-		color: has_nexus ? "green" : "amber",
+		color: has_nexus ? "green" : "red",
 	};
 
 	let card2, card3;
@@ -710,7 +710,7 @@ taxjar_integration.render_status_cards = function (frm) {
 
 		if (!customer_taxable) {
 			answer = __("No");
-			color = "amber";
+			color = "red";
 		} else if (transaction_exempt) {
 			answer = __("Yes, but transaction is marked as exempt");
 			color = "amber";
@@ -726,7 +726,7 @@ taxjar_integration.render_status_cards = function (frm) {
 			let prod_color = "gray";
 			let prod_answer = __("Skipped");
 			if (prod === "Yes") { prod_color = "green"; prod_answer = __("Yes"); }
-			else if (prod === "No") { prod_color = "amber"; prod_answer = __("No"); }
+			else if (prod === "No") { prod_color = "red"; prod_answer = __("No"); }
 			else if (prod === "Partially") { prod_color = "blue"; prod_answer = __("Partially"); }
 
 			card3 = {
