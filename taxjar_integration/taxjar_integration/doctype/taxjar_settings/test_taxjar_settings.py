@@ -4511,8 +4511,8 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 			return mock_render.call_args[0][1]
 
 		self.assertEqual(
-			context_for(taxjar_has_nexus=0, taxjar_nexus_reason="No nexus in NJ")["no_nexus_reason"],
-			"No nexus in NJ",
+			context_for(taxjar_has_nexus=0, taxjar_nexus_reason="Nexus not configured for NJ")["no_nexus_reason"],
+			"Nexus not configured for NJ",
 		)
 		# has_nexus is 0 both for "no nexus" and "never assessed", so the reason
 		# is what tells them apart - neither of these should claim no nexus.
@@ -4581,6 +4581,140 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		self.assertIn("Customer address is not set, hence taxes are not calculated.", fn)
 		self.assertIn('class="taxjar-create-address-link"', fn)
 		self.assertIn("taxjar_integration._open_new_address(frm)", fn)
+
+	def test_nexus_reasons_name_the_state_rather_than_abbreviating_it(self):
+		"""The reason is read as a sentence - "Nexus not configured for HI" has to be decoded
+		before it means anything."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import region_full_name
+
+		self.assertEqual(region_full_name("US", "HI"), "Hawaii")
+		self.assertEqual(region_full_name("CA", "ON"), "Ontario")
+		# A region outside the two mapped countries has nothing to be called
+		# but its own code.
+		self.assertEqual(region_full_name("GB", "ENG"), "ENG")
+		self.assertEqual(region_full_name(None, "HI"), "HI")
+
+		import inspect
+		from taxjar_integration.taxjar_integration.taxjar_integration import check_for_nexus
+
+		source = inspect.getsource(check_for_nexus)
+		self.assertIn('region_full_name(tax_dict.get("to_country")', source)
+
+	def test_region_names_match_the_client_maps(self):
+		"""Two copies, one per runtime - the desk needs them to label its region
+		pickers and the server to write the nexus reason, and neither can read
+		the other's. This is what stops them drifting."""
+		import os
+		import re
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			CA_PROVINCE_NAMES,
+			US_STATE_NAMES,
+		)
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js",
+		))
+		with open(path) as f:
+			js = f.read()
+
+		def js_map(name):
+			block = js.split(f"taxjar_integration.{name} = {{")[1].split("};")[0]
+			return dict(re.findall(r'(\w{2}):\s*"([^"]+)"', block))
+
+		self.assertEqual(js_map("US_STATE_NAMES"), US_STATE_NAMES)
+		self.assertEqual(js_map("CA_PROVINCE_NAMES"), CA_PROVINCE_NAMES)
+		# The Select's options come off the same map, so the order matters too.
+		self.assertEqual(list(js_map("US_STATE_NAMES")), SUPPORTED_STATE_CODES)
+
+	def test_the_no_nexus_strip_is_yellow(self):
+		"""No tax on a sale is a caveat about the outcome; blue read as a note
+		about how the form works, like the "Submit this document" hint it sits
+		directly under."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration._show_no_nexus_message = function (frm, reason) {")[1].split("\n};")[0]
+		self.assertIn('"yellow"', fn)
+		self.assertNotIn('"blue"', fn)
+
+	def test_the_no_nexus_strip_links_to_where_nexus_is_declared(self):
+		"""Nexus is registered with the tax authority and declared in TaxJar,
+		never here - so the strip that reports one missing ends in the only
+		link that can resolve it."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration._show_no_nexus_message = function (frm, reason) {")[1].split("\n};")[0]
+		self.assertIn("taxjar_integration.TAXJAR_NEXUS_URL", fn)
+		self.assertIn('__("Manage Nexus in TaxJar")', fn)
+		self.assertIn('target="_blank"', fn)
+		self.assertIn('rel="noopener noreferrer"', fn)
+
+		self.assertIn(
+			'taxjar_integration.TAXJAR_NEXUS_URL = "https://app.taxjar.com/account#states";', js
+		)
+
+	def test_the_reason_says_nexus_is_not_configured(self):
+		"""\"No nexus in Hawaii\" reads as a fact about the world; the fix is a
+		setting in TaxJar, which is what the strip goes on to link to."""
+		import inspect
+		from taxjar_integration.taxjar_integration.taxjar_integration import check_for_nexus
+
+		source = inspect.getsource(check_for_nexus)
+		self.assertIn('f"Nexus not configured for {to_state}"', source)
+		self.assertIn('"Nexus not configured for destination state"', source)
+		self.assertNotIn("No nexus in", source)
+
+		# The client says the same thing before the first save...
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn('__("Nexus not configured for {0}"', js)
+		self.assertNotIn('__("No nexus in {0}"', js)
+
+		# ...and so does the printed invoice's tax-source line.
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "print_format",
+			"us_sales_tax_invoice", "us_sales_tax_invoice.html",
+		))
+		with open(path) as f:
+			self.assertIn('_("Nexus not configured for {0}")', f.read())
+
+	def test_a_missing_nexus_is_reported_before_the_first_save(self):
+		"""It used to be a modal raised on picking an address - an interruption
+		reporting something that changes nothing about what the user can do
+		next. It is the same fact the saved document states in its own strip,
+		so it is stated the same way, and sooner."""
+		js = self._read_js("taxjar_utils.js")
+		self.assertNotIn("show_nexus_missing_dialog", js)
+		self.assertNotIn("Nexus Missing", js)
+
+		fn = js.split(
+			"taxjar_integration._check_nexus_for_selected_address = function (frm) {"
+		)[1].split("\n};")[0]
+		self.assertIn("check_nexus", fn)
+		self.assertIn("taxjar_integration._show_no_nexus_message(", fn)
+		# The full name, same as the reason the server stores after a save.
+		self.assertIn("taxjar_integration.region_full_name(", fn)
+		# Ship-to decides nexus; billing stands in when there is no separate
+		# shipping address, which is what the server taxes against too.
+		self.assertIn("frm.doc.shipping_address_name || frm.doc.customer_address", fn)
+		# Only while there is unsaved input - a saved doc already carries the
+		# server's own answer in taxjar_nexus_reason.
+		self.assertIn("if (!frm.is_new() && !frm.is_dirty()) return;", fn)
+		# A pick can change while the request is in flight, and a stale answer
+		# names the wrong state.
+		self.assertIn("current !== address", fn)
+		# Nexus here means the saved answer, which was about a different
+		# address, no longer applies - so it is cleared rather than left up.
+		self.assertIn('taxjar_integration._set_tax_message(frm, "")', fn)
+
+	def test_every_address_field_re_asks_about_nexus(self):
+		"""Both address fields feed the same destination the check runs on, on
+		all three transaction forms."""
+		for filename in ("sales_invoice.js", "quotation.js", "sales_order.js"):
+			with self.subTest(filename=filename):
+				js = self._read_js(filename)
+				for field in ("shipping_address_name", "customer_address"):
+					handler = js.split(f"\t{field}(frm) {{")[1].split("\n\t}")[0]
+					self.assertIn(
+						"taxjar_integration.show_no_address_tax_message(frm)", handler
+					)
 
 	def test_setup_appears_before_refresh_in_customer(self):
 		js = self._read_js("customer.js")

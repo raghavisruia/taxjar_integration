@@ -40,6 +40,9 @@ frappe.pages["taxjar-setup"].on_page_show = function (wrapper) {
 };
 
 const AUTOFILE_DOC_URL = "https://support.taxjar.com/article/908-how-does-autofile-work";
+// Same URL as taxjar_integration.TAXJAR_NEXUS_URL in the app bundle. Kept as
+// its own literal rather than read from there: this runs at module scope, and
+// a page script that throws on load takes the whole page with it.
 const TAXJAR_NEXUS_URL = "https://app.taxjar.com/account#states";
 
 const SETUP_STEPS = [
@@ -237,7 +240,7 @@ class TaxJarSetup {
 					</a>
 				</li>
 				<li>
-					<a class="ts-check-link" href="https://app.taxjar.com/account#states" target="_blank" rel="noopener noreferrer">
+					<a class="ts-check-link" href="${TAXJAR_NEXUS_URL}" target="_blank" rel="noopener noreferrer">
 						<span class="ts-check-num">3</span>
 						<span class="ts-check-text">${__("Configure Nexus in TaxJar")}${icon}</span>
 					</a>

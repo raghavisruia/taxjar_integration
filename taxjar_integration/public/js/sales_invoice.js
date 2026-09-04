@@ -22,9 +22,11 @@ frappe.ui.form.on("Sales Invoice", {
 	},
 
 	// Destination decides whether the customer's region-scoped exemption
-	// applies, so both address fields re-evaluate it.
+	// applies, so both address fields re-evaluate it - and, with no separate
+	// shipping address, the billing address is also what nexus is judged on.
 	customer_address(frm) {
 		taxjar_integration.apply_region_exemption(frm);
+		taxjar_integration.show_no_address_tax_message(frm);
 	},
 
 	validate(frm) {
@@ -33,26 +35,12 @@ frappe.ui.form.on("Sales Invoice", {
 			.then(() => taxjar_integration.check_shipping_address(frm));
 	},
 
+	// A missing nexus is reported in the form's own message strip rather than
+	// a modal, so there is nothing here for a caller to await before saving -
+	// the strip can appear while the save runs without racing anything.
 	shipping_address_name(frm) {
 		taxjar_integration.apply_region_exemption(frm);
-
-		if (!frm.doc.shipping_address_name) {
-			return;
-		}
-
-		// Returning this promise (rather than firing-and-forgetting) lets
-		// frm.set_value("shipping_address_name", ...) callers await it, so
-		// the nexus check finishes - and the warning dialog is already up -
-		// before a caller-driven frm.save() starts.
-		return frappe.call({
-			method: "taxjar_integration.taxjar_integration.taxjar_integration.check_nexus",
-			args: { shipping_address_name: frm.doc.shipping_address_name },
-			callback(r) {
-				if (r.message) {
-					taxjar_integration.show_nexus_missing_dialog(r.message.state, r.message.state_code);
-				}
-			}
-		});
+		taxjar_integration.show_no_address_tax_message(frm);
 	}
 });
 

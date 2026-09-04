@@ -9,13 +9,16 @@ frappe.ui.form.on("Quotation", {
 	},
 
 	// Destination decides whether the customer's region-scoped exemption
-	// applies, so both address fields re-evaluate it.
+	// applies, so both address fields re-evaluate it - and both re-ask about
+	// nexus, which the same destination decides.
 	shipping_address_name(frm) {
 		taxjar_integration.apply_region_exemption(frm);
+		taxjar_integration.show_no_address_tax_message(frm);
 	},
 
 	customer_address(frm) {
 		taxjar_integration.apply_region_exemption(frm);
+		taxjar_integration.show_no_address_tax_message(frm);
 	},
 
 	validate(frm) {

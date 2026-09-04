@@ -36,6 +36,10 @@ taxjar_integration.REGION_NAMES_BY_COUNTRY = {
 	CA: taxjar_integration.CA_PROVINCE_NAMES,
 };
 
+// Where nexus is actually declared - TaxJar's own account settings. Nothing in
+// this app can add one, so every "no nexus" message points here.
+taxjar_integration.TAXJAR_NEXUS_URL = "https://app.taxjar.com/account#states";
+
 taxjar_integration.region_full_name = function (country, code) {
 	return (taxjar_integration.REGION_NAMES_BY_COUNTRY[country] || {})[code] || code;
 };
@@ -52,35 +56,6 @@ taxjar_integration.show_taxjar_sync_error = function (title, message) {
 		.escape_html(message)
 		.replace(/guided setup/i, `<a href="/app/taxjar-setup">${__("guided setup")}</a>`);
 	frappe.msgprint({ title, message: html, indicator: "red" });
-};
-
-// ── Nexus-missing warning ──
-// Deliberately its own frappe.ui.Dialog rather than frappe.msgprint: msgprint
-// reuses a single page-global dialog (frappe.msg_dialog), and any ajax
-// response that carries a (possibly empty) _server_messages envelope makes
-// request.js call frappe.hide_msgprint() and wipe it out from under whoever
-// is showing it - see frappe/public/js/frappe/request.js. This warning is
-// raised right before frm.save(), which itself fires several more requests
-// (validate-hook xcalls, the save call), so it needs a dialog those can't
-// silently clear.
-taxjar_integration.show_nexus_missing_dialog = function (state, state_code) {
-	const message =
-		__("The state {0} ({1}) is not in your TaxJar Nexus list.", [state, state_code]) +
-		"<br><br>" +
-		__("Please add it to your TaxJar account at {0} to enable tax calculation for this state.", [
-			'<a href="https://app.taxjar.com/account#states" target="_blank">https://app.taxjar.com/account#states</a>',
-		]);
-
-	const d = new frappe.ui.Dialog({
-		title: __("Nexus Missing"),
-		indicator: "orange",
-		primary_action_label: __("Close"),
-		primary_action() {
-			d.hide();
-		},
-	});
-	d.$body.append(`<div>${message}</div>`);
-	d.show();
 };
 
 // One frappe.ui.form MultiCheck field per country (US states, CA provinces),
@@ -509,10 +484,8 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 				return;
 			}
 
-			// Wait for the shipping_address_name trigger (nexus check
-			// included) to finish before saving, so a "Nexus Missing"
-			// warning isn't racing frm.save()'s own reload. Returning the
-			// promise also lets the dialog disable/spin the button meanwhile.
+			// Returning the promise lets the dialog disable/spin its button
+			// while set_value's own triggers run.
 			return frm.set_value("shipping_address_name", selected).then(function () {
 				if (d.get_value("mark_as_shipping")) {
 					frappe.xcall(
@@ -598,16 +571,83 @@ taxjar_integration.show_no_address_tax_message = function (frm) {
 		}
 	}
 
+	// Paint what the document itself says first...
 	if (frm.doc.taxjar_nexus_reason && !frm.doc.taxjar_has_nexus) {
-		taxjar_integration._set_tax_message(
-			frm,
-			__("{0}, hence no taxes are charged.", [frm.doc.taxjar_nexus_reason]),
-			"blue"
-		);
-		return;
+		taxjar_integration._show_no_nexus_message(frm, frm.doc.taxjar_nexus_reason);
+	} else {
+		taxjar_integration._set_tax_message(frm, "");
 	}
 
-	taxjar_integration._set_tax_message(frm, "");
+	// ...then correct it from the address actually on the form, which on an
+	// edited document is not the one the saved answer was about. A no-op
+	// unless there is unsaved input.
+	taxjar_integration._check_nexus_for_selected_address(frm);
+};
+
+// Yellow, not blue: no tax on a sale is a caveat about the outcome, not a note
+// about how the form works, and the blue read as the latter - the same shade
+// frappe's own "Submit this document to confirm" hint uses, directly above it.
+//
+// Nexus is registered with the tax authority and declared in TaxJar, never
+// here, so the strip ends in the one link that can actually resolve it rather
+// than leaving the reader to work out where to go.
+taxjar_integration._show_no_nexus_message = function (frm, reason) {
+	taxjar_integration._set_tax_message(
+		frm,
+		__("{0}, hence no taxes are charged.", [reason]) +
+			` <a href="${taxjar_integration.TAXJAR_NEXUS_URL}" target="_blank" rel="noopener noreferrer">` +
+			`${__("Manage Nexus in TaxJar")} \u2192</a>`,
+		"yellow"
+	);
+};
+
+// The nexus gap used to surface as a modal on picking an address, which
+// interrupts to report something that changes nothing about what the user can
+// do next - and only after a save had already been attempted. It is the same
+// fact the saved document states in its own strip, so it says it the same way,
+// before the first save.
+//
+// Only while the form holds unsaved input: once saved, taxjar_nexus_reason is
+// the server's own answer for this exact document and is handled above, so
+// re-asking on every refresh would be a round trip per form load to be told
+// what the document already says.
+taxjar_integration._check_nexus_for_selected_address = function (frm) {
+	if (!frm.is_new() && !frm.is_dirty()) return;
+
+	// Ship-to decides nexus; the billing address is what a sale with no
+	// separate shipping address is taxed against, so it stands in.
+	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
+	if (!address) return;
+
+	frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.check_nexus", {
+			shipping_address_name: address,
+		})
+		.then((missing) => {
+			// The pick can change (or the form can be swapped out) while this
+			// is in flight, and a stale answer names the wrong state.
+			const current = frm.doc.shipping_address_name || frm.doc.customer_address;
+			if (current !== address) return;
+
+			if (missing) {
+				// The full state name, same as the reason the server stores
+				// once the document is saved - a two-letter code has to be
+				// decoded before the sentence means anything.
+				taxjar_integration._show_no_nexus_message(
+					frm,
+					__("Nexus not configured for {0}", [
+						taxjar_integration.region_full_name(
+							missing.country_code,
+							missing.state_code
+						) || missing.state,
+					])
+				);
+			} else {
+				// There is nexus here, so whatever the last save concluded
+				// about a different address no longer describes this one.
+				taxjar_integration._set_tax_message(frm, "");
+			}
+		});
 };
 
 taxjar_integration._open_new_address = function (frm) {

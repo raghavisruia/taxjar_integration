@@ -48,59 +48,53 @@ SUPPORTED_COUNTRY_CODES = [
 	"SK",
 	"US",
 ]
-SUPPORTED_STATE_CODES = [
-	"AL",
-	"AK",
-	"AZ",
-	"AR",
-	"CA",
-	"CO",
-	"CT",
-	"DE",
-	"DC",
-	"FL",
-	"GA",
-	"HI",
-	"ID",
-	"IL",
-	"IN",
-	"IA",
-	"KS",
-	"KY",
-	"LA",
-	"ME",
-	"MD",
-	"MA",
-	"MI",
-	"MN",
-	"MS",
-	"MO",
-	"MT",
-	"NE",
-	"NV",
-	"NH",
-	"NJ",
-	"NM",
-	"NY",
-	"NC",
-	"ND",
-	"OH",
-	"OK",
-	"OR",
-	"PA",
-	"RI",
-	"SC",
-	"SD",
-	"TN",
-	"TX",
-	"UT",
-	"VT",
-	"VA",
-	"WA",
-	"WV",
-	"WI",
-	"WY",
-]
+# ISO 3166-2 region names, in the order the State Code select offers them (by
+# state name, not by code). The same two maps, with the same values, are
+# US_STATE_NAMES / CA_PROVINCE_NAMES in public/js/taxjar_utils.js - the client
+# needs them to label its own region pickers, and there is no way to share one
+# copy across the two runtimes, so test_region_names_match_the_client_maps
+# holds them together instead.
+US_STATE_NAMES = {
+	"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona",
+	"AR": "Arkansas", "CA": "California", "CO": "Colorado",
+	"CT": "Connecticut", "DE": "Delaware", "DC": "District of Columbia",
+	"FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
+	"ID": "Idaho", "IL": "Illinois", "IN": "Indiana",
+	"IA": "Iowa", "KS": "Kansas", "KY": "Kentucky",
+	"LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+	"MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+	"MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
+	"NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire",
+	"NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+	"NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+	"OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
+	"RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
+	"TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+	"VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+	"WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+}
+
+# ISO 3166-2:CA - https://en.wikipedia.org/wiki/ISO_3166-2:CA
+CA_PROVINCE_NAMES = {
+	"AB": "Alberta", "BC": "British Columbia",
+	"MB": "Manitoba", "NB": "New Brunswick",
+	"NL": "Newfoundland and Labrador", "NS": "Nova Scotia",
+	"NT": "Northwest Territories", "NU": "Nunavut",
+	"ON": "Ontario", "PE": "Prince Edward Island",
+	"QC": "Quebec", "SK": "Saskatchewan",
+	"YT": "Yukon",
+}
+
+REGION_NAMES_BY_COUNTRY = {"US": US_STATE_NAMES, "CA": CA_PROVINCE_NAMES}
+
+SUPPORTED_STATE_CODES = list(US_STATE_NAMES)
+
+
+def region_full_name(country_code, region_code):
+	""""HI" -> "Hawaii". Falls back to the code itself, which is what a region
+	outside the two mapped countries (or a code TaxJar knows and this app does
+	not) has to be called."""
+	return REGION_NAMES_BY_COUNTRY.get(country_code, {}).get(region_code, region_code)
 
 # Display label for the tax row TaxJar adds to the taxes table. Cosmetic only -
 # TaxJar-owned rows are identified by account_head (see _remove_taxjar_rows),
@@ -1042,7 +1036,7 @@ def set_sales_tax(doc, method):
 		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
 
 		product_status, product_reason = _compute_product_taxable(doc, tax_data, usd_rate)
-		to_state = tax_dict.get("to_state", "")
+		to_state = region_full_name(tax_dict.get("to_country"), tax_dict.get("to_state", ""))
 		# The status matrix reports what the CUSTOMER MASTER says, not the
 		# effective outcome: a transaction-level override used to flip this to
 		# "No", hiding the fact that the customer themselves is taxable. The
@@ -1400,7 +1394,8 @@ def get_taxjar_breakdown_html(doc):
 			currency=(data or {}).get("currency") or getattr(doc, "currency", None) or "USD",
 			# With no nexus there is no breakdown to render and never will be,
 			# so the empty state says why rather than reporting an absence.
-			# nexus_reason already reads "No nexus in NJ" (see set_sales_tax).
+			# nexus_reason already reads "Nexus not configured for NJ" (see
+			# set_sales_tax).
 			no_nexus_reason=(
 				getattr(doc, "taxjar_nexus_reason", None)
 				if not getattr(doc, "taxjar_has_nexus", None)
@@ -1446,11 +1441,15 @@ def check_for_nexus(doc, tax_dict):
 	if not in_nexus:
 		if company_config:
 			_remove_taxjar_rows(doc, company_config)
-		to_state = tax_dict.get("to_state", "")
+		to_state = region_full_name(tax_dict.get("to_country"), tax_dict.get("to_state", ""))
 		_set_tax_status_fields(
 			doc,
 			has_nexus=False,
-			nexus_reason=f"No nexus in {to_state}" if to_state else "No nexus in destination state",
+			nexus_reason=(
+				f"Nexus not configured for {to_state}"
+				if to_state
+				else "Nexus not configured for destination state"
+			),
 			ship_from=_format_address_short(tax_dict, "from"),
 			ship_to=_format_address_short(tax_dict, "to"),
 		)
@@ -1705,7 +1704,10 @@ def check_nexus(shipping_address_name: str):
 		state_code = get_iso_3166_2_state_code(address)
 
 		if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": state_code, "parent": "TaxJar Settings"}):
-			return {"state": address.state, "state_code": state_code}
+			# The country code goes with it: a region code only names a region
+			# within a country, and the caller renders it as a full name.
+			country_code = (frappe.db.get_value("Country", address.country, "code", cache=True) or "").upper()
+			return {"state": address.state, "state_code": state_code, "country_code": country_code}
 	except Exception:
 		return
 

@@ -225,7 +225,7 @@
 				{% if has_tax_data %}
 				{% set state_label = doc.taxjar_ship_to or _("destination") %}
 				{% if not doc.taxjar_has_nexus %}
-					{% set tj_source_line = _("No nexus in {0}").format(state_label) %}
+					{% set tj_source_line = _("Nexus not configured for {0}").format(state_label) %}
 				{% elif doc.taxjar_tax_source == "origin" %}
 					{% set tj_source_line = _("Origin-based tax for {0}").format(state_label) %}
 				{% elif doc.taxjar_tax_source == "destination" %}
