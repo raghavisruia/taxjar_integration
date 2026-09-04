@@ -5078,20 +5078,56 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
 		self.assertNotIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", columns_fn)
 		self.assertIn('__("Exemption Type")', columns_fn)
-		self.assertIn('__("Configure")', columns_fn)
+		self.assertIn('__("Configure Exemption")', columns_fn)
 		cell_fn = js.split("render_exemption_type_cell(value) {")[1].split("\n\t}\n")[0]
 		self.assertIn('<span class="text-muted">-</span>', cell_fn)
 		# Clearing, unlike configuring, IS meaningless there - that guard lives
 		# on the bulk actions and must stay.
 		bulk_fn = js.split("\tupdate_bulk_state() {")[1].split("\n\t}\n")[0]
 		self.assertIn("if (this.active_tab !== NOT_CONFIGURED_TAB) {", bulk_fn)
-		# Sync Status sits between the two guarded blocks, and belongs to
-		# neither - it shows on every tab, including this one.
-		exemption_idx = columns_fn.index('__("Exemption Type")')
-		sync_idx = columns_fn.index('__("Sync Status")')
-		configure_idx = columns_fn.index('__("Configure")')
-		self.assertLess(exemption_idx, sync_idx)
-		self.assertLess(sync_idx, configure_idx)
+		# Sync Status is guarded by neither block - it shows on every tab,
+		# including this one.
+		self.assertIn('__("Sync Status")', columns_fn)
+
+	def test_exemption_columns_are_one_block_ahead_of_sync_status(self):
+		"""Type, the regions it is scoped to, and the control that edits both
+		read together; sync state describes what has already been sent, so it
+		comes last rather than splitting them."""
+		js = self._js()
+		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
+
+		order = [
+			columns_fn.index(f'__("{label}")')
+			for label in ("Exemption Type", "Exempted Regions", "Configure Exemption", "Sync Status")
+		]
+		self.assertEqual(order, sorted(order))
+
+		# Two columns cannot share a fieldname - DataTableManager keys its
+		# column dict (and the library its column ids) off it.
+		self.assertIn('fieldname: "exempt_region_count"', columns_fn)
+		self.assertIn('fieldname: "configure"', columns_fn)
+
+	def test_region_count_has_its_own_column_not_the_pencil(self):
+		"""It answers "how many regions", which is data, not an action - so it
+		reads in a column of its own rather than as a prefix on the control."""
+		js = self._js()
+		regions_fn = js.split("render_regions_cell(row) {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("exempt_region_count", regions_fn)
+
+		count_fn = js.split("render_region_count_cell(row) {")[1].split("\n\t}\n")[0]
+		self.assertIn("row.exempt_region_count", count_fn)
+		# A dash for none, same as every other empty cell in this table.
+		self.assertIn('<span class="text-muted">-</span>', count_fn)
+
+		# The reserved-width slot only existed to stop the icon shifting
+		# beside the count, and goes with it.
+		import os
+		scss = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..",
+			"public", "scss", "taxjar_integration.bundle.scss",
+		))
+		self.assertNotIn("taxjar-region-count", open(scss).read())
+		self.assertNotIn("taxjar-region-count", js)
 
 	def test_four_tabs(self):
 		js = self._js()
@@ -5152,6 +5188,64 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		regions_fn = js.split("render_regions_cell(row) {")[1].split("\n\t}\n")[0]
 		self.assertIn('frappe.utils.icon("square-pen", "sm")', regions_fn)
 		self.assertNotIn("\u270e", regions_fn)
+
+	def test_region_count_previews_the_names_on_hover(self):
+		"""A count says how many, not which - the card names them, with one
+		section per country."""
+		js = self._js()
+		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
+
+		self.assertIn('__("US States")', card_fn)
+		self.assertIn('__("CA Provinces")', card_fn)
+		# Codes are stored; the card reads names.
+		self.assertIn("taxjar_integration.region_full_name(country, state)", card_fn)
+
+	def test_a_fully_exempt_country_says_so_instead_of_listing_everything(self):
+		"""Fifty-one names is a wall of text that has to be read to work out it
+		is all of them."""
+		js = self._js()
+		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
+
+		self.assertIn('__("All states exempted")', card_fn)
+		self.assertIn('__("All provinces exempted")', card_fn)
+		# Against what the picker itself offers, so the two can't disagree.
+		self.assertIn("taxjar_integration.US_STATE_CODES", card_fn)
+		self.assertIn("taxjar_integration.CA_PROVINCE_CODES", card_fn)
+		self.assertIn("states.length >= codes.length", card_fn)
+
+	def test_long_region_lists_are_summarised_after_five(self):
+		"""A 40-name wall gets skimmed for length rather than read, and the
+		count beside it already gives the length."""
+		js = self._js()
+		self.assertIn("const REGION_PREVIEW_LIMIT = 5;", js)
+
+		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
+		self.assertIn("names.length > REGION_PREVIEW_LIMIT", card_fn)
+		self.assertIn("names.slice(0, REGION_PREVIEW_LIMIT)", card_fn)
+		self.assertIn('__("{0}, and {1} more."', card_fn)
+		# The all-exempt wording still wins over the cap.
+		self.assertLess(
+			card_fn.index("states.length >= codes.length"),
+			card_fn.index("names.length > REGION_PREVIEW_LIMIT"),
+		)
+
+	def test_hover_cards_are_rebound_on_every_render(self):
+		"""frappe.ui.hover_card binds to the trigger element itself, and the
+		DataTable builds fresh cells on every refresh - a once-only binding
+		would work until the first page change."""
+		js = self._js()
+		bind_fn = js.split("bind_region_hover_cards($wrapper) {")[1].split("\n\t}\n")[0]
+		self.assertIn("frappe.ui.hover_card(", bind_fn)
+		# The quick-preview timings, not the 700ms default.
+		self.assertIn("open_delay: 200", bind_fn)
+		self.assertIn("close_delay: 150", bind_fn)
+
+		render_fn = js.split("\trender_table() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this.bind_region_hover_cards($table_wrapper);", render_fn)
+		# After both branches - the table is either newly built or refreshed.
+		self.assertGreater(
+			render_fn.index("this.bind_region_hover_cards"), render_fn.index("refresh(this.customers)")
+		)
 
 	def test_failed_sync_status_pairs_the_pill_with_an_info_icon(self):
 		"""The pill text alone doesn't carry the error - Failed gets a
@@ -7356,8 +7450,19 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 			c = result["customers"][0]
 			for key in ("name", "customer_name", "customer_group", "taxjar_exemption_type",
 			            "taxjar_customer_id", "taxjar_customer_sync_status",
-			            "taxjar_customer_sync_error", "exempt_region_count"):
+			            "taxjar_customer_sync_error", "exempt_region_count", "exempt_regions"):
 				self.assertIn(key, c)
+
+	def test_get_customers_carries_the_region_codes_behind_the_count(self):
+		"""The Exempted Regions cell names them on hover, so they travel with
+		the page rather than costing a round trip per hover - and the count is
+		derived from the same rows, so the two can never disagree."""
+		result = get_customers()
+		for c in result["customers"]:
+			self.assertEqual(c["exempt_region_count"], len(c["exempt_regions"]))
+			for region in c["exempt_regions"]:
+				self.assertIn("country", region)
+				self.assertIn("state", region)
 
 	def test_get_customers_filter_by_name(self):
 		"""Column search terms are nested under "search" (see _add_column_search) -

@@ -26,6 +26,9 @@ const STATUS_COLORS = {
 
 const SYNC_UPDATE_EVENT = "taxjar_customers_update";
 
+// How many region names the hover card spells out before summarising the rest.
+const REGION_PREVIEW_LIMIT = 5;
+
 // Whether an exemption is configured is the tab, not a filter - so there is
 // only ever one way to express it. "Non Exempt" is a configured answer, not
 // an exemption, so it gets its own tab rather than folding into Exempted or
@@ -367,23 +370,37 @@ class TaxJarCustomerConfig {
 			_html: (value) => this.render_exemption_type_cell(value),
 		});
 
+		// How many regions the type above is scoped to - the other half of
+		// the same answer, so it sits next to it rather than being folded
+		// into the Configure control that edits both.
+		columns.push({
+			label: __("Exempted Regions"),
+			fieldname: "exempt_region_count",
+			width: 100,
+			align: "center",
+			_html: (value, row) => this.render_region_count_cell(row),
+		});
+
+		// Directly after what it edits, and before Sync Status: the exemption
+		// columns are one block, and sync state describes what has already
+		// been sent rather than anything you change here. This is the one path
+		// that lets a not-configured row be configured without first selecting
+		// it for the bulk action.
+		columns.push({
+			label: __("Configure Exemption"),
+			fieldname: "configure",
+			// Wide enough for the header itself - the cell below it is one
+			// icon, so the column is sized by its label rather than its rows.
+			width: 170,
+			align: "center",
+			_html: (value, row) => this.render_regions_cell(row),
+		});
+
 		columns.push({
 			label: __("Sync Status"),
 			fieldname: "taxjar_customer_sync_status",
 			width: 120,
 			_html: (value, row) => this.render_sync_status_cell(row),
-		});
-
-		// Kept after Sync Status: sync state describes what's already been
-		// sent, so it reads before the control that changes what's sent next.
-		// This is the one path that lets a not-configured row be configured
-		// without first selecting it for the bulk action.
-		columns.push({
-			label: __("Configure"),
-			fieldname: "exempt_region_count",
-			width: 110,
-			align: "center",
-			_html: (value, row) => this.render_regions_cell(row),
 		});
 
 		return columns;
@@ -408,17 +425,86 @@ class TaxJarCustomerConfig {
 	// name resolves to nothing and renders blank rather than failing loudly -
 	// which is exactly what "edit", absent from frappe's sprite, did here.
 	render_regions_cell(row) {
-		const count = row.exempt_region_count || 0;
-
-		// The count span always renders, blank or not - a fixed-width slot
-		// (see .taxjar-region-count in the stylesheet) keeps the pencil icon
-		// planted in the same spot whether the row has 0, 1, or 2+ regions,
-		// instead of the icon visibly shifting with the digit count.
 		return `<button type="button"
 			class="taxjar-configure-link"
 			data-customer="${frappe.utils.escape_html(row.name)}"
 			title="${__("Configure exemption")}"
-			><span class="taxjar-region-count">${count || ""}</span>${frappe.utils.icon("square-pen", "sm")}</button>`;
+			>${frappe.utils.icon("square-pen", "sm")}</button>`;
+	}
+
+	// A dash for none, same as every other empty cell in this table - a 0
+	// reads as a measured quantity when the truth is that nothing is set. The
+	// count itself is the hover-card trigger (bind_region_hover_cards), naming
+	// the regions it stands for.
+	render_region_count_cell(row) {
+		const count = row.exempt_region_count || 0;
+		if (!count) return `<span class="text-muted">-</span>`;
+
+		return `<span class="taxjar-regions-trigger" data-customer="${frappe.utils.escape_html(
+			row.name
+		)}">${count}</span>`;
+	}
+
+	// Bound per render rather than delegated: frappe.ui.hover_card attaches its
+	// own pointer/focus listeners to the trigger element, and the DataTable
+	// builds fresh cells on every refresh. The listeners go with the elements
+	// they were bound to, so nothing needs tearing down - only the card that
+	// happens to be open, which closes itself once its trigger leaves the DOM.
+	//
+	// The wizard's "quick preview" timings, not the 700ms default: the count is
+	// already on screen and the card only expands it, so waiting most of a
+	// second to read what a "5" means is longer than the answer is worth.
+	bind_region_hover_cards($wrapper) {
+		$wrapper.find(".taxjar-regions-trigger").each((_, el) => {
+			const row = this.customers.find((c) => c.name === el.dataset.customer);
+			if (!row) return;
+
+			frappe.ui.hover_card(el, {
+				content: () => this.build_regions_card(row.exempt_regions || []),
+				open_delay: 200,
+				close_delay: 150,
+			});
+		});
+	}
+
+	// One section per country, each either the region names or - once every
+	// region this app offers for that country is on file - the fact that it is
+	// all of them, which is what a 51-name list actually means.
+	build_regions_card(regions) {
+		const $card = $(`<div class="taxjar-regions-card"></div>`);
+
+		const section = (country, heading, all_label, codes) => {
+			const states = regions.filter((r) => r.country === country).map((r) => r.state);
+			if (!states.length) return;
+
+			const names = states
+				.map((state) => taxjar_integration.region_full_name(country, state))
+				.sort();
+
+			let body;
+			if (states.length >= codes.length) {
+				body = all_label;
+			} else if (names.length > REGION_PREVIEW_LIMIT) {
+				// Past a handful, the list stops being read and starts being
+				// skimmed for length - which the count already says.
+				body = __("{0}, and {1} more.", [
+					names.slice(0, REGION_PREVIEW_LIMIT).join(", "),
+					names.length - REGION_PREVIEW_LIMIT,
+				]);
+			} else {
+				body = names.join(", ");
+			}
+
+			$card.append(`
+				<div class="taxjar-regions-card-heading">${heading}</div>
+				<div class="taxjar-regions-card-body">${frappe.utils.escape_html(body)}</div>
+			`);
+		};
+
+		section("US", __("US States"), __("All states exempted"), taxjar_integration.US_STATE_CODES);
+		section("CA", __("CA Provinces"), __("All provinces exempted"), taxjar_integration.CA_PROVINCE_CODES);
+
+		return $card;
 	}
 
 	// Failed pairs the pill with a separate info icon (never nested inside the
@@ -518,6 +604,8 @@ class TaxJarCustomerConfig {
 		} else {
 			this.datatables[key].refresh(this.customers);
 		}
+
+		this.bind_region_hover_cards($table_wrapper);
 
 		// Move rather than copy, so the one instance of each - handlers and all
 		// - follows whichever tab is showing. Both live inside the table

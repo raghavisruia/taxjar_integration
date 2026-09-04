@@ -123,27 +123,34 @@ def get_customers(
 		limit_page_length=page_size,
 	)
 
-	# Fetch all region counts in one grouped query instead of one count per row.
+	# Every row's regions in one query instead of one per row. The count is
+	# derived from them rather than grouped separately, because the Exempted
+	# Regions cell also names them on hover - one page of customers holds at
+	# most a few hundred codes, so a second round trip per hover would cost
+	# more than carrying them here.
+	#
 	# get_all rather than get_list here on purpose: get_list drops the `parent`
 	# column from a child-table select, which is the one field this grouping
 	# needs. It stays permission-correct because `names` came out of the
 	# permission-aware Customer query above, so nothing outside the caller's
-	# visibility can be counted.
+	# visibility can be read.
 	names = [c["name"] for c in customers]
-	region_counts = {}
+	regions_by_customer = {}
 	if names:
 		for row in frappe.get_all(
 			"TaxJar Customer Exempt Region",
 			filters={"parenttype": "Customer", "parent": ("in", names)},
-			fields=["parent", {"COUNT": "*"}],
-			group_by="parent",
+			fields=["parent", "country", "state"],
+			order_by="state asc",
 		):
-			region_counts[row.get("parent")] = next(
-				(v for k, v in row.items() if k != "parent"), 0
+			regions_by_customer.setdefault(row["parent"], []).append(
+				{"country": row["country"], "state": row["state"]}
 			)
 
 	for c in customers:
-		c["exempt_region_count"] = region_counts.get(c["name"], 0)
+		regions = regions_by_customer.get(c["name"], [])
+		c["exempt_regions"] = regions
+		c["exempt_region_count"] = len(regions)
 
 	return paginated_response("customers", customers, total, page, page_size)
 
