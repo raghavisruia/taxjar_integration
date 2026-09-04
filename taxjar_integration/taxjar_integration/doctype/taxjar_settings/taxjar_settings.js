@@ -27,7 +27,7 @@ function _set_setup_intro(frm) {
 	// idempotent), so there is no "done, stop asking" state to check for.
 	// Manual editing of the form below stays fully available either way.
 	frm.set_intro(
-		`<a href="/app/taxjar-setup">${__("Try the guided setup experience")} →</a>`,
+		`<a href="/app/taxjar-setup">${__("Go to guided setup experience")} →</a>`,
 		"blue"
 	);
 }

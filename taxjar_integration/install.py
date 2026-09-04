@@ -95,7 +95,7 @@ GUIDED_SETUP_ALERT_HTML = """
 		</div>
 		<div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">
 			<a href="/app/taxjar-setup" style="color: var(--blue-600); font-weight: 500;">
-				Try the guided setup experience &rarr;
+				Go to guided setup experience &rarr;
 			</a>
 		</div>
 	</div>
