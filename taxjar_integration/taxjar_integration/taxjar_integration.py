@@ -1860,6 +1860,23 @@ def company_creates_transactions(company, config=None):
 
 
 @frappe.whitelist()
+def does_company_calculate_tax(company: str):
+	"""Live read for the Tax Applicability Matrix (render_status_cards in
+	taxjar_utils.js): whether set_sales_tax would run for this company at all.
+
+	Deliberately a different question from is_taxjar_enabled_for_company below,
+	which the sidebar pill asks - that one is about sending transactions, this
+	one about calculating tax, and they are separate flags on the same config.
+
+	Gated on Company rather than Sales Invoice: the matrix renders on Quotation
+	and Sales Order too, and all this reports is whether a feature is on for a
+	company the caller can already see.
+	"""
+	frappe.has_permission("Company", "read", doc=company, throw=True)
+	return company_calculates_tax(company)
+
+
+@frappe.whitelist()
 def is_taxjar_enabled_for_company(company: str):
 	"""Live read for the sidebar sync-status pill (see render_sync_status_sidebar_pill
 	in taxjar_utils.js) - checked on every form refresh rather than cached on the

@@ -714,12 +714,55 @@ taxjar_integration._has_transaction_exemption = function (frm) {
 	return Boolean(cint(frm.doc.taxjar_transaction_exempt) && frm.doc.taxjar_transaction_exemption_type);
 };
 
+// Nothing has been evaluated for this document, and why decides what to say. A
+// new document simply has not been saved yet; a saved one with nothing on it
+// means set_sales_tax never ran, and the commonest reason is that tax
+// calculation is off for the company - where "after saving" sent the reader
+// round a loop that could not end, since saving again would change nothing.
+taxjar_integration._render_empty_status = function (frm, wrapper) {
+	const after_saving = `<p class="text-muted">${__("Tax status will be available after saving.")}</p>`;
+
+	if (frm.is_new() || !frm.doc.company) {
+		wrapper.html(after_saving);
+		return;
+	}
+
+	// Emptied rather than filled with a guess: the answer is one round trip
+	// away, and a wrong message that corrects itself a moment later reads worse
+	// than a blank that fills in.
+	const docname = frm.doc.name;
+	wrapper.empty();
+
+	frappe
+		.xcall(
+			"taxjar_integration.taxjar_integration.taxjar_integration.does_company_calculate_tax",
+			{ company: frm.doc.company }
+		)
+		.then((calculates_tax) => {
+			if (frm.doc.name !== docname) return;
+
+			if (calculates_tax) {
+				wrapper.html(after_saving);
+				return;
+			}
+
+			wrapper.html(`
+				<p class="text-muted">
+					${__("Sales tax calculation is turned off for {0}, so there is no tax status to show.", [
+						frappe.utils.escape_html(frm.doc.company),
+					])}
+					<a href="/app/taxjar-setup">${__("Configure TaxJar")} \u2192</a>
+				</p>
+			`);
+		});
+};
+
 taxjar_integration.render_status_cards = function (frm) {
 	if (!frm.fields_dict.taxjar_status_html) return;
 	const wrapper = frm.fields_dict.taxjar_status_html.$wrapper;
 
 	if (!frm.doc.taxjar_nexus_reason && !frm.doc.taxjar_customer_taxable_reason) {
-		wrapper.html(`<p class="text-muted">${__("Tax status will be available after saving.")}</p>`);
+		taxjar_integration._render_empty_status(frm, wrapper);
 		return;
 	}
 

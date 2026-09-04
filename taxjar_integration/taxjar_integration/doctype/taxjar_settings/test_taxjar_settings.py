@@ -9690,6 +9690,68 @@ class TestTaxBreakdownJS(UnitTestCase):
 		render_fn = js.split("render_status_cards = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("if (!customer_taxable || transaction_exempt) {", render_fn)
 
+	def test_an_empty_matrix_says_why_it_is_empty(self):
+		"""On a saved document with nothing on it, set_sales_tax never ran -
+		and the commonest reason is that tax calculation is off for the
+		company, where "after saving" sends the reader round a loop that cannot
+		end, since saving again changes nothing."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration._render_empty_status = function (frm, wrapper) {")[1].split("\n};")[0]
+
+		# A new document genuinely does just need saving.
+		self.assertIn("if (frm.is_new() || !frm.doc.company) {", fn)
+		self.assertIn("does_company_calculate_tax", fn)
+		self.assertIn("Sales tax calculation is turned off for {0}", fn)
+		self.assertIn('<a href="/app/taxjar-setup">', fn)
+		# Blank while the answer is in flight, rather than a guess that
+		# corrects itself a moment later.
+		self.assertIn("wrapper.empty();", fn)
+		# The company can change (or the form be swapped) mid-flight.
+		self.assertIn("if (frm.doc.name !== docname) return;", fn)
+
+		# The renderer delegates rather than deciding for itself.
+		cards_fn = js.split("taxjar_integration.render_status_cards = function (frm) {")[1].split("\n};")[0]
+		self.assertIn("taxjar_integration._render_empty_status(frm, wrapper);", cards_fn)
+		self.assertNotIn("Tax status will be available after saving.", cards_fn)
+
+	def test_calculates_tax_endpoint_answers_its_own_question(self):
+		"""Sending transactions and calculating tax are separate flags on the
+		same config; the matrix reports the second, the sidebar pill the first."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			does_company_calculate_tax,
+			is_taxjar_enabled_for_company,
+		)
+
+		self.assertIn(
+			"company_calculates_tax(company)", inspect.getsource(does_company_calculate_tax)
+		)
+		self.assertIn(
+			"company_creates_transactions(company)",
+			inspect.getsource(is_taxjar_enabled_for_company),
+		)
+
+		# Gated on Company: the matrix renders on Quotation and Sales Order too,
+		# so a Sales Invoice permission would be the wrong question to ask.
+		self.assertIn(
+			'frappe.has_permission("Company", "read", doc=company, throw=True)',
+			inspect.getsource(does_company_calculate_tax),
+		)
+
+	def test_calculates_tax_endpoint_requires_company_permission(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			does_company_calculate_tax,
+		)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.has_permission",
+			side_effect=frappe.PermissionError,
+		):
+			self.assertRaises(
+				frappe.PermissionError, does_company_calculate_tax, "Any Co"
+			)
+
 	def test_status_cards_use_skipped_instead_of_na(self):
 		js = self._read_js("taxjar_utils.js")
 		render_fn = js.split("render_status_cards = function (frm) {")[1].split("\n};")[0]
