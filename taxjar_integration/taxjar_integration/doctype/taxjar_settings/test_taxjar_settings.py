@@ -4383,7 +4383,7 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		address picker's own "Add New Address" action already uses."""
 		js = self._read_js("taxjar_utils.js")
 		fn = js.split("taxjar_integration.show_no_address_tax_message = function (frm) {")[1].split("\n};")[0]
-		self.assertIn("Customer Address is not set, hence taxes are not calculated.", fn)
+		self.assertIn("Customer address is not set, hence taxes are not calculated.", fn)
 		self.assertIn('class="taxjar-create-address-link"', fn)
 		self.assertIn("taxjar_integration._open_new_address(frm)", fn)
 

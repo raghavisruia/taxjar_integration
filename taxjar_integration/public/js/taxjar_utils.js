@@ -580,7 +580,7 @@ taxjar_integration.show_no_address_tax_message = function (frm) {
 		if (party_name) {
 			taxjar_integration._set_tax_message(
 				frm,
-				__('Customer Address is not set, hence taxes are not calculated. <a href="#" class="taxjar-create-address-link">{0}</a>', [
+				__('Customer address is not set, hence taxes are not calculated. <a href="#" class="taxjar-create-address-link">{0} \u2192</a>', [
 					__("Create Address"),
 				]),
 				"orange"
