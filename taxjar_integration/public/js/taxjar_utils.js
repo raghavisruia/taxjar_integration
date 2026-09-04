@@ -40,6 +40,18 @@ taxjar_integration.REGION_NAMES_BY_COUNTRY = {
 // this app can add one, so every "no nexus" message points here.
 taxjar_integration.TAXJAR_NEXUS_URL = "https://app.taxjar.com/account#states";
 
+// The app's own mark, the same file hooks.app_logo_url serves to the apps
+// screen - one asset, so a re-brand is one file and never leaves a second copy
+// of an older mark to be found later.
+// test_the_sidebar_logo_is_the_app_logo keeps this path and the hook together.
+taxjar_integration.LOGO_URL = "/assets/taxjar_integration/images/taxjar_logo.png";
+
+// Decorative: every caption it sits beside already says "TaxJar", so an alt
+// text would only repeat the next word to a screen reader.
+taxjar_integration._logo_html = function () {
+	return `<img src="${taxjar_integration.LOGO_URL}" alt="" width="20" height="20" style="flex-shrink: 0;">`;
+};
+
 taxjar_integration.region_full_name = function (country, code) {
 	return (taxjar_integration.REGION_NAMES_BY_COUNTRY[country] || {})[code] || code;
 };
@@ -1101,7 +1113,21 @@ taxjar_integration.SYNC_STATUS_COLORS = {
 	Excluded: "gray",
 };
 
+// Inserting is a separate step because clearing has to happen here, at the
+// insert, not only in the dispatcher below: refresh() runs more than once per
+// form load, and both renders are asynchronous (a whitelisted call, and for the
+// not-enabled link a country lookup after it). A second pass therefore clears
+// the sidebar while the first is still in flight, and both then insert - which
+// is how two "Configure TaxJar" rows appeared. Clearing immediately before the
+// insert makes the last render win instead of stacking.
+taxjar_integration._mount_sidebar_section = function ($section) {
+	$(document).find(".form-sidebar .taxjar-sync-sidebar-pill-section").remove();
+	$(document).find(".form-sidebar .sidebar-meta-details").after($section);
+};
+
 taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
+	// Still cleared up front, so a doc that renders nothing at all (no sync
+	// field, no company, or TaxJar disabled for it) leaves no stale row behind.
 	$(document).find(".form-sidebar .taxjar-sync-sidebar-pill-section").remove();
 
 	if (!frm.fields_dict.taxjar_sync_status || !frm.doc.company) return;
@@ -1143,16 +1169,27 @@ taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
 		if ((r.message || {}).country !== "United States") return;
 
 		const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
+		// The logo sits beside the link rather than inside it, so it is not
+		// dragged into the link's own colour or hover treatment.
+		//
+		// The words carry the same class and weight as the status label this
+		// row stands in for (see _render_taxjar_sync_status_pill), so the two
+		// states of the same sidebar row read as one thing rather than as a
+		// caption and a link that happen to share a slot. The external-link
+		// icon is the affordance that says it goes somewhere.
 		const $section = $(`
 			<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
-				<a
-					href="/app/taxjar-setup"
-					class="taxjar-not-enabled-link"
-					style="display: inline-flex; align-items: center; gap: 4px; text-decoration: underline dotted; text-underline-offset: 3px;"
-				>${__("Configure TaxJar")}${icon}</a>
+				<div style="display: flex; align-items: center; gap: 4px;">
+					${taxjar_integration._logo_html()}
+					<a
+						href="/app/taxjar-setup"
+						class="taxjar-not-enabled-link text-muted"
+						style="display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: inherit;"
+					>${__("Configure TaxJar")}${icon}</a>
+				</div>
 			</div>
 		`);
-		$(document).find(".form-sidebar .sidebar-meta-details").after($section);
+		taxjar_integration._mount_sidebar_section($section);
 	});
 };
 
@@ -1192,14 +1229,26 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	const $badge = frappe.ui.badge({ label, theme: color });
 	if (info_text) $badge.css("cursor", "pointer");
 
+	// Label and pill on one row, pill to the right - stacked, three words and
+	// a badge took two lines of a narrow column, and the label sat far enough
+	// from the badge to read as a heading over the rest of the sidebar rather
+	// than as this pill's own caption. The row class is an append target, not
+	// a styling hook; the layout is two properties and stays inline, same as
+	// the label's own weight.
 	const $pill = $(`
 		<div class="sidebar-section taxjar-sync-sidebar-pill-section border-bottom">
-			<div class="text-muted" style="font-weight: 600; margin-bottom: 6px;">${__("TaxJar Status")}</div>
+			<div class="taxjar-sync-sidebar-pill-row"
+				style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+				<div style="display: flex; align-items: center; gap: 4px;">
+					${taxjar_integration._logo_html()}
+					<div class="text-muted" style="font-weight: 600;">${__("TaxJar Status")}</div>
+				</div>
+			</div>
 		</div>
 	`);
-	$pill.append($badge);
+	$pill.find(".taxjar-sync-sidebar-pill-row").append($badge);
 
-	$(document).find(".form-sidebar .sidebar-meta-details").after($pill);
+	taxjar_integration._mount_sidebar_section($pill);
 
 	// frappe.ui.popover, not the hand-rolled hover/click popover this used to
 	// carry - the same native component the Customers/Transactions pages'

@@ -8,7 +8,7 @@ app_publisher = " Frappe Technologies Pvt. Ltd."
 app_description = "TaxJar Integration with ERPNext"
 app_email = "hello@frappe.io"
 app_license = "MIT"
-app_logo_url = "/assets/taxjar_integration/images/taxjar-integration.svg"
+app_logo_url = "/assets/taxjar_integration/images/taxjar_logo.png"
 app_home = "/app/taxjar-integration"
 
 add_to_apps_screen = [

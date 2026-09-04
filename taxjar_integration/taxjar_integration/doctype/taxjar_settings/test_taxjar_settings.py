@@ -9904,7 +9904,10 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		just a plain link, since there's no sync state to report when TaxJar
 		isn't configured for the company at all."""
 		fn = self._not_enabled_fn()
-		self.assertNotIn("TaxJar Status", fn)
+		# The rendered markup, not the prose - a comment may well mention the
+		# label this row stands in for.
+		markup = fn.split("const $section = $(`")[1].split("`);")[0]
+		self.assertNotIn("TaxJar Status", markup)
 		self.assertNotIn("indicator-pill", fn)
 
 	def test_not_enabled_link_text_and_href(self):
@@ -9912,10 +9915,24 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn("Configure TaxJar", fn)
 		self.assertIn('href="/app/taxjar-setup"', fn)
 
-	def test_not_enabled_link_has_dotted_underline_and_icon(self):
+	def test_not_enabled_link_reads_like_the_status_label_it_replaces(self):
+		"""Two states of one sidebar row, so they carry the same class and
+		weight rather than reading as a caption and a link that happen to share
+		a slot. No underline: the external-link icon is the affordance, and an
+		underline under a row that starts with an un-underlined logo only drew
+		a line through half of it."""
 		fn = self._not_enabled_fn()
-		self.assertIn("underline dotted", fn)
 		self.assertIn('frappe.utils.icon("external-link"', fn)
+		self.assertNotIn("underline", fn)
+
+		anchor = fn.split("<a")[1].split(">")[0]
+		self.assertIn("text-muted", anchor)
+		self.assertIn("font-weight: 600", anchor)
+		# ...and not the desk's link blue, which the label beside it never has.
+		self.assertIn("color: inherit", anchor)
+
+		label_row = self._render_fn().split('class="text-muted"')[1].split(">")[0]
+		self.assertIn("font-weight: 600", label_row)
 
 	def test_not_enabled_link_icon_is_inside_the_anchor(self):
 		"""Text and icon both sit inside the single <a> so the whole thing -
@@ -9984,12 +10001,14 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		title/doc-id block) and above Assign/Attachments/Tags/Share, with its
 		own border-bottom separating it from Assign below - matching
 		.sidebar-meta-details' own border-bottom above it."""
-		fn = self._render_fn()
-		self.assertIn(".after($pill)", fn)
-		self.assertIn("border-bottom", fn)
-		not_enabled_fn = self._not_enabled_fn()
-		self.assertIn('.find(".form-sidebar .sidebar-meta-details")', not_enabled_fn)
-		self.assertIn("border-bottom", not_enabled_fn)
+		js = self._read_js("taxjar_utils.js")
+		mount = js.split("taxjar_integration._mount_sidebar_section = function ($section) {")[1].split("\n};")[0]
+		self.assertIn('.find(".form-sidebar .sidebar-meta-details")', mount)
+		self.assertIn(".after($section)", mount)
+
+		# Both sections draw their own rule under themselves.
+		self.assertIn("border-bottom", self._render_fn())
+		self.assertIn("border-bottom", self._not_enabled_fn())
 
 	def test_removes_stale_pill_before_rendering(self):
 		"""Idempotent re-render, same pattern as india_compliance's own
@@ -9998,6 +10017,25 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		either render path below it needs the slate wiped first."""
 		fn = self._dispatcher_fn()
 		self.assertIn('.taxjar-sync-sidebar-pill-section").remove()', fn)
+
+	def test_clearing_also_happens_at_the_insert_not_only_at_dispatch(self):
+		"""Clearing up front is not enough on its own: refresh() runs more than
+		once per form load and both renders are async - a whitelisted call, and
+		for the not-enabled link a country lookup after it - so a second pass
+		clears the sidebar while the first is still in flight and both then
+		insert. That is how two "Configure TaxJar" rows appeared."""
+		js = self._read_js("taxjar_utils.js")
+		mount = js.split("taxjar_integration._mount_sidebar_section = function ($section) {")[1].split("\n};")[0]
+		self.assertIn('.taxjar-sync-sidebar-pill-section").remove()', mount)
+		self.assertIn('.sidebar-meta-details").after($section)', mount)
+		self.assertLess(mount.index(".remove()"), mount.index(".after($section)"))
+
+		# Both render paths insert through it, or one of them still stacks.
+		self.assertIn("taxjar_integration._mount_sidebar_section($section);", self._not_enabled_fn())
+		self.assertIn("taxjar_integration._mount_sidebar_section($pill);", self._render_fn())
+		# ...and neither reaches past it to the sidebar itself.
+		for fn in (self._not_enabled_fn(), self._render_fn()):
+			self.assertNotIn('.sidebar-meta-details").after', fn)
 
 	def test_no_field_no_pill(self):
 		"""Guards doctypes without the sync fields (Quotation, Sales Order) -
@@ -10011,6 +10049,48 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		fn = self._render_fn()
 		self.assertIn("TaxJar Status", fn)
 		self.assertIn("font-weight: 600", fn)
+
+	def test_label_and_pill_share_a_row(self):
+		"""Stacked, three words and a badge took two lines of a narrow column,
+		and the label sat far enough from the badge to read as a heading over
+		the rest of the sidebar rather than as this pill's own caption."""
+		fn = self._render_fn()
+		row = fn.split('class="taxjar-sync-sidebar-pill-row"')[1].split("`);")[0]
+		self.assertIn("display: flex", row)
+		self.assertIn("justify-content: space-between", row)
+		self.assertIn("align-items: center", row)
+		# The badge goes into that row, not under the section.
+		self.assertIn('$pill.find(".taxjar-sync-sidebar-pill-row").append($badge);', fn)
+		# The stacking gap went with it.
+		self.assertNotIn("margin-bottom: 6px", fn)
+
+	def test_the_sidebar_logo_is_the_app_logo(self):
+		"""One asset, not a second copy: replacing that file re-brands the apps
+		screen and both sidebar rows at once."""
+		from taxjar_integration import hooks
+
+		js = self._read_js("taxjar_utils.js")
+		self.assertIn(
+			f'taxjar_integration.LOGO_URL = "{hooks.app_logo_url}";', js
+		)
+
+		import os
+		asset = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..",
+			"public", "images", os.path.basename(hooks.app_logo_url),
+		))
+		self.assertTrue(os.path.isfile(asset), asset)
+
+	def test_both_sidebar_rows_are_badged_with_the_logo(self):
+		"""The status row and the not-configured link alike - a sidebar of
+		otherwise unlabelled sections gives nothing else to recognise them by."""
+		self.assertIn("taxjar_integration._logo_html()", self._render_fn())
+		self.assertIn("taxjar_integration._logo_html()", self._not_enabled_fn())
+
+		# Decorative: the caption beside it already says "TaxJar".
+		js = self._read_js("taxjar_utils.js")
+		logo_fn = js.split("taxjar_integration._logo_html = function () {")[1].split("\n};")[0]
+		self.assertIn('alt=""', logo_fn)
 
 	def test_uses_indicator_pill_no_dot_class(self):
 		"""frappe.ui.badge, not the old india_compliance-style indicator-pill
