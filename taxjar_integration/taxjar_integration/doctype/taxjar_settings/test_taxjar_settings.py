@@ -2,6 +2,7 @@
 # See license.txt
 
 import json
+import unittest
 from datetime import datetime
 
 from unittest.mock import DEFAULT, MagicMock, patch
@@ -14070,3 +14071,320 @@ class TestAppConventionChecks(UnitTestCase):
 			return [p for p in check() if sample.name in p]
 		finally:
 			sample.unlink()
+
+
+# ── Step 1: the multi-company instrument ──────────────────────────────────────
+#
+# The suite has 992 tests and two mentions of a second company, which is why a
+# whole class of company-scoping bugs survived it. Everything below exists to
+# make "the same code path, asked about a different company" a thing a test can
+# say.
+#
+# Deliberately mock-level rather than DB-level for the matrix itself: the TaxJar
+# code asks exactly two questions about a company - what country it is in
+# (get_region) and what its Company Config row holds - so answering those two
+# per company exercises the real branching at a hundredth of the cost of
+# creating four Companies with full charts of accounts. DB-level fixtures are
+# reserved for the handful of cases that genuinely need real rows (permissions,
+# link validation), where they are built in the test that needs them.
+#
+# The tests marked expectedFailure below assert behaviour the app does not have
+# yet. They are not aspirational comments - they run, and when the step that
+# fixes them lands, unittest reports the unexpected success as a failure, which
+# forces the guard to come off. Red today, self-removing later.
+
+
+class TaxJarCompanyProfile:
+	"""One company's TaxJar-relevant facts, in the shape the code reads them."""
+
+	def __init__(self, name, country="United States", calculate=0, file=0, configured=True):
+		self.name = name
+		self.country = country
+		self.calculate = calculate
+		self.file = file
+		self.configured = configured
+
+	@property
+	def config(self):
+		"""The TaxJar Company Config row, or None for a company with no row.
+
+		Account heads are named after the company so a test that mixes two
+		companies' ledgers is obvious in the failure message rather than
+		looking like two copies of the same string.
+		"""
+		if not self.configured:
+			return None
+		row = MagicMock()
+		row.company = self.name
+		row.taxjar_calculate_tax = self.calculate
+		row.taxjar_create_transactions = self.file
+		row.tax_account_head = f"Sales Tax - {self.name}"
+		row.shipping_account_head = f"Freight - {self.name}"
+		return row
+
+
+# The four cases between them cover every branch of the gate ladder. US-OFF is
+# the one worth keeping: "in scope but every feature off" is the state most
+# easily confused with "not in scope at all", and they want different messages.
+US_CALC = TaxJarCompanyProfile("US Calc Co", calculate=1, file=0)
+US_FILE = TaxJarCompanyProfile("US File Co", calculate=0, file=1)
+US_OFF = TaxJarCompanyProfile("US Off Co", calculate=0, file=0)
+IN_CO = TaxJarCompanyProfile("India Co", country="India", configured=False)
+
+TAXJAR_COMPANIES = (US_CALC, US_FILE, US_OFF, IN_CO)
+_BY_NAME = {profile.name: profile for profile in TAXJAR_COMPANIES}
+
+
+class TaxJarTestCase(UnitTestCase):
+	"""Base for tests that need more than one company to exist at once."""
+
+	def setUp(self):
+		# company_scope() will be request-cached from step 2 onward, and the
+		# request cache outlives a single test method. Cleared here so a scope
+		# resolved under one test's patches cannot answer another's.
+		cache = getattr(frappe.local, "request_cache", None)
+		if cache is not None:
+			cache.clear()
+
+	def scope_patches(self, taxjar_enabled=1, module=None):
+		"""Answer every company-facing read per company, for the length of a with block.
+
+		side_effect keyed on the company, not return_value: a fixed return value
+		is exactly how the existing suite ends up proving single-company
+		behaviour twice over, and it is what let these bugs through.
+		"""
+		from taxjar_integration.taxjar_integration import taxjar_integration as default_module
+
+		module = module or default_module
+		real_single_value = frappe.db.get_single_value
+
+		def _single_value(doctype, fieldname, *args, **kwargs):
+			if doctype == "TaxJar Settings" and fieldname == "taxjar_enabled":
+				return taxjar_enabled
+			return real_single_value(doctype, fieldname, *args, **kwargs)
+
+		def _region(company):
+			return _BY_NAME[company].country if company in _BY_NAME else "United States"
+
+		def _config(company):
+			return _BY_NAME[company].config if company in _BY_NAME else None
+
+		settings = MagicMock()
+		settings.taxjar_enabled = taxjar_enabled
+		settings.company_config = [p.config for p in TAXJAR_COMPANIES if p.configured]
+		settings.table_hvjw = []
+
+		from contextlib import ExitStack
+
+		stack = ExitStack()
+		stack.enter_context(patch.object(module.frappe.db, "get_single_value", side_effect=_single_value))
+		stack.enter_context(patch.object(module, "get_region", side_effect=_region))
+		stack.enter_context(patch.object(module, "get_company_config", side_effect=_config))
+		stack.enter_context(patch.object(module.frappe, "get_single", return_value=settings))
+		return stack
+
+
+class TestTheInstrumentItself(TaxJarTestCase):
+	"""A fixture that answers the same thing for every company would let exactly
+	the bugs under investigation through, so it is checked before it is used."""
+
+	def test_each_company_gets_its_own_answers(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			self.assertEqual(module.get_region(US_CALC.name), "United States")
+			self.assertEqual(module.get_region(IN_CO.name), "India")
+			self.assertIsNone(module.get_company_config(IN_CO.name))
+			self.assertEqual(
+				module.get_company_config(US_CALC.name).tax_account_head,
+				f"Sales Tax - {US_CALC.name}",
+			)
+
+	def test_existing_predicates_disagree_per_company(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			self.assertTrue(module.company_calculates_tax(US_CALC.name))
+			self.assertFalse(module.company_calculates_tax(US_FILE.name))
+			self.assertTrue(module.company_creates_transactions(US_FILE.name))
+			self.assertFalse(module.company_creates_transactions(US_CALC.name))
+			self.assertFalse(module.company_calculates_tax(US_OFF.name))
+			self.assertFalse(module.company_creates_transactions(US_OFF.name))
+
+
+class TestScopeMatrixTaxCalculation(TaxJarTestCase):
+	"""Does set_sales_tax act, for each of the four companies?"""
+
+	def _run(self, profile):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=profile.name, taxes=[])
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 85.0
+		tax_data.breakdown.line_items = []
+		tax_data.freight_taxable = False
+		tax_data.tax_source = "destination"
+		# Real jurisdiction names, not bare MagicMocks: _store_breakdown_data
+		# serialises these to JSON, and a MagicMock there fails the encoder.
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with self.scope_patches(), \
+		     patch.object(module, "check_sales_tax_exemption", return_value=(False, None)), \
+		     patch.object(module, "get_tax_data", return_value={"to_country": "US", "to_state": "CA"}), \
+		     patch.object(module, "check_for_nexus", return_value=True), \
+		     patch.object(module, "validate_tax_request", return_value=tax_data), \
+		     patch.object(module.frappe.db, "get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
+		     patch.object(module.frappe, "cache", return_value=_no_cache()):
+			module.set_sales_tax(doc, None)
+
+		return doc
+
+	def test_calculating_company_gets_a_tax_row(self):
+		doc = self._run(US_CALC)
+		self.assertTrue([t for t in doc.taxes if t.account_head == f"Sales Tax - {US_CALC.name}"])
+
+	def test_filing_only_company_gets_no_tax_row(self):
+		"""File Transactions on, Calculate off - TaxJar reports the sale but does
+		not price it."""
+		self.assertEqual(self._run(US_FILE).taxes, [])
+
+	def test_company_with_both_off_gets_no_tax_row(self):
+		self.assertEqual(self._run(US_OFF).taxes, [])
+
+	def test_out_of_scope_company_gets_no_tax_row(self):
+		self.assertEqual(self._run(IN_CO).taxes, [])
+
+
+class TestScopeMatrixSubmitStamping(TaxJarTestCase):
+	"""What enqueue_taxjar_sync writes on submit, per company."""
+
+	def _submit(self, profile):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = MagicMock()
+		doc.name = "SINV-001"
+		doc.company = profile.name
+		doc.taxjar_sync_retry_count = 0
+
+		with self.scope_patches(), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "_publish_transaction_update"), \
+		     patch.object(module.frappe, "enqueue"):
+			module.enqueue_taxjar_sync(doc, None)
+
+		return doc
+
+	def test_filing_company_is_queued(self):
+		doc = self._submit(US_FILE)
+		doc.db_set.assert_any_call("taxjar_sync_status", "Queued", update_modified=False)
+
+	def test_calculate_only_company_is_excluded(self):
+		doc = self._submit(US_CALC)
+		written = doc.db_set.call_args[0][0]
+		self.assertEqual(written["taxjar_sync_status"], "Excluded")
+
+	@unittest.expectedFailure
+	def test_b4_out_of_scope_company_is_not_stamped_at_all(self):
+		"""An India company's invoices should carry no TaxJar status: they are
+		not excluded by a switch someone could go and turn on, they are outside
+		TaxJar's remit. Today every submitted invoice on the site is stamped
+		"Excluded" with a reason naming a setting that would be wrong to enable.
+
+		Fixed in step 4 (gate enqueue_taxjar_sync on in_scope)."""
+		doc = self._submit(IN_CO)
+		doc.db_set.assert_not_called()
+
+
+class TestNexusIsScopedToItsCompany(TaxJarTestCase):
+
+	@unittest.expectedFailure
+	def test_a5_check_nexus_does_not_answer_for_another_company(self):
+		"""check_for_nexus() filters TaxJar Nexus on region_code AND company;
+		the whitelisted check_nexus() the form calls filters on region_code
+		alone and takes no company at all - so one company's registrations
+		silently answer for another's sale.
+
+		Fixed in step 4 (give check_nexus a company argument)."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		self.assertIn(
+			"company",
+			inspect.signature(module.check_nexus).parameters,
+			"check_nexus must be scoped to a company, as check_for_nexus already is",
+		)
+
+
+class TestWhitelistedBoundariesValidateTypes(TaxJarTestCase):
+
+	@unittest.expectedFailure
+	def test_q5_bulk_retry_refuses_a_non_string_name(self):
+		"""In frappe a dict where a docname is expected is not a type error, it
+		is a filter - so client JSON reaches the ORM and picks its own row. The
+		per-document permission loop stops it turning into a bypass, but it
+		surfaces as an unattributable 500 rather than a clean refusal.
+
+		Fixed in step 4 (_require_names at each bulk boundary)."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		with patch.object(page.frappe, "has_permission", return_value=True):
+			with self.assertRaises(frappe.ValidationError):
+				page.bulk_retry([{"docstatus": 1}])
+
+	@unittest.expectedFailure
+	def test_q9_preview_does_not_answer_about_an_arbitrary_company(self):
+		"""preview_foreign_tax_rows checks read permission on whatever doctype
+		string the payload carries, then answers using whatever company it
+		carries - so a caller can learn whether a company they cannot see has
+		tax calculation on.
+
+		Fixed in step 4 (permission-check the company, not just the doctype)."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with patch.object(module.frappe, "has_permission") as mock_perm:
+			mock_perm.return_value = True
+			module.preview_foreign_tax_rows({"doctype": "Quotation", "company": US_CALC.name, "taxes": [], "items": []})
+
+		checked = [c for c in mock_perm.call_args_list if "Company" in str(c)]
+		self.assertTrue(checked, "the company in the payload must be permission-checked")
+
+
+class TestClientCredentialIsAlwaysCompanyScoped(TaxJarTestCase):
+
+	@unittest.expectedFailure
+	def test_a3_get_client_requires_a_company(self):
+		"""get_client() with no company breaks on the first credential row, so
+		address validation and the Customer form's Sync button talk to whichever
+		TaxJar account happens to sit first in the table.
+
+		Fixed in step 6 (drop the None default; both callers pass a company)."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		company = inspect.signature(module.get_client).parameters["company"]
+		self.assertIs(
+			company.default, inspect.Parameter.empty,
+			"company must be required, so there is no path that picks a credential by row order",
+		)
+
+
+class TestInternationalDestinationsDegrade(TaxJarTestCase):
+
+	@unittest.expectedFailure
+	def test_c2_us_company_can_record_an_export_sale(self):
+		"""SUPPORTED_STATE_CODES holds 51 US codes, so any destination that
+		resolves to something else falls into get_state_code() and throws during
+		validate - a US company cannot save an invoice shipping to Ontario.
+
+		Fixed in step 6 (degrade to "no nexus", as an unregistered state does)."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		address = frappe._dict(country="Canada", state="Ontario", taxjar_state_code=None)
+		try:
+			module.get_state_code(address, "Shipping")
+		except frappe.ValidationError:
+			self.fail("an international destination should degrade, not block the save")
