@@ -36,27 +36,34 @@ const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
 
 // All Transactions first - the page opens on everything in range, so the
 // reader sees the whole population before being sorted into one part of it.
-// After it, one tab per state a transaction can be in, ordered by how much
-// attention it wants: what needs fixing first, what is still moving, then the
-// two resting states and finally the one that needs nothing. Those five
-// partition the table - every invoice in range is in exactly one - and each is
-// the population of the summary card above it, so the strip and the tabs cannot
-// disagree. All Transactions is the one tab that overlaps the rest: it is their
-// union, and its card is the total.
+// After it, the same five states the summary strip counts, in the same order
+// and the same two groups: first the three TaxJar is answerable for, ordered by
+// how much attention each wants - what needs fixing, what is still moving, what
+// is done - then the two that are outside its remit. Same order in both means
+// card and tab share a column, so clicking a number moves the underline
+// straight down rather than sideways. Those five partition the table - every
+// invoice in range is in exactly one - and each is the population of the card
+// above it, so the strip and the tabs cannot disagree. All Transactions is the
+// one tab that overlaps the rest: it is their union, and its card is the total.
 const ALL_TAB = "all";
 const FAILED_TAB = "failed";
 const QUEUED_TAB = "queued";
-const NOT_APPLICABLE_TAB = "not_applicable";
-const DRAFT_TAB = "draft";
 const SYNCED_TAB = "synced";
+const DRAFT_TAB = "draft";
+// Named for the label and the stored status; the value is the scope key the
+// server switches on, which predates the rename and is not a label, so it stays.
+const EXCLUDED_TAB = "not_applicable";
 
 const TABS = [
 	{ name: ALL_TAB, label: __("All Transactions"), is_active: true },
-	{ name: FAILED_TAB, label: __("Failed") },
+	// group_start marks each tab the strip starts a new group on, so the rule
+	// falls in the same two places in both rows. Flagged here rather than in
+	// make_tabs() so the row's shape is readable from the row's own definition.
+	{ name: FAILED_TAB, label: __("Failed"), group_start: true },
 	{ name: QUEUED_TAB, label: __("Queued") },
-	{ name: NOT_APPLICABLE_TAB, label: __("Not Applicable") },
-	{ name: DRAFT_TAB, label: __("Draft") },
 	{ name: SYNCED_TAB, label: __("Synced") },
+	{ name: DRAFT_TAB, label: __("Draft"), group_start: true },
+	{ name: EXCLUDED_TAB, label: __("Excluded") },
 ];
 
 // Submitted is the normal resting state and Draft the one before it, so both
@@ -190,6 +197,17 @@ class TaxJarTransactionSync {
 				this.refresh();
 			},
 		});
+
+		// frappe.ui.Tabs draws a flat row of buttons and knows nothing of groups,
+		// so the rules are hung on the buttons afterwards. A class, not a border
+		// set here: it lands in the gap beside the button rather than inside it,
+		// and the component measures offsetWidth to size the active underline.
+		TABS.forEach((tab, index) => {
+			if (tab.group_start) {
+				this.tabsInstance.tabs[index].button.classList.add("taxjar-tab-group-start");
+			}
+		});
+
 		this.tabs_wrapper.append(this.tabsInstance.$el);
 
 		this.make_tab_actions();
@@ -316,9 +334,11 @@ class TaxJarTransactionSync {
 		});
 	}
 
-	// Three captioned groups so the total, the included statuses and the two
-	// kinds of exclusion each read as their own count. Every number drills the
-	// table down without disturbing the company/date filters above.
+	// Three captioned groups so the total, the statuses TaxJar is answerable
+	// for and the two ways of being outside its remit each read as their own
+	// count. The cards run in the tabs' order, so every number sits directly
+	// above the tab it opens. Each drills the table down without disturbing the
+	// company/date filters above.
 	render_summary(summary) {
 		const groups = [
 			{
@@ -330,25 +350,31 @@ class TaxJarTransactionSync {
 				cards: [{ value: summary.submitted.total + summary.draft.total, value_key: ALL_TAB }],
 			},
 			{
-				label: __("Included"),
+				// Sent, waiting to be sent, or stopped on the way: all three are
+				// TaxJar's to account for, which is what the heading says and what
+				// "Included" did not - a failure is included in nothing. Failed
+				// leads: it is the only one of the three anyone has to act on.
+				label: __("In Scope"),
 				cards: [
-					{ label: __("Synced"), value: summary.submitted.synced, value_key: SYNCED_TAB, indicator: "green" },
-					{ label: __("Queued"), value: summary.submitted.queued, value_key: QUEUED_TAB, indicator: "blue" },
 					{ label: __("Failed"), value: summary.submitted.failed, value_key: FAILED_TAB, indicator: "red" },
+					{ label: __("Queued"), value: summary.submitted.queued, value_key: QUEUED_TAB, indicator: "blue" },
+					{ label: __("Synced"), value: summary.submitted.synced, value_key: SYNCED_TAB, indicator: "green" },
 				],
 			},
 			{
-				// The two ways a transaction ends up outside TaxJar: not
-				// submitted yet, or submitted and deliberately not sent.
-				label: __("Excluded"),
+				// The two ways a transaction ends up outside TaxJar: not submitted
+				// yet, or submitted and deliberately kept out. In that order, so the
+				// pair reads "not yet" then "never". The heading has to be wider
+				// than either card, because one of the cards is now called Excluded.
+				label: __("Out of Scope"),
 				cards: [
 					{ label: __("Draft"), value: summary.draft.total, value_key: DRAFT_TAB },
 					{
-						// The stored status is "Excluded" - the group heading
-						// already says that, so the card names the case instead.
-						label: __("Not Applicable"),
+						// Named for the status it stores, rather than for a phrase
+						// that read as though TaxJar had no opinion about the invoice.
+						label: __("Excluded"),
 						value: summary.submitted.excluded,
-						value_key: NOT_APPLICABLE_TAB,
+						value_key: EXCLUDED_TAB,
 						indicator: "grey",
 					},
 				],

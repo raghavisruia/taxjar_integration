@@ -253,12 +253,34 @@
 // ── Tab row ───────────────────────────────────────────────────────────────
 // frappe.ui.tabs draws the tab bar itself (.es-tabs__list, already styled by
 // its own component CSS); only the left inset - lining the labels up with
-// the table's own padding below them - and the tab actions row need
-// anything here.
+// the table's own padding below them - the group rule, and the tab actions
+// row need anything here.
 
 .taxjar-page-tabs {
 	.es-tabs__list {
 		padding-left: 15px;
+	}
+
+	// The summary strip above divides its numbers into three captioned groups
+	// - the total, In Scope, Out of Scope - with a rule at each seam. This
+	// repeats those rules under it, so the two rows read as one grid.
+	// The rule is drawn in the gap by a pseudo-element and the space made with
+	// margin, because the component sizes the active underline from the
+	// button's own offsetWidth - a border and padding here would stretch that
+	// underline past the label it belongs to. The colour is the tab rail's, so
+	// the two lines meeting at the corner are one weight.
+	.es-tabs__tab.taxjar-tab-group-start {
+		position: relative;
+		margin-left: calc(var(--spacing) * 5);
+
+		&::before {
+			content: "";
+			position: absolute;
+			left: calc(var(--spacing) * -5);
+			top: calc(var(--spacing) * 1);
+			bottom: calc(var(--spacing) * 1);
+			border-left: 1px solid var(--outline-gray-1);
+		}
 	}
 
 	// Sits inside the table wrapper, directly above the rows it acts on, so it

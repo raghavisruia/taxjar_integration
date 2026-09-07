@@ -5005,13 +5005,13 @@ class TestExcludedRename(UnitTestCase):
 	def test_no_stale_not_applicable_status_value_in_source(self):
 		"""Guards the stored status, not the words.
 
-		"Not Applicable" is still live vocabulary on the page - the summary card
-		under the Excluded heading, and the drill-down that picks that half of
-		the Excluded tab - so a plain string search reports those as leftovers.
-		What must never come back is the old *status value*, so the rule is that
-		no line may mention both the string and taxjar_sync_status: that catches
-		an assignment, a comparison, or a _set_sync_status() call, and leaves the
-		labels alone.
+		The words are gone from the page - the card and the tab are both called
+		"Excluded" now - but "Not Applicable" survives as a scope key, in the
+		patch that renamed the status, and in prose explaining the rename, so a
+		plain string search reports those as leftovers. What must never come back
+		is the old *status value*, so the rule is that no line may mention both
+		the string and taxjar_sync_status: that catches an assignment, a
+		comparison, or a _set_sync_status() call, and leaves the rest alone.
 		"""
 		import os
 		root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -7351,21 +7351,81 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 
 	def test_the_tabs_and_their_order(self):
 		"""Everything first, so the reader sees the whole population before
-		being sorted into one part of it; then the states, ordered by how much
-		attention each wants: what needs fixing first, what is still moving,
-		then the resting states."""
+		being sorted into one part of it; then the in-scope states ordered by how
+		much attention each wants - what needs fixing, what is still moving, what
+		is done - and last the two that are out of scope."""
 		js = self._transactions_js()
 		tabs = js.split("const TABS = [")[1].split("];")[0]
 
-		order = ["All Transactions", "Failed", "Queued", "Not Applicable", "Draft", "Synced"]
+		order = ["All Transactions", "Failed", "Queued", "Synced", "Draft", "Excluded"]
 		indexes = [tabs.index('__("%s")' % label) for label in order]
 		self.assertEqual(indexes, sorted(indexes))
 		# The first tab is the one that opens, and the page has to agree with
 		# frappe.ui.Tabs about which that is - it activates index 0 itself.
 		self.assertIn('{ name: ALL_TAB, label: __("All Transactions"), is_active: true }', tabs)
 		self.assertIn("this.active_tab = ALL_TAB;", js)
-		self.assertNotIn("Included", tabs)
-		self.assertNotIn("Excluded", tabs)
+		# The group captions belong to the strip, which has the room for them.
+		# Repeated down here they would read as two more tabs to click.
+		self.assertNotIn("In Scope", tabs)
+		self.assertNotIn("Out of Scope", tabs)
+
+	def test_the_strip_and_the_tabs_run_in_the_same_order(self):
+		"""Each card opens the tab directly below it, so a click moves the
+		underline straight down. Two orders for one partition would put Synced
+		first in one row and last in the other, and the reader would have to
+		re-find every number in the row beneath it."""
+		js = self._transactions_js()
+		tabs = js.split("const TABS = [")[1].split("];")[0]
+		summary_fn = js.split("render_summary(summary) {")[1].split("\n\t}\n")[0]
+
+		keys = ["ALL_TAB", "FAILED_TAB", "QUEUED_TAB", "SYNCED_TAB", "DRAFT_TAB", "EXCLUDED_TAB"]
+		self.assertEqual(
+			[tabs.index("name: %s," % key) for key in keys],
+			sorted(tabs.index("name: %s," % key) for key in keys),
+		)
+		self.assertEqual(
+			[summary_fn.index("value_key: %s" % key) for key in keys],
+			sorted(summary_fn.index("value_key: %s" % key) for key in keys),
+		)
+
+	def test_the_two_summary_groups_are_named_for_taxjars_remit(self):
+		"""The card that used to be called Not Applicable is now named for the
+		status it stores, so the group above it cannot also be Excluded. Scope is
+		the honest split anyway: a Failed transaction is TaxJar's to account for,
+		which "Included" never quite said."""
+		js = self._transactions_js()
+		summary_fn = js.split("render_summary(summary) {")[1].split("\n\t}\n")[0]
+
+		self.assertIn('label: __("In Scope")', summary_fn)
+		self.assertIn('label: __("Out of Scope")', summary_fn)
+		self.assertNotIn('label: __("Included")', summary_fn)
+		self.assertIn('label: __("Excluded"),', summary_fn)
+
+	def test_the_tab_row_carries_the_groups_rules(self):
+		"""frappe.ui.Tabs draws a flat row, so the seams the strip shows above
+		have to be hung on the first tab of each group by hand. Both of them: a
+		rule before Draft alone would divide the row in two where the strip
+		divides it in three, and All Transactions would read as part of In Scope
+		rather than as the union of everything. It is a margin and a
+		pseudo-element, not padding and a border: the component sizes the active
+		underline from the button's offsetWidth, and a wider button would drag
+		that underline out past its own label."""
+		js = self._transactions_js()
+		tabs = js.split("const TABS = [")[1].split("];")[0]
+		self.assertIn('{ name: FAILED_TAB, label: __("Failed"), group_start: true }', tabs)
+		self.assertIn('{ name: DRAFT_TAB, label: __("Draft"), group_start: true }', tabs)
+		# Exactly the two seams the strip has - no rule inside a group.
+		self.assertEqual(tabs.count("group_start: true"), 2)
+		self.assertIn('classList.add("taxjar-tab-group-start")', js)
+
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "scss", "taxjar_integration.bundle.scss"
+		)
+		with open(os.path.normpath(path)) as f:
+			rule = f.read().split(".es-tabs__tab.taxjar-tab-group-start {")[1].split("\n\t}")[0]
+		self.assertIn("margin-left", rule)
+		self.assertNotIn("padding-left", rule)
 
 	def test_a_summary_card_opens_its_own_tab(self):
 		"""Each card counts exactly one tab's population, so clicking one is
@@ -7379,7 +7439,7 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 
 		# The card keys are tab names, or go_to_tab would be handed a status.
 		summary_fn = js.split("render_summary(summary) {")[1].split("\n\t}\n")[0]
-		for key in ("ALL_TAB", "SYNCED_TAB", "QUEUED_TAB", "FAILED_TAB", "DRAFT_TAB", "NOT_APPLICABLE_TAB"):
+		for key in ("ALL_TAB", "SYNCED_TAB", "QUEUED_TAB", "FAILED_TAB", "DRAFT_TAB", "EXCLUDED_TAB"):
 			self.assertIn(f"value_key: {key}", summary_fn)
 
 	def _sync_status_cell_fn(self):
