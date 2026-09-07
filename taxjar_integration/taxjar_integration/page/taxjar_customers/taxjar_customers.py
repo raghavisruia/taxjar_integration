@@ -317,6 +317,8 @@ def bulk_sync_to_taxjar(customers: list | str):
 				queue="short",
 				deduplicate=True,
 				job_id=f"sync_customer_taxjar_{name}_{config.company}",
+				# The "Queued" status written just above is not committed yet.
+				enqueue_after_commit=True,
 			)
 		queued += 1
 

@@ -247,6 +247,8 @@ def bulk_retry(invoices: list | str):
 			queue="short",
 			job_id=f"taxjar_retry_{name}",
 			deduplicate=True,
+			# The "Queued" status written just above is not committed yet.
+			enqueue_after_commit=True,
 		)
 		queued += 1
 

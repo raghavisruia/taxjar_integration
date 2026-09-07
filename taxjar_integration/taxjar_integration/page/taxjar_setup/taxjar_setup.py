@@ -304,7 +304,10 @@ def fetch_nexus():
 
 	settings = frappe.get_single(SETTINGS)
 	if not settings.company_config:
-		frappe.throw(_("Please add at least one company's accounts before fetching nexus."))
+		frappe.throw(
+			_("Please add at least one company's accounts before fetching nexus."),
+			title=_("Company Accounts Required"),
+		)
 
 	settings.update_nexus_list()
 

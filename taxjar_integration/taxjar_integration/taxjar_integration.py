@@ -10,6 +10,7 @@ from frappe import _
 from frappe.contacts.doctype.address.address import get_company_address
 from frappe.realtime import get_doctype_room
 from frappe.utils import cint, flt
+from frappe.utils.caching import request_cache
 from frappe.utils.password import get_decrypted_password
 
 from erpnext import get_region
@@ -159,19 +160,24 @@ def _write_taxjar_ui_log(log_data):
 	).insert(ignore_permissions=True)
 
 
+@request_cache
 def _is_taxjar_logging_enabled():
-	cached_value = getattr(frappe.flags, "taxjar_logging_enabled", None)
-	if cached_value is not None:
-		return cached_value
+	"""Whether TaxJar API logging is on, read once per request.
 
+	log_taxjar_call() runs on every API interaction and several run within a
+	single save, so this is worth not re-reading - but the memo belongs in
+	frappe's own request-scoped cache rather than a hand-rolled flag. A cache
+	keyed on frappe.flags is invisible to anything that clears caches, and in
+	tests it survives from one case into the next.
+
+	Defaults to on when the setting has never been written, and on failure: a
+	site that cannot read the setting should still log rather than go quiet.
+	"""
 	try:
 		stored_value = frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging")
-		enabled = 1 if stored_value is None else cint(stored_value)
+		return 1 if stored_value is None else cint(stored_value)
 	except Exception:
-		enabled = 1
-
-	frappe.flags.taxjar_logging_enabled = enabled
-	return enabled
+		return 1
 
 
 def log_taxjar_call(action, status, payload=None, response=None, error=None, context=None):
@@ -660,7 +666,10 @@ def fetch_transaction_from_taxjar(invoice_name: str):
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
 	client = get_client(doc.company)
 	if not client:
-		frappe.throw(_("TaxJar client is not configured for company {0}").format(doc.company))
+		frappe.throw(
+			_("TaxJar client is not configured for company {0}").format(doc.company),
+			title=_("TaxJar Not Configured"),
+		)
 
 	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
 
@@ -683,15 +692,25 @@ def fetch_transaction_from_taxjar(invoice_name: str):
 		if status_code == 404:
 			frappe.throw(
 				_("Transaction {0} was not found in TaxJar. It may have been created in a different API mode (Sandbox/Live) "
-				  "or may not have been synced yet.").format(invoice_name)
+				  "or may not have been synced yet.").format(invoice_name),
+				title=_("Transaction Not Found in TaxJar"),
 			)
-		frappe.throw(_linkify_guided_setup(_("Failed to fetch from TaxJar: {0}").format(sanitize_error_response(err))))
+		frappe.throw(
+			_linkify_guided_setup(_("Failed to fetch from TaxJar: {0}").format(sanitize_error_response(err))),
+			title=_("TaxJar Fetch Failed"),
+		)
 	except taxjar.exceptions.TaxJarConnectionError:
 		log_taxjar_call(action="show_transaction", status="error", error="TaxJar API is unreachable", context=ctx)
-		frappe.throw(_("TaxJar API is unreachable. Please try again later."))
+		frappe.throw(
+			_("TaxJar API is unreachable. Please try again later."),
+			title=_("TaxJar Unreachable"),
+		)
 	except Exception as e:
 		log_taxjar_call(action="show_transaction", status="error", error=str(e), context=ctx)
-		frappe.throw(_("Failed to fetch from TaxJar: {0}").format(str(e)))
+		frappe.throw(
+			_("Failed to fetch from TaxJar: {0}").format(str(e)),
+			title=_("TaxJar Fetch Failed"),
+		)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -702,7 +721,10 @@ def delete_transaction_manual(invoice_name: str):
 	doc = frappe.get_doc("Sales Invoice", invoice_name)
 	client = get_client(doc.company)
 	if not client:
-		frappe.throw(_("TaxJar client is not configured for company {0}").format(doc.company))
+		frappe.throw(
+			_("TaxJar client is not configured for company {0}").format(doc.company),
+			title=_("TaxJar Not Configured"),
+		)
 
 	ctx = {"doctype": "Sales Invoice", "name": invoice_name}
 	is_refund = doc.is_return
@@ -721,7 +743,10 @@ def delete_transaction_manual(invoice_name: str):
 		return {"success": True}
 	except Exception as e:
 		log_taxjar_call(action=action, status="error", error=str(e), context=ctx)
-		frappe.throw(_("Failed to delete from TaxJar: {0}").format(str(e)))
+		frappe.throw(
+			_("Failed to delete from TaxJar: {0}").format(str(e)),
+			title=_("TaxJar Delete Failed"),
+		)
 
 
 def _get_transaction_date(doc):
@@ -750,7 +775,8 @@ def _get_usd_exchange_rate(doc):
 		frappe.throw(
 			_("Could not find exchange rate from {0} to USD for {1}. "
 			  "Please add it in Currency Exchange or configure Currency Exchange Settings."
-			).format(currency, txn_date)
+			).format(currency, txn_date),
+			title=_("Exchange Rate Not Found"),
 		)
 
 	if flags is not None:
@@ -1830,7 +1856,10 @@ def validate_tax_request(tax_dict, company=None):
 			payload=tax_dict,
 			error=getattr(err, "full_response", str(err)),
 		)
-		frappe.throw(_linkify_guided_setup(_(sanitize_error_response(err))))
+		frappe.throw(
+			_linkify_guided_setup(_(sanitize_error_response(err))),
+			title=_("TaxJar Tax Calculation Failed"),
+		)
 	except Exception:
 		log_taxjar_call(
 			action="tax_for_order",
@@ -1853,7 +1882,10 @@ def get_company_address_details(doc):
 	company_address = get_company_address(company).company_address
 
 	if not company_address:
-		frappe.throw(_("Please set a default address for the company {0}.").format(company))
+		frappe.throw(
+			_("Please set a default address for the company {0}.").format(company),
+			title=_("Company Address Required"),
+		)
 
 	return frappe.get_doc("Address", company_address)
 
@@ -2715,7 +2747,8 @@ def _validate_exempt_regions(doc):
 			frappe.throw(
 				_("Row {0}: {1} is not a valid state/province for {2}").format(
 					row.idx, row.state, row.country
-				)
+				),
+				title=_("Invalid Exempt Region"),
 			)
 
 
@@ -2770,6 +2803,11 @@ def on_customer_update(doc, method):
 			queue="short",
 			deduplicate=True,
 			job_id=f"sync_customer_taxjar_{doc.name}_{config.company}",
+			# This runs inside the customer's own save, so the exemption the worker
+			# is being sent to push is not committed yet. Without this the job can
+			# start first, re-read the Customer, and send TaxJar the pre-edit
+			# exemption - then mark it Synced, so nothing ever corrects it.
+			enqueue_after_commit=True,
 			now=frappe.flags.in_test,
 		)
 

@@ -98,17 +98,26 @@ class TaxJarSettings(Document):
 			return
 
 		if not self.api_mode:
-			frappe.throw(frappe._("Please select an API Mode before enabling features."))
+			frappe.throw(
+				frappe._("Please select an API Mode before enabling features."),
+				title=frappe._("API Mode Required"),
+			)
 
 		# Cheap, local credential-presence checks only. The live token check (an API
 		# round-trip per credential) runs in the background via validate_taxjar_tokens
 		# so it never blocks the save.
 		if self.api_mode == "Sandbox":
 			if not any(cred.sandbox_token for cred in (self.table_hvjw or [])):
-				frappe.throw(frappe._("At least one Sandbox Token is required in API Credentials for Sandbox mode."))
+				frappe.throw(
+					frappe._("At least one Sandbox Token is required in API Credentials for Sandbox mode."),
+					title=frappe._("Sandbox Token Required"),
+				)
 		else:
 			if not any(cred.live_token for cred in (self.table_hvjw or [])):
-				frappe.throw(frappe._("At least one Live Token is required in API Credentials for Live mode."))
+				frappe.throw(
+					frappe._("At least one Live Token is required in API Credentials for Live mode."),
+					title=frappe._("Live Token Required"),
+				)
 
 	@frappe.whitelist(methods=["POST"])
 	def update_nexus_list(self):
@@ -117,7 +126,10 @@ class TaxJarSettings(Document):
 		self.check_permission("write")
 
 		if not self.company_config:
-			frappe.throw(frappe._("Please add at least one Company Configuration before updating Nexus list"))
+			frappe.throw(
+				frappe._("Please add at least one Company Configuration before updating Nexus list"),
+				title=frappe._("Company Configuration Required"),
+			)
 
 		self.set("nexus", [])
 
@@ -152,7 +164,8 @@ class TaxJarSettings(Document):
 							"TaxJar rejected the API credential for {0} (401 Unauthorized). "
 							"Enter a correct API Token for {0} on the Connect step, or remove {0} "
 							"from API Credentials, to continue."
-						).format(config.company)
+						).format(config.company),
+						title=frappe._("TaxJar Rejected the API Token"),
 					)
 				raise
 			except Exception as e:
@@ -216,18 +229,30 @@ class TaxJarSettings(Document):
 
 		client = get_client()
 		if not client:
-			frappe.throw(frappe._("Could not connect to TaxJar. Check your API credentials."))
+			frappe.throw(
+				frappe._("Could not connect to TaxJar. Check your API credentials."),
+				title=frappe._("TaxJar Connection Failed"),
+			)
 
 		try:
 			fetch_and_insert_categories(client)
 		except taxjar.exceptions.TaxJarConnectionError:
-			frappe.throw(frappe._("TaxJar API is unreachable. Please try again later."))
+			frappe.throw(
+				frappe._("TaxJar API is unreachable. Please try again later."),
+				title=frappe._("TaxJar Unreachable"),
+			)
 		except taxjar.exceptions.TaxJarResponseError as err:
 			full = getattr(err, "full_response", None) or {}
 			status = full.get("status_code") if isinstance(full, dict) else None
 			if status == 401:
-				frappe.throw(frappe._("Invalid TaxJar API token. Please check your credentials."))
-			frappe.throw(frappe._("Failed to fetch categories from TaxJar: {0}").format(sanitize_error_response(err)))
+				frappe.throw(
+					frappe._("Invalid TaxJar API token. Please check your credentials."),
+					title=frappe._("Invalid TaxJar API Token"),
+				)
+			frappe.throw(
+				frappe._("Failed to fetch categories from TaxJar: {0}").format(sanitize_error_response(err)),
+				title=frappe._("Product Tax Category Refresh Failed"),
+			)
 
 		return self.get_product_tax_category_summary()
 
@@ -279,7 +304,10 @@ def _alert_token_issue(user, message, indicator):
 
 def add_product_tax_categories():
 	if PRODUCT_TAX_CATEGORY_DATA_FILE.parent != BASE_DIR or not PRODUCT_TAX_CATEGORY_DATA_FILE.is_file():
-		frappe.throw(frappe._("Product tax category fixture file is missing or invalid"))
+		frappe.throw(
+			frappe._("Product tax category fixture file is missing or invalid"),
+			title=frappe._("Product Tax Category Data Missing"),
+		)
 
 	# nosemgrep: frappe-security-file-traversal - fixed local fixture path with validation.
 	tax_categories = json.loads(PRODUCT_TAX_CATEGORY_DATA_FILE.read_text(encoding="utf-8"))
@@ -594,12 +622,21 @@ def get_custom_fields():
 				depends_on="eval: doc.docstatus !== 0",
 			),
 			dict(
+				# Indexed, along with taxjar_sync_retryable and
+				# taxjar_sync_retry_count below: retry_failed_taxjar_syncs runs
+				# every 15 minutes and filters Sales Invoice on all three, and the
+				# Transaction Sync page filters and COUNTs on this one for every
+				# tab and every summary refresh. Unindexed those are repeated full
+				# scans of the largest table on the site. Declared here rather than
+				# added by hand because make_custom_fields() re-runs on every
+				# migrate - an index applied ad-hoc is an index that disappears.
 				fieldname="taxjar_sync_status",
 				fieldtype="Select",
 				insert_after="taxjar_sync_section",
 				label="Sync Status",
 				options="Excluded\nQueued\nSynced\nFailed",
 				default="Excluded",
+				search_index=1,
 				allow_on_submit=1,
 				in_list_view=1,
 				read_only=1,
@@ -648,6 +685,7 @@ def get_custom_fields():
 				fieldtype="Check",
 				insert_after="taxjar_last_synced",
 				label="TaxJar Retry Pending",
+				search_index=1,
 				read_only=1,
 				hidden=1,
 				no_copy=1,
@@ -664,6 +702,7 @@ def get_custom_fields():
 				insert_after="taxjar_sync_retryable",
 				label="TaxJar Retry Count",
 				default="0",
+				search_index=1,
 				read_only=1,
 				hidden=1,
 				no_copy=1,
@@ -695,6 +734,7 @@ def get_custom_fields():
 				insert_after="taxjar_column_break",
 				label="TaxJar Sync Status",
 				options="\nQueued\nSynced\nFailed",
+				search_index=1,
 				read_only=1,
 			),
 			dict(

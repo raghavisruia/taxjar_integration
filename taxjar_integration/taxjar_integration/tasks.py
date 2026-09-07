@@ -98,6 +98,7 @@ def retry_failed_taxjar_syncs():
 			queue="short",
 			job_id=f"taxjar_retry_{invoice.name}",
 			deduplicate=True,
+			enqueue_after_commit=True,
 		)
 
 
@@ -131,4 +132,5 @@ def retry_failed_taxjar_customer_syncs():
 				queue="short",
 				job_id=f"taxjar_customer_retry_{customer_name}_{config.company}",
 				deduplicate=True,
+				enqueue_after_commit=True,
 			)

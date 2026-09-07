@@ -50,6 +50,14 @@ jobs:
                   --error \
                   taxjar_integration
 
+      # App-local conventions semgrep's rules do not cover: that every
+      # patch() in the suite still names a symbol the module under test
+      # actually uses, that every frappe.throw() carries a title, and that
+      # every frappe.enqueue() defers to commit. Each of these is a rule a
+      # one-time sweep fixes and then quietly loses; see the module docstring.
+      - name: Run app convention checks
+        run: python scripts/audit_conventions.py
+
   tests:
     runs-on: ubuntu-latest
     strategy:

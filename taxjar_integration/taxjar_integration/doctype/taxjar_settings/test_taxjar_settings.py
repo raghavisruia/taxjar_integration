@@ -13853,3 +13853,220 @@ class TestCompanyDeletionHooks(UnitTestCase):
 		self.assertNotIn(
 			"TaxJar Settings", getattr(hooks, "ignore_links_on_delete", [])
 		)
+
+
+# ── Step 0: standing conventions ──────────────────────────────────────────────
+#
+# Four fixes that depend on nothing else in the remediation plan, plus the static
+# checker that keeps them from drifting back. Each is a rule a one-time sweep
+# fixes and then quietly loses, so each has both a test here and a check in
+# scripts/audit_conventions.py - the test proves the rule holds today, the
+# checker proves it still holds after the next change.
+
+
+class TestSyncStatusColumnsAreIndexed(UnitTestCase):
+	"""retry_failed_taxjar_syncs() filters Sales Invoice on three of these every
+	15 minutes, and the Transaction Sync page filters and COUNTs on one of them
+	for every tab. Unindexed, those are repeated full scans of the largest table
+	on the site - invisible on an empty table, which is why it needs a test
+	rather than a benchmark."""
+
+	INDEXED = {
+		"Sales Invoice": ("taxjar_sync_status", "taxjar_sync_retryable", "taxjar_sync_retry_count"),
+		"Customer": ("taxjar_customer_sync_status",),
+	}
+
+	def _fields_for(self, doctype):
+		captured = {}
+
+		def _capture(custom_fields, update=True):
+			captured.update(custom_fields)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.create_custom_fields",
+			side_effect=_capture,
+		):
+			make_custom_fields()
+
+		return captured[doctype]
+
+	def test_filtered_columns_declare_search_index(self):
+		for doctype, fieldnames in self.INDEXED.items():
+			fields = self._fields_for(doctype)
+			for fieldname in fieldnames:
+				field = next(f for f in fields if f["fieldname"] == fieldname)
+				self.assertEqual(
+					field.get("search_index"), 1,
+					f"{doctype}.{fieldname} is filtered on in a hot path and must be indexed",
+				)
+
+	def test_index_is_declared_in_code_not_applied_by_hand(self):
+		"""make_custom_fields() re-runs on every migrate, so an index added by hand
+		to the Custom Field row is overwritten by the next one. Asserting it comes
+		out of get_custom_fields() is asserting it survives a migrate."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+
+		declared = get_custom_fields()
+		for doctype, fieldnames in self.INDEXED.items():
+			for fieldname in fieldnames:
+				field = next(f for f in declared[doctype] if f["fieldname"] == fieldname)
+				self.assertEqual(field.get("search_index"), 1, f"{doctype}.{fieldname}")
+
+
+class TestLoggingEnabledIsRequestCached(UnitTestCase):
+	"""The memo moved off frappe.flags onto frappe's own request-scoped cache.
+
+	frappe.request_cache stores the result in frappe.local.request_cache, which
+	frappe.init() sets up for web requests, background jobs and bench commands
+	alike - so the memo still holds inside a worker, exactly as the frappe.flags
+	version did, but now it lives somewhere that clearing caches can reach and
+	that cannot leak from one test into the next.
+	"""
+
+	def setUp(self):
+		# The decorator is a no-op when this is unset, so the tests below would
+		# silently measure nothing. Asserting it exists keeps them honest, and
+		# clearing it keeps them independent of execution order.
+		self.assertIsNotNone(
+			getattr(frappe.local, "request_cache", None),
+			"frappe.local.request_cache should be set up by frappe.init()",
+		)
+		frappe.local.request_cache.clear()
+
+	def test_reads_the_setting_once_per_request(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with patch.object(module.frappe.db, "get_single_value", return_value=1) as mock_get:
+			module._is_taxjar_logging_enabled()
+			module._is_taxjar_logging_enabled()
+			module._is_taxjar_logging_enabled()
+
+		self.assertEqual(mock_get.call_count, 1, "should be read once and memoised")
+
+	def test_memo_is_reachable_by_clearing_frappes_cache(self):
+		"""What frappe.flags could not offer: the memo is in a container the
+		framework owns, so a changed setting is picked up on the next request
+		rather than pinned for the life of the process."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with patch.object(module.frappe.db, "get_single_value", return_value=0):
+			self.assertEqual(module._is_taxjar_logging_enabled(), 0)
+
+		frappe.local.request_cache.clear()
+
+		with patch.object(module.frappe.db, "get_single_value", return_value=1):
+			self.assertEqual(module._is_taxjar_logging_enabled(), 1)
+
+	def test_does_not_write_to_frappe_flags(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		frappe.flags.pop("taxjar_logging_enabled", None)
+		with patch.object(module.frappe.db, "get_single_value", return_value=1):
+			module._is_taxjar_logging_enabled()
+
+		self.assertIsNone(getattr(frappe.flags, "taxjar_logging_enabled", None))
+
+	def test_defaults_to_logging_when_the_setting_cannot_be_read(self):
+		"""A site that cannot read the setting should still log rather than go
+		quiet - losing the audit trail is the worse failure."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with patch.object(module.frappe.db, "get_single_value", side_effect=Exception("no db")):
+			self.assertEqual(module._is_taxjar_logging_enabled(), 1)
+
+
+class TestEnqueueDefersToCommit(UnitTestCase):
+	"""on_customer_update enqueues from inside the customer's own save. Without
+	enqueue_after_commit the worker can re-read the Customer before that save
+	lands, push the pre-edit exemption to TaxJar, and mark it Synced - leaving
+	nothing to correct it."""
+
+	def _customer_doc(self):
+		doc = MagicMock()
+		doc.name = "CUST-001"
+		doc.get.side_effect = lambda f: {
+			"taxjar_exemption_type": "Wholesale",
+			"taxjar_customer_id": "cust_001",
+			"taxjar_customer_sync_status": "",
+		}.get(f)
+		return doc
+
+	def test_customer_sync_enqueue_waits_for_the_save_to_commit(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		settings = MagicMock()
+		config = MagicMock()
+		config.company = "Test Co"
+		config.taxjar_calculate_tax = 1
+		config.taxjar_create_transactions = 0
+		settings.company_config = [config]
+
+		with patch.object(module, "_has_taxjar_fields_changed", return_value=True), \
+		     patch.object(module, "_is_taxjar_enabled", return_value=True), \
+		     patch.object(module, "_publish_customer_update"), \
+		     patch.object(module.frappe, "get_single", return_value=settings), \
+		     patch.object(module.frappe, "enqueue") as mock_enqueue:
+			module.on_customer_update(self._customer_doc(), None)
+
+		mock_enqueue.assert_called_once()
+		self.assertTrue(
+			mock_enqueue.call_args[1].get("enqueue_after_commit"),
+			"the worker must not start before the customer's save commits",
+		)
+
+
+class TestAppConventionChecks(UnitTestCase):
+	"""scripts/audit_conventions.py, exercised rather than trusted.
+
+	A checker that silently matches nothing passes just as green as one that
+	works, so each check is also run against a deliberately bad sample."""
+
+	def _script(self):
+		import importlib.util
+		from pathlib import Path
+
+		path = Path(frappe.get_app_path("taxjar_integration")).parent / "scripts" / "audit_conventions.py"
+		spec = importlib.util.spec_from_file_location("taxjar_audit_conventions", path)
+		module = importlib.util.module_from_spec(spec)
+		spec.loader.exec_module(module)
+		return module
+
+	def test_the_app_is_currently_clean(self):
+		script = self._script()
+		for name, check in script.CHECKS:
+			self.assertEqual(check(), [], f"{name} regressed")
+
+	def test_checker_catches_a_titleless_throw(self):
+		script = self._script()
+		source = 'import frappe\n\ndef f():\n\tfrappe.throw("boom")\n'
+		self.assertTrue(self._flags(script.check_throw_titles, script, source))
+
+	def test_checker_catches_a_bare_enqueue(self):
+		script = self._script()
+		source = 'import frappe\n\ndef f():\n\tfrappe.enqueue("some.method", queue="short")\n'
+		self.assertTrue(self._flags(script.check_enqueue_after_commit, script, source))
+
+	def test_checker_ignores_a_throw_mentioned_only_in_a_docstring(self):
+		"""The reason this is AST-based and not a grep: a docstring that mentions
+		frappe.throw() is not a call, and the regex version of this check
+		reported ten of them."""
+		script = self._script()
+		source = 'def f():\n\t"""Hands the message to frappe.throw()."""\n\treturn 1\n'
+		self.assertFalse(self._flags(script.check_throw_titles, script, source))
+
+	def _flags(self, check, script, source):
+		"""Run one check over a temporary module inside the audited tree."""
+		import tempfile
+		from pathlib import Path
+
+		with tempfile.NamedTemporaryFile(
+			mode="w", suffix=".py", prefix="_convention_sample_", dir=script.APP, delete=False
+		) as handle:
+			handle.write(source)
+			sample = Path(handle.name)
+		try:
+			return [p for p in check() if sample.name in p]
+		finally:
+			sample.unlink()
