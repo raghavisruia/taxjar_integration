@@ -98,7 +98,92 @@ class TaxJarSettings(Document):
 				now=frappe.flags.in_test,
 			)
 
+	def _validate_company_configuration(self):
+		"""Every configured company must be one TaxJar can serve, with ledgers
+		that are its own.
+
+		Both halves were previously guarded only by a client-side link filter on
+		the account fields, evaluated when the account is picked and never again.
+		Change the company on a row afterwards and the previous company's ledgers
+		stay behind - and _upsert_tax_template() then writes them into a Sales
+		Taxes and Charges Template it marks default for the new company, so the
+		mismatch surfaces later as ERPNext rejecting an unrelated invoice with a
+		message that mentions neither TaxJar nor this row.
+
+		Existence is deliberately not checked here: a Link pointing at nothing is
+		frappe's own link validation to report, and duplicating it would only
+		change which message the user sees. This checks the one thing frappe
+		cannot know - that these two records belong together.
+		"""
+		for row in (self.company_config or []):
+			self._validate_company_is_servable(row)
+			for fieldname, label in (
+				("tax_account_head", frappe._("Sales Tax Ledger Account")),
+				("shipping_account_head", frappe._("Shipping Ledger Account")),
+			):
+				self._validate_account_belongs_to_company(row, fieldname, label)
+
+		for row in (self.table_hvjw or []):
+			self._validate_company_is_servable(row)
+
+	def _validate_company_is_servable(self, row):
+		"""TaxJar computes United States sales tax. A company registered anywhere
+		else is not a company with the feature switched off, it is one the feature
+		cannot serve - so it does not belong in this configuration at all."""
+		if not row.company:
+			return
+
+		country = frappe.db.get_value("Company", row.company, "country")
+		if not country or country == "United States":
+			return
+
+		frappe.throw(
+			frappe._(
+				"Row {0}: {1} is registered in {2}. TaxJar calculates United States "
+				"sales tax only, so it cannot be configured for this company."
+			).format(row.idx, frappe.bold(row.company), frappe.bold(country)),
+			title=frappe._("Company Outside TaxJar's Remit"),
+		)
+
+	def _validate_account_belongs_to_company(self, row, fieldname, label):
+		account = row.get(fieldname)
+		if not account or not row.company:
+			return
+
+		details = frappe.db.get_value("Account", account, ["company", "is_group"], as_dict=True)
+		if not details:
+			return
+
+		if details.company != row.company:
+			frappe.throw(
+				frappe._(
+					"Row {0}: {1} {2} belongs to {3}, not to {4}. Pick a ledger from "
+					"{4}'s own chart of accounts."
+				).format(
+					row.idx,
+					label,
+					frappe.bold(account),
+					frappe.bold(details.company),
+					frappe.bold(row.company),
+				),
+				title=frappe._("Ledger Belongs to Another Company"),
+			)
+
+		if details.is_group:
+			frappe.throw(
+				frappe._(
+					"Row {0}: {1} {2} is a group account. Pick a single ledger to post to."
+				).format(row.idx, label, frappe.bold(account)),
+				title=frappe._("Group Account Selected"),
+			)
+
 	def validate(self):
+		# Ahead of the feature gate on purpose. on_update syncs this company's tax
+		# template whether or not any feature is on, so a broken row saved with
+		# everything switched off still reaches _upsert_tax_template - and, from
+		# after_migrate, still aborts a migrate.
+		self._validate_company_configuration()
+
 		if not _is_taxjar_enabled(self):
 			return
 

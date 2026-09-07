@@ -43,7 +43,8 @@
    "in_list_view": 1,
    "label": "Tax Account Head",
    "options": "Account",
-   "reqd": 1
+   "reqd": 1,
+   "link_filters": "[[\"Account\",\"company\",\"=\",\"eval:doc.company\"],[\"Account\",\"is_group\",\"=\",0]]"
   },
   {
    "description": "Ledger for booking shipping charges to customers",
@@ -52,7 +53,8 @@
    "in_list_view": 1,
    "label": "Shipping Account Head",
    "options": "Account",
-   "reqd": 1
+   "reqd": 1,
+   "link_filters": "[[\"Account\",\"company\",\"=\",\"eval:doc.company\"],[\"Account\",\"is_group\",\"=\",0]]"
   }
  ],
  "grid_page_length": 50,

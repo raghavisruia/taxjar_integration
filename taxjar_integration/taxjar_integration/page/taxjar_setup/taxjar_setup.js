@@ -474,7 +474,14 @@ class TaxJarSetup {
 			parent: $card.find(".ts-field-company"),
 			df: {
 				fieldtype: "Link", fieldname: "company", options: "Company", label: __("Company"), reqd: 1,
-				get_query: () => ({ filters: { name: ["not in", otherCompanies()] } }),
+				// TaxJar calculates United States sales tax, so a company registered
+				// anywhere else has nothing to configure here. Filtered rather than
+				// rejected on save: the wizard should not offer a choice it will
+				// then refuse. save_connection() checks it again regardless - a
+				// client-side filter is a convenience, not the guard.
+				get_query: () => ({
+					filters: { name: ["not in", otherCompanies()], country: "United States" },
+				}),
 			},
 			render_input: true,
 		});

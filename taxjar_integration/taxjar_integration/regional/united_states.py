@@ -10,7 +10,10 @@ module existed.
 
 import frappe
 
-from taxjar_integration.taxjar_integration.taxjar_integration import TAXJAR_ROW_DESCRIPTION
+from taxjar_integration.taxjar_integration.taxjar_integration import (
+	TAXJAR_ROW_DESCRIPTION,
+	company_scope,
+)
 
 TAXJAR_TEMPLATE_TITLE = "TaxJar Sales Tax"
 TAXJAR_SHIPPING_ROW_DESCRIPTION = "Shipping & Forwarding Charges"
@@ -222,7 +225,12 @@ def ensure_company_ledgers_and_template(config_row):
 	if not tax_account_head:
 		return
 
-	is_default = bool(config_row.taxjar_calculate_tax)
+	# The switch alone is not enough. A company TaxJar cannot serve - registered
+	# outside the United States - would otherwise have this template auto-copied
+	# onto every one of its transactions by ERPNext's own default-template
+	# machinery, and set_sales_tax() returns early for exactly that company, so
+	# nothing would ever fill the row in or take it away again.
+	is_default = company_scope(config_row.company, config=config_row).calculates
 	_upsert_tax_template(
 		config_row.company,
 		tax_account_head,
@@ -245,4 +253,14 @@ def sync_all_company_tax_templates(rows=None):
 		rows = frappe.get_single("TaxJar Settings").company_config or []
 
 	for row in rows:
-		ensure_company_ledgers_and_template(row)
+		# Isolated per row. This runs from after_migrate, where an exception is
+		# not one company's problem but a failed migrate for the whole site - and
+		# from a background job, where it would vanish into the failed-job queue
+		# with nothing on screen to say a company had stopped syncing.
+		try:
+			ensure_company_ledgers_and_template(row)
+		except Exception:
+			frappe.log_error(
+				title=f"TaxJar: could not sync tax template for {row.company}",
+				message=frappe.get_traceback(with_context=True),
+			)

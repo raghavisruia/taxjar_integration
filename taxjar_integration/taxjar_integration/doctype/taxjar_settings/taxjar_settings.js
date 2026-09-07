@@ -76,6 +76,25 @@ function _set_api_mode_description(frm) {
 	frm.set_df_property('api_mode', 'description', desc);
 }
 
+// A ledger is only valid for the company it belongs to, and the account fields'
+// filter is evaluated when the account is picked - not again afterwards. Changing
+// the company on a row would otherwise leave the previous company's ledgers sitting
+// there, which is what reaches a transaction as "Account ... does not belong to
+// company ...", naming neither TaxJar nor this row.
+frappe.ui.form.on('TaxJar Company Config', {
+	company(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (!row.tax_account_head && !row.shipping_account_head) return;
+
+		frappe.model.set_value(cdt, cdn, 'tax_account_head', null);
+		frappe.model.set_value(cdt, cdn, 'shipping_account_head', null);
+		frappe.show_alert({
+			message: __('Ledger accounts cleared — pick them from {0}’s chart of accounts.', [row.company || __('the new company')]),
+			indicator: 'orange',
+		});
+	},
+});
+
 frappe.ui.form.on('TaxJar Settings', {
 	refresh(frm) {
 		_set_setup_intro(frm);

@@ -12959,7 +12959,27 @@ class TestEnsureCompanyLedgersAndTemplate(UnitTestCase):
 		row.tax_account_head = tax_account_head
 		row.shipping_account_head = shipping_account_head
 		row.taxjar_calculate_tax = calculate_tax
+		row.taxjar_create_transactions = 0
 		return row
+
+	def _servable(self, country="United States", taxjar_enabled=1):
+		"""Resolve company_scope() for real, for a company in `country`.
+
+		is_default now follows the effective scope rather than the switch alone,
+		and the scope reads the master switch and the Company's country. Patching
+		those two primitives rather than company_scope itself keeps the predicate
+		under test instead of stubbing it out.
+		"""
+		from contextlib import ExitStack
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		stack = ExitStack()
+		stack.enter_context(
+			patch.object(module.frappe.db, "get_single_value", return_value=taxjar_enabled)
+		)
+		stack.enter_context(patch.object(module, "get_region", return_value=country))
+		return stack
 
 	def test_backfills_both_blank_fields(self):
 		row = self._row()
@@ -13031,7 +13051,8 @@ class TestEnsureCompanyLedgersAndTemplate(UnitTestCase):
 		row = self._row(tax_account_head="Tax - TC", calculate_tax=1)
 		resolved = {"tax_account_head": None, "shipping_account_head": None}
 
-		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		with self._servable(), \
+		     patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
 		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
 		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
 			ensure_company_ledgers_and_template(row)
@@ -13041,13 +13062,34 @@ class TestEnsureCompanyLedgersAndTemplate(UnitTestCase):
 		)
 		mock_disable.assert_called_once_with("Test Co")
 
+	def test_does_not_make_it_default_for_a_company_taxjar_cannot_serve(self):
+		"""The switch is on, but the company is registered outside the United
+		States. Marking this template default would have ERPNext copy it onto
+		every one of that company's transactions, and set_sales_tax() returns
+		early for exactly that company - so the placeholder row would sit there
+		with nothing able to fill it in or take it away."""
+		row = self._row(tax_account_head="Tax - TC", calculate_tax=1)
+		resolved = {"tax_account_head": None, "shipping_account_head": None}
+
+		with self._servable(country="India"), \
+		     patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
+		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
+			ensure_company_ledgers_and_template(row)
+
+		mock_upsert.assert_called_once_with(
+			"Test Co", "Tax - TC", shipping_account_head=None, is_default=False
+		)
+		mock_disable.assert_not_called()
+
 	def test_does_not_disable_defaults_when_calculate_tax_off(self):
 		"""Ledgers/template stay in sync even with tax calc off, but ERPNext's own
 		defaults are only ever disabled once TaxJar's template is actually active."""
 		row = self._row(tax_account_head="Tax - TC", calculate_tax=0)
 		resolved = {"tax_account_head": None, "shipping_account_head": None}
 
-		with patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
+		with self._servable(), \
+		     patch(f"{REGIONAL}.resolve_default_ledgers", return_value=resolved), \
 		     patch(f"{REGIONAL}._upsert_tax_template") as mock_upsert, \
 		     patch(f"{REGIONAL}._disable_default_us_templates") as mock_disable:
 			ensure_company_ledgers_and_template(row)
@@ -14565,3 +14607,184 @@ class TestCompanyConfigIsRequestCached(TaxJarTestCase):
 
 		with patch.object(module.frappe, "get_single", return_value=after):
 			self.assertIsNone(module.get_company_config(US_CALC.name))
+
+
+# ── Step 3: configuration integrity ───────────────────────────────────────────
+
+
+class TestCompanyConfigurationIsCoherent(UnitTestCase):
+	"""A company and its ledgers have to belong together, and the company has to
+	be one TaxJar can serve. Both were previously guarded only by a client-side
+	link filter evaluated at pick time."""
+
+	SETTINGS_MOD = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def _settings(self, rows=None, credentials=None):
+		doc = frappe.get_single("TaxJar Settings")
+		doc.taxjar_enabled = 0
+		doc.set("company_config", [])
+		doc.set("table_hvjw", [])
+		for row in rows or []:
+			doc.append("company_config", row)
+		for row in credentials or []:
+			doc.append("table_hvjw", row)
+		return doc
+
+	def _world(self, companies, accounts):
+		"""Answer the two lookups the validator makes, and nothing else."""
+		def side_effect(doctype, name, fieldname=None, *args, **kwargs):
+			if doctype == "Company":
+				return companies.get(name)
+			if doctype == "Account":
+				value = accounts.get(name)
+				return frappe._dict(value) if value else None
+			return None
+
+		return patch(f"{self.SETTINGS_MOD}.frappe.db.get_value", side_effect=side_effect)
+
+	US = {"Frappe Inc": "United States", "Frappe Pvt Ltd": "United States"}
+
+	def test_ledger_from_another_company_is_refused(self):
+		"""The reported failure, caught where it is caused.
+
+		A row for one company carrying another's shipping ledger used to save
+		cleanly, get written into a Sales Taxes and Charges Template marked
+		default, and surface much later as ERPNext rejecting an unrelated invoice
+		with a message naming neither TaxJar nor this row."""
+		doc = self._settings([{
+			"company": "Frappe Pvt Ltd",
+			"tax_account_head": "21400 - Sales Tax Payable - Pvt",
+			"shipping_account_head": "41200 - Shipping and Freight Income - FI",
+		}])
+		accounts = {
+			"21400 - Sales Tax Payable - Pvt": {"company": "Frappe Pvt Ltd", "is_group": 0},
+			"41200 - Shipping and Freight Income - FI": {"company": "Frappe Inc", "is_group": 0},
+		}
+
+		with self._world(self.US, accounts):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				doc.validate()
+
+		message = str(caught.exception)
+		self.assertIn("Row 1", message, "the message must name the row")
+		self.assertIn("Frappe Inc", message, "and the company the ledger really belongs to")
+		self.assertIn("Frappe Pvt Ltd", message, "and the company it was put on")
+
+	def test_group_account_is_refused(self):
+		doc = self._settings([{
+			"company": "Frappe Inc",
+			"tax_account_head": "Duties and Taxes - FI",
+			"shipping_account_head": "Freight - FI",
+		}])
+		accounts = {
+			"Duties and Taxes - FI": {"company": "Frappe Inc", "is_group": 1},
+			"Freight - FI": {"company": "Frappe Inc", "is_group": 0},
+		}
+
+		with self._world(self.US, accounts):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				doc.validate()
+
+		self.assertIn("group account", str(caught.exception).lower())
+
+	def test_company_outside_the_united_states_is_refused(self):
+		doc = self._settings([{
+			"company": "Frappe Pvt Ltd",
+			"tax_account_head": "Tax - Pvt",
+			"shipping_account_head": "Freight - Pvt",
+		}])
+		accounts = {
+			"Tax - Pvt": {"company": "Frappe Pvt Ltd", "is_group": 0},
+			"Freight - Pvt": {"company": "Frappe Pvt Ltd", "is_group": 0},
+		}
+
+		with self._world({"Frappe Pvt Ltd": "India"}, accounts):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				doc.validate()
+
+		message = str(caught.exception)
+		self.assertIn("India", message, "name the country, so the reason is not a guess")
+		self.assertIn("Frappe Pvt Ltd", message)
+
+	def test_credential_for_a_company_outside_the_us_is_refused(self):
+		"""The wizard's Connect step writes here before the Accounts step exists,
+		so this table needs the check too - otherwise the company is only turned
+		away one screen later."""
+		doc = self._settings(credentials=[{"company": "Frappe Pvt Ltd"}])
+
+		with self._world({"Frappe Pvt Ltd": "India"}, {}):
+			with self.assertRaises(frappe.ValidationError):
+				doc.validate()
+
+	def test_checked_even_with_every_feature_switched_off(self):
+		"""on_update syncs the tax template regardless of the feature switches, so
+		a broken row saved with everything off still reaches _upsert_tax_template
+		- and from after_migrate, still breaks a migrate."""
+		doc = self._settings([{
+			"company": "Frappe Pvt Ltd",
+			"tax_account_head": "Tax - FI",
+			"shipping_account_head": "Freight - Pvt",
+		}])
+		doc.taxjar_enabled = 0
+		accounts = {
+			"Tax - FI": {"company": "Frappe Inc", "is_group": 0},
+			"Freight - Pvt": {"company": "Frappe Pvt Ltd", "is_group": 0},
+		}
+
+		with self._world(self.US, accounts):
+			with self.assertRaises(frappe.ValidationError):
+				doc.validate()
+
+	def test_a_link_pointing_at_nothing_is_left_to_frappe(self):
+		"""Existence is frappe's own link validation to report. Duplicating it
+		here would only change which message the user sees, and would make this
+		validator fail on fixtures whose accounts are not real records."""
+		doc = self._settings([{
+			"company": "Ghost Co",
+			"tax_account_head": "Ghost Account",
+			"shipping_account_head": "Other Ghost Account",
+		}])
+
+		with self._world({}, {}):
+			doc.validate()  # must not raise
+
+	def test_matching_company_and_ledgers_pass(self):
+		doc = self._settings([{
+			"company": "Frappe Inc",
+			"tax_account_head": "Tax - FI",
+			"shipping_account_head": "Freight - FI",
+		}])
+		accounts = {
+			"Tax - FI": {"company": "Frappe Inc", "is_group": 0},
+			"Freight - FI": {"company": "Frappe Inc", "is_group": 0},
+		}
+
+		with self._world(self.US, accounts):
+			doc.validate()  # must not raise
+
+
+class TestTemplateSyncIsIsolatedPerRow(UnitTestCase):
+
+	def test_one_bad_row_does_not_stop_the_others(self):
+		"""sync_all_company_tax_templates runs from after_migrate. An exception
+		there is not one company's problem, it is a failed migrate for the whole
+		site."""
+		from taxjar_integration.taxjar_integration.regional import united_states as regional
+
+		good_one = MagicMock(company="Good Co A")
+		bad = MagicMock(company="Bad Co")
+		good_two = MagicMock(company="Good Co B")
+		handled = []
+
+		def _ensure(row):
+			if row is bad:
+				raise frappe.ValidationError("ledger belongs to another company")
+			handled.append(row.company)
+
+		with patch.object(regional, "ensure_company_ledgers_and_template", side_effect=_ensure), \
+		     patch.object(regional.frappe, "log_error") as mock_log:
+			regional.sync_all_company_tax_templates([good_one, bad, good_two])
+
+		self.assertEqual(handled, ["Good Co A", "Good Co B"])
+		mock_log.assert_called_once()
+		self.assertIn("Bad Co", mock_log.call_args[1]["title"])
