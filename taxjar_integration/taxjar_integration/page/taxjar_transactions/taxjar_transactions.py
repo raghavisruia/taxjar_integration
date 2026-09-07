@@ -20,9 +20,12 @@ _TAXJAR_INVOICE_COLUMN = "taxjar_sync_status"
 
 _DOC_STATUS_LABELS = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 
-# The page's five tabs, one per state a transaction can be in. Between them
-# they partition the table: every invoice in range lands in exactly one, so a
-# row can never go missing by being in none of them.
+# The page's tabs. Five of them are one per state a transaction can be in, and
+# between them they partition the table: every invoice in range lands in exactly
+# one, so a row can never go missing by being in none of them. The sixth, All,
+# is their union - the tab the page opens on - and so filters on nothing but the
+# company/date scope every tab shares.
+ALL_SCOPE = "all"
 FAILED_SCOPE = "failed"
 QUEUED_SCOPE = "queued"
 NOT_APPLICABLE_SCOPE = "not_applicable"
@@ -40,6 +43,7 @@ _SENT_STATUSES = ("Synced", "Queued", "Failed")
 _SUBMITTED = ("in", (1, 2))
 
 _SCOPE_CONDITIONS = {
+	ALL_SCOPE: {},
 	FAILED_SCOPE: {"docstatus": _SUBMITTED, "taxjar_sync_status": "Failed"},
 	QUEUED_SCOPE: {"docstatus": _SUBMITTED, "taxjar_sync_status": "Queued"},
 	# Submitted and deliberately not sent. "not in" rather than "= Excluded" so
@@ -66,7 +70,7 @@ def _taxjar_invoice_fields_ready():
 def get_transactions(
 	filters: dict | str | None = None,
 	page: int | str = 1,
-	scope: str = FAILED_SCOPE,
+	scope: str = ALL_SCOPE,
 	page_size: int | str = PAGE_SIZE,
 ):
 	frappe.has_permission("Sales Invoice", "read", throw=True)
@@ -116,8 +120,19 @@ def get_transactions(
 
 	if scope == NOT_APPLICABLE_SCOPE:
 		_explain_exclusions(invoices)
+	elif scope == ALL_SCOPE:
+		# The All tab holds the excluded rows too, and they are the same rows
+		# with the same nothing to say for themselves - so they get the same
+		# answer here rather than a bare pill on one tab and an explained one
+		# on the other. Only those rows: every other state explains itself.
+		_explain_exclusions([row for row in invoices if _is_not_applicable(row)])
 
 	return paginated_response("invoices", invoices, total, page, page_size)
+
+
+def _is_not_applicable(row):
+	"""Submitted (or cancelled) and never sent - what the Not Applicable tab holds."""
+	return row.docstatus in (1, 2) and row.get("taxjar_sync_status") not in _SENT_STATUSES
 
 
 def _explain_exclusions(invoices):
@@ -238,8 +253,8 @@ def bulk_retry(invoices: list | str):
 	return {"queued": queued}
 
 
-def _build_conditions(filters, scope=FAILED_SCOPE):
-	conditions = dict(_SCOPE_CONDITIONS.get(scope, _SCOPE_CONDITIONS[FAILED_SCOPE]))
+def _build_conditions(filters, scope=ALL_SCOPE):
+	conditions = dict(_SCOPE_CONDITIONS.get(scope, _SCOPE_CONDITIONS[ALL_SCOPE]))
 
 	if filters.get("company"):
 		conditions["company"] = filters["company"]

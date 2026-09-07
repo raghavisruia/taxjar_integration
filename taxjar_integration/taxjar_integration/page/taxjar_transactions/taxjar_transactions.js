@@ -34,11 +34,16 @@ const DOC_STATUS_COLORS = { Draft: "gray", Submitted: "blue", Cancelled: "red" }
 
 const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
 
-// One tab per state a transaction can be in, ordered by how much attention it
-// wants: what needs fixing first, what is still moving, then the two resting
-// states and finally the one that needs nothing. Together they partition the
-// table - every invoice in range is in exactly one - and each is the population
-// of the summary card above it, so the strip and the tabs cannot disagree.
+// All Transactions first - the page opens on everything in range, so the
+// reader sees the whole population before being sorted into one part of it.
+// After it, one tab per state a transaction can be in, ordered by how much
+// attention it wants: what needs fixing first, what is still moving, then the
+// two resting states and finally the one that needs nothing. Those five
+// partition the table - every invoice in range is in exactly one - and each is
+// the population of the summary card above it, so the strip and the tabs cannot
+// disagree. All Transactions is the one tab that overlaps the rest: it is their
+// union, and its card is the total.
+const ALL_TAB = "all";
 const FAILED_TAB = "failed";
 const QUEUED_TAB = "queued";
 const NOT_APPLICABLE_TAB = "not_applicable";
@@ -46,7 +51,8 @@ const DRAFT_TAB = "draft";
 const SYNCED_TAB = "synced";
 
 const TABS = [
-	{ name: FAILED_TAB, label: __("Failed"), is_active: true },
+	{ name: ALL_TAB, label: __("All Transactions"), is_active: true },
+	{ name: FAILED_TAB, label: __("Failed") },
 	{ name: QUEUED_TAB, label: __("Queued") },
 	{ name: NOT_APPLICABLE_TAB, label: __("Not Applicable") },
 	{ name: DRAFT_TAB, label: __("Draft") },
@@ -61,7 +67,7 @@ class TaxJarTransactionSync {
 		this.page = page;
 		this.current_page = 1;
 		this.page_size = 20;
-		this.active_tab = FAILED_TAB;
+		this.active_tab = ALL_TAB;
 		this.column_search = {};
 
 		// Built once so on_hide() has the same reference to pass to
@@ -310,11 +316,19 @@ class TaxJarTransactionSync {
 		});
 	}
 
-	// Two captioned groups so "All Transactions" and "Draft" read as
-	// separate totals. Every number drills the table down without disturbing
-	// the company/date filters above.
+	// Three captioned groups so the total, the included statuses and the two
+	// kinds of exclusion each read as their own count. Every number drills the
+	// table down without disturbing the company/date filters above.
 	render_summary(summary) {
 		const groups = [
+			{
+				// The union of every other card, and the population of the tab
+				// the page opens on. Summed here rather than asked for
+				// separately: docstatus is 0, 1 or 2 and nothing else, so
+				// draft + submitted already is every transaction in range.
+				label: __("All Transactions"),
+				cards: [{ value: summary.submitted.total + summary.draft.total, value_key: ALL_TAB }],
+			},
 			{
 				label: __("Included"),
 				cards: [

@@ -6968,6 +6968,32 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 
 		self.assertEqual(rows[0]["taxjar_sync_status"], "Excluded")
 
+	def test_the_all_tab_explains_the_same_rows_the_excluded_tab_does(self):
+		"""An excluded row says the same thing wherever it is read, so crossing
+		to All must not strip the reason off it - and must not put one on the
+		rows that were sent or never submitted."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			ALL_SCOPE,
+			get_transactions,
+		)
+		rows = [
+			self._excluded_row(name="SINV-001", docstatus=1),
+			self._excluded_row(name="SINV-002", docstatus=1, taxjar_sync_status="Synced"),
+			self._excluded_row(name="SINV-003", docstatus=0, taxjar_sync_status=None),
+		]
+		MOD = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+		with patch(f"{MOD}.frappe.get_list", return_value=rows), \
+		     patch(f"{MOD}.permitted_count", return_value=len(rows)), \
+		     patch(f"{MOD}.transaction_exclusion_reason", return_value="TaxJar Disabled"):
+			invoices = get_transactions(filters={}, page=1, scope=ALL_SCOPE)["invoices"]
+
+		self.assertEqual(invoices[0]["taxjar_exclusion_reason"], "TaxJar Disabled")
+		self.assertFalse(invoices[1].get("taxjar_exclusion_reason"))
+		# A draft has not been kept out of anything yet, so it is left alone -
+		# stamping "Excluded" on it here is the one thing that would be false.
+		self.assertFalse(invoices[2].get("taxjar_exclusion_reason"))
+		self.assertIsNone(invoices[2].get("taxjar_sync_status"))
+
 	def test_the_live_answer_is_asked_once_per_company(self):
 		"""A page holds at most page_size rows and usually far fewer
 		companies - the question is per company, not per row."""
@@ -7056,6 +7082,7 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		"""The five tabs partition the table: every invoice in range lands in
 		exactly one, so a row can never go missing by being in none of them."""
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			ALL_SCOPE,
 			DRAFT_SCOPE,
 			FAILED_SCOPE,
 			NOT_APPLICABLE_SCOPE,
@@ -7090,8 +7117,11 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		# Summary-only scope: every submitted row, counted by status.
 		self.assertEqual(_build_conditions({}, SUBMITTED_SCOPE)["docstatus"], submitted)
 
-		# Callers that omit the scope get the first tab.
-		self.assertEqual(_build_conditions({}), _build_conditions({}, FAILED_SCOPE))
+		# The All tab is the union of the five, so it constrains nothing beyond
+		# the company/date scope every tab shares - and it is what a caller that
+		# omits the scope gets, since that is the tab the page opens on.
+		self.assertEqual(_build_conditions({}, ALL_SCOPE), {})
+		self.assertEqual(_build_conditions({}), _build_conditions({}, ALL_SCOPE))
 
 	def test_the_tabs_cover_every_invoice_exactly_once(self):
 		"""Two tabs claiming the same row (or none claiming it) is the failure
@@ -7155,10 +7185,24 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		conditions = _build_conditions({})
 		self.assertNotIn("posting_date", conditions)
 
-	def test_build_conditions_always_includes_docstatus(self):
-		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import _build_conditions
-		conditions = _build_conditions({})
-		self.assertEqual(conditions["docstatus"], ("in", (1, 2)))
+	def test_every_state_tab_constrains_docstatus(self):
+		"""All Transactions is deliberately the exception: it holds drafts,
+		submitted and cancelled alike, so it is the one tab with nothing to say
+		about docstatus."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			ALL_SCOPE,
+			FAILED_SCOPE,
+			QUEUED_SCOPE,
+			SYNCED_SCOPE,
+			NOT_APPLICABLE_SCOPE,
+			_build_conditions,
+		)
+
+		for scope in (FAILED_SCOPE, QUEUED_SCOPE, SYNCED_SCOPE, NOT_APPLICABLE_SCOPE):
+			with self.subTest(scope=scope):
+				self.assertEqual(_build_conditions({}, scope)["docstatus"], ("in", (1, 2)))
+
+		self.assertNotIn("docstatus", _build_conditions({}, ALL_SCOPE))
 
 	def test_a_client_sent_status_filter_cannot_override_the_tab(self):
 		"""Each tab is one status, so there is no drill-down filter left to
@@ -7167,9 +7211,21 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			_build_conditions,
 		)
 
-		conditions = _build_conditions({"company": "Test Co", "sync_status": "Synced"})
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			ALL_SCOPE,
+			FAILED_SCOPE,
+		)
+
+		conditions = _build_conditions(
+			{"company": "Test Co", "sync_status": "Synced"}, FAILED_SCOPE
+		)
 		self.assertEqual(conditions["company"], "Test Co")
 		self.assertEqual(conditions["taxjar_sync_status"], "Failed")
+
+		# Not even on All, where no tab condition stands in its way.
+		conditions = _build_conditions({"sync_status": "Synced"}, ALL_SCOPE)
+		self.assertNotIn("sync_status", conditions)
+		self.assertNotIn("taxjar_sync_status", conditions)
 
 	def test_get_transactions_page_clamped_to_min_1(self):
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import get_transactions
@@ -7278,17 +7334,21 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		js = self._transactions_js()
 		self.assertIn("checkboxColumn: key === FAILED_TAB", js)
 
-	def test_the_five_tabs_and_their_order(self):
-		"""Ordered by how much attention each state wants: what needs fixing
-		first, what is still moving, then the resting states."""
+	def test_the_tabs_and_their_order(self):
+		"""Everything first, so the reader sees the whole population before
+		being sorted into one part of it; then the states, ordered by how much
+		attention each wants: what needs fixing first, what is still moving,
+		then the resting states."""
 		js = self._transactions_js()
 		tabs = js.split("const TABS = [")[1].split("];")[0]
 
-		order = ["Failed", "Queued", "Not Applicable", "Draft", "Synced"]
+		order = ["All Transactions", "Failed", "Queued", "Not Applicable", "Draft", "Synced"]
 		indexes = [tabs.index('__("%s")' % label) for label in order]
 		self.assertEqual(indexes, sorted(indexes))
-		# The first tab is the one that opens.
-		self.assertIn('{ name: FAILED_TAB, label: __("Failed"), is_active: true }', tabs)
+		# The first tab is the one that opens, and the page has to agree with
+		# frappe.ui.Tabs about which that is - it activates index 0 itself.
+		self.assertIn('{ name: ALL_TAB, label: __("All Transactions"), is_active: true }', tabs)
+		self.assertIn("this.active_tab = ALL_TAB;", js)
 		self.assertNotIn("Included", tabs)
 		self.assertNotIn("Excluded", tabs)
 
@@ -7304,7 +7364,7 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 
 		# The card keys are tab names, or go_to_tab would be handed a status.
 		summary_fn = js.split("render_summary(summary) {")[1].split("\n\t}\n")[0]
-		for key in ("SYNCED_TAB", "QUEUED_TAB", "FAILED_TAB", "DRAFT_TAB", "NOT_APPLICABLE_TAB"):
+		for key in ("ALL_TAB", "SYNCED_TAB", "QUEUED_TAB", "FAILED_TAB", "DRAFT_TAB", "NOT_APPLICABLE_TAB"):
 			self.assertIn(f"value_key: {key}", summary_fn)
 
 	def _sync_status_cell_fn(self):
