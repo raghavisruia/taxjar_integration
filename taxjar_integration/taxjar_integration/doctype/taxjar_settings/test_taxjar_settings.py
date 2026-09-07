@@ -8,6 +8,7 @@ from datetime import datetime
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
 import frappe
+import taxjar
 from frappe.tests import UnitTestCase
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
@@ -1878,9 +1879,10 @@ class TestGetIso3166StateCode(UnitTestCase):
 			"country": country,
 		}.get(key, default)
 
+		code = "CA" if country == "Canada" else "US"
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-			side_effect=_scalar_get_value("US"),
+			side_effect=_scalar_get_value(code),
 		):
 			return get_iso_3166_2_state_code(address)
 
@@ -1925,25 +1927,32 @@ class TestGetIso3166StateCode(UnitTestCase):
 
 	# Error handling
 
-	def test_none_state_throws_validation_error(self):
-		"""state=None with no taxjar_state_code must throw ValidationError, not AttributeError."""
-		with self.assertRaises(frappe.exceptions.ValidationError):
-			self._call(state=None, taxjar_state_code=None)
+	# An address this cannot resolve reports no code rather than throwing. Whether
+	# that should stop anything is the caller's decision - and for most callers it
+	# should not, since TaxJar covering only the fifty states is a reason to charge
+	# no tax, not a reason a document cannot be saved.
 
-	def test_empty_state_throws_validation_error(self):
-		"""state='' with no taxjar_state_code must throw ValidationError."""
-		with self.assertRaises(frappe.exceptions.ValidationError):
-			self._call(state="", taxjar_state_code=None)
+	def test_missing_state_has_no_code(self):
+		self.assertIsNone(self._call(state=None, taxjar_state_code=None))
 
-	def test_invalid_state_name_throws_validation_error(self):
-		"""An unrecognisable state like 'Fla.' must throw ValidationError."""
-		with self.assertRaises(frappe.exceptions.ValidationError):
-			self._call(state="Fla.", taxjar_state_code=None)
+	def test_empty_state_has_no_code(self):
+		self.assertIsNone(self._call(state="", taxjar_state_code=None))
 
-	def test_invalid_short_code_throws_validation_error(self):
-		"""A 2-letter code that isn't a real state must throw ValidationError."""
-		with self.assertRaises(frappe.exceptions.ValidationError):
-			self._call(state="ZZ", taxjar_state_code=None)
+	def test_unrecognisable_state_name_has_no_code(self):
+		"""'Fla.' is not something pycountry can resolve, and guessing would be
+		worse than saying so."""
+		self.assertIsNone(self._call(state="Fla.", taxjar_state_code=None))
+
+	def test_two_letters_that_are_not_a_state_have_no_code(self):
+		self.assertIsNone(self._call(state="ZZ", taxjar_state_code=None))
+
+	def test_a_canadian_province_resolves_but_is_not_a_us_state(self):
+		"""The distinction get_state_code() then acts on: pycountry knows what
+		Ontario is, and TaxJar still cannot price a sale into it."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import SUPPORTED_STATE_CODES
+
+		code = self._call(state="Ontario", country="Canada")
+		self.assertNotIn(code, SUPPORTED_STATE_CODES)
 
 
 # ── Phase 3: validate_address — server-side hook ─────────────────────────────
@@ -1970,8 +1979,8 @@ class TestValidateAddress(UnitTestCase):
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
 			side_effect=_scalar_get_value(country_code),
 		), patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled",
-			return_value=False,
+			"taxjar_integration.taxjar_integration.taxjar_integration.taxjar_serves_any_company",
+			return_value=True,
 		):
 			validate_address(doc, None)
 
@@ -2558,7 +2567,7 @@ class TestSyncProductTaxCategories(UnitTestCase):
 		"""No client is even requested when the master switch/company gate is off."""
 		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=False), \
-		     patch("taxjar_integration.taxjar_integration.tasks.get_client") as mock_get_client:
+		     patch("taxjar_integration.taxjar_integration.tasks.get_catalogue_client") as mock_get_client:
 			sync_product_tax_categories()
 		mock_get_client.assert_not_called()
 
@@ -2566,7 +2575,7 @@ class TestSyncProductTaxCategories(UnitTestCase):
 		"""No usable credential (get_client returns None) -> no TaxJar call, no insert attempt."""
 		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_catalogue_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.tasks.fetch_and_insert_categories") as mock_fetch:
 			sync_product_tax_categories()
 		mock_fetch.assert_not_called()
@@ -2584,7 +2593,7 @@ class TestSyncProductTaxCategories(UnitTestCase):
 		]
 		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=mock_client):
+		     patch("taxjar_integration.taxjar_integration.tasks.get_catalogue_client", return_value=mock_client):
 			sync_product_tax_categories()
 
 		inserted = frappe.get_doc("Product Tax Category", "TEST_SYNC_NEW")
@@ -2608,7 +2617,7 @@ class TestSyncProductTaxCategories(UnitTestCase):
 		]
 		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=mock_client):
+		     patch("taxjar_integration.taxjar_integration.tasks.get_catalogue_client", return_value=mock_client):
 			sync_product_tax_categories()
 
 		unchanged = frappe.get_doc("Product Tax Category", existing.name)
@@ -2623,7 +2632,7 @@ class TestSyncProductTaxCategories(UnitTestCase):
 
 		from taxjar_integration.taxjar_integration.tasks import sync_product_tax_categories
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.tasks.get_client", return_value=mock_client), \
+		     patch("taxjar_integration.taxjar_integration.tasks.get_catalogue_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_traceback", return_value="traceback"), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.log_error") as mock_log:
 			sync_product_tax_categories()  # must not raise
@@ -4277,7 +4286,12 @@ class TestCustomersPageRealtime(UnitTestCase):
 
 		with patch(f"{page_mod}.frappe.has_permission"), \
 		     patch(f"{page_mod}._ensure_taxjar_customer_fields"), \
-		     patch(f"{page_mod}.frappe.db.get_value", side_effect=_scalar_get_value("cust_1")), \
+		     patch(
+		         f"{page_mod}.frappe.db.get_value",
+		         # Both columns of the row in one read now, so the stub answers
+		         # with the row rather than with a single value.
+		         return_value=frappe._dict(taxjar_customer_id="cust_1", taxjar_exemption_type=""),
+		     ), \
 		     patch(f"{page_mod}.frappe.db.set_value"), \
 		     patch(f"{page_mod}.frappe.get_single", return_value=settings), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
@@ -6054,6 +6068,14 @@ class TestDeleteTransactionOutage(UnitTestCase):
 
 
 class TestAddressValidationWithTaxJar(UnitTestCase):
+	"""The TaxJar address check reports a verdict instead of failing a save.
+
+	It used to run inside Address.validate, on a credential picked by row order,
+	and block the save whenever TaxJar could not match an address - which a user
+	may well have entered correctly from a source TaxJar does not know. What is
+	kept is the check; what is gone is it deciding, invisibly, mid-save."""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
 
 	def _make_address_doc(self, country_code="US"):
 		doc = MagicMock()
@@ -6067,102 +6089,84 @@ class TestAddressValidationWithTaxJar(UnitTestCase):
 		doc.get.side_effect = lambda f, d=None: getattr(doc, f, d)
 		return doc
 
-	def test_us_address_calls_validation_api(self):
-		"""A match found means TaxJar resolved the address - silent pass, no
-		exception, no dialog."""
-		mock_client = MagicMock()
-		mock_client.validate_address.return_value = [
-			MagicMock(street="123 Main St", city="Austin", state="TX", zip="78701", country="US")
-		]
-		doc = self._make_address_doc()
+	def _check(self, client):
+		with patch(f"{self.MOD}.get_client", return_value=client), \
+		     patch(f"{self.MOD}.log_taxjar_call"):
+			return _validate_address_with_taxjar(self._make_address_doc(), "Test Co")
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			_validate_address_with_taxjar(doc)  # should not raise
+	def test_uses_the_named_companys_credential(self):
+		"""There is no company-less path left: a credential resolved by row order
+		is how one company's address lookups were billed to another's account."""
+		import inspect
 
-		mock_client.validate_address.assert_called_once()
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_client
 
-	def test_address_not_found_blocks_save(self):
-		"""An empty "addresses" result is how TaxJar reports no match (confirmed
-		against the taxjar package and taxjar-ruby's own SDK fixtures) - block
-		the save rather than silently letting an unresolvable address through."""
-		mock_client = MagicMock()
-		mock_client.validate_address.return_value = []
-		doc = self._make_address_doc()
-
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			with self.assertRaises(frappe.exceptions.ValidationError):
-				_validate_address_with_taxjar(doc)
-
-	def test_address_not_found_error_message(self):
-		mock_client = MagicMock()
-		mock_client.validate_address.return_value = []
-		doc = self._make_address_doc()
-
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			with self.assertRaises(frappe.exceptions.ValidationError) as ctx:
-				_validate_address_with_taxjar(doc)
-
-		self.assertEqual(
-			str(ctx.exception),
-			"The given address is not valid, please reverify the street, city, state, or postal code.",
+		self.assertIs(
+			inspect.signature(get_client).parameters["company"].default,
+			inspect.Parameter.empty,
 		)
 
-	def test_connection_error_does_not_block_save(self):
-		import taxjar.exceptions
+	def test_a_match_is_reported_as_valid(self):
+		client = MagicMock()
+		client.validate_address.return_value = [MagicMock(city="Austin", state="TX")]
 
-		mock_client = MagicMock()
-		mock_client.validate_address.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
-		doc = self._make_address_doc()
+		self.assertEqual(self._check(client), {"checked": True, "valid": True})
+		client.validate_address.assert_called_once()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			_validate_address_with_taxjar(doc)  # should not raise
+	def test_no_match_is_reported_rather_than_thrown(self):
+		client = MagicMock()
+		client.validate_address.return_value = []
 
-	def test_response_error_404_blocks_save(self):
-		"""In case the live API does surface a literal 404 for "not found"
-		(undocumented either way), it's handled the same as an empty result."""
-		import taxjar.exceptions
+		self.assertEqual(self._check(client), {"checked": True, "valid": False})
 
-		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
-		err.full_response = {"status_code": 404, "detail": "Address not found"}
+	def test_a_literal_404_is_also_a_no_match(self):
+		"""TaxJar's own SDK fixtures report "no match" as a 2xx with an empty
+		list, but a bare 404 is undocumented and plausible, so both are read the
+		same way."""
+		client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError("not found")
+		err.full_response = {"status_code": 404}
+		client.validate_address.side_effect = err
 
-		mock_client = MagicMock()
-		mock_client.validate_address.side_effect = err
-		doc = self._make_address_doc()
+		self.assertEqual(self._check(client), {"checked": True, "valid": False})
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
-			with self.assertRaises(frappe.exceptions.ValidationError):
-				_validate_address_with_taxjar(doc)
+	def test_an_unreachable_api_is_not_the_addresss_fault(self):
+		client = MagicMock()
+		client.validate_address.side_effect = taxjar.exceptions.TaxJarConnectionError("down")
 
-	def test_response_error_non_404_does_not_block(self):
-		"""A non-404 API error (auth, rate limit, server error) isn't a
-		statement about whether the address is valid - don't block the save
-		or show a dialog for it."""
-		import taxjar.exceptions
+		self.assertEqual(self._check(client), {"checked": False, "reason": "unreachable"})
 
-		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
-		err.full_response = {"status_code": 401, "detail": "Unauthorized"}
+	def test_any_other_error_reports_unchecked_not_invalid(self):
+		client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError("bad token")
+		err.full_response = {"status_code": 401}
+		client.validate_address.side_effect = err
 
-		mock_client = MagicMock()
-		mock_client.validate_address.side_effect = err
-		doc = self._make_address_doc()
+		self.assertEqual(self._check(client), {"checked": False, "reason": "error"})
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msg, \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.throw") as mock_throw:
-			_validate_address_with_taxjar(doc)  # should not raise
+	def test_the_endpoint_refuses_a_company_taxjar_does_not_serve(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			verify_address_with_taxjar,
+		)
 
-		mock_msg.assert_not_called()
-		mock_throw.assert_not_called()
+		scope = MagicMock()
+		scope.uses_taxjar = False
+		with patch(f"{self.MOD}.frappe.has_permission"), \
+		     patch(f"{self.MOD}.company_scope", return_value=scope), \
+		     patch(f"{self.MOD}.frappe.get_doc") as mock_get:
+			result = verify_address_with_taxjar("ADDR-001", "India Co")
 
+		self.assertEqual(result, {"checked": False, "reason": "out_of_scope"})
+		mock_get.assert_not_called()
 
-# ── Phase 1: Sales Invoice Custom Fields ─────────────────────────────────────
+	def test_address_validation_no_longer_runs_inside_a_save(self):
+		"""The finding: an outbound HTTP call inside a document's own validate,
+		which failed the save on a verdict TaxJar is not always right about."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration.taxjar_integration import validate_address
+
+		self.assertNotIn("_validate_address_with_taxjar", inspect.getsource(validate_address))
 
 
 class TestSalesInvoiceCustomFields(UnitTestCase):
@@ -6483,7 +6487,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		for fn in (hook, sync_transaction_to_taxjar, delete_transaction_from_taxjar):
 			with self.subTest(fn=fn.__name__):
 				source = inspect.getsource(fn)
-				self.assertIn("_NOT_CONFIGURED_ERROR", source)
+				self.assertIn("describe_missing_credential(", source)
 				self.assertNotIn('error="TaxJar is not configured', source)
 
 	def test_written_through_the_document_not_the_database(self):
@@ -9105,7 +9109,7 @@ class TestRefreshProductTaxCategories(UnitTestCase):
 
 	def test_throws_clear_error_when_no_client(self):
 		with patch(
-			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_catalogue_client",
 			return_value=None,
 		):
 			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
@@ -9121,7 +9125,7 @@ class TestRefreshProductTaxCategories(UnitTestCase):
 			self._category("TEST_REFRESH_NEW", "A refresh-button test category", "Refresh Test Category"),
 		]
 		with patch(
-			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_catalogue_client",
 			return_value=mock_client,
 		):
 			summary = self.settings.refresh_product_tax_categories()
@@ -9136,7 +9140,7 @@ class TestRefreshProductTaxCategories(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.categories.return_value = []
 		with patch(
-			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_catalogue_client",
 			return_value=mock_client,
 		), patch(
 			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings._is_taxjar_enabled",
@@ -9153,7 +9157,7 @@ class TestRefreshProductTaxCategories(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.categories.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
 		with patch(
-			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_catalogue_client",
 			return_value=mock_client,
 		):
 			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
@@ -9167,7 +9171,7 @@ class TestRefreshProductTaxCategories(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.categories.side_effect = err
 		with patch(
-			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_catalogue_client",
 			return_value=mock_client,
 		):
 			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
@@ -9181,7 +9185,7 @@ class TestRefreshProductTaxCategories(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.categories.side_effect = err
 		with patch(
-			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_catalogue_client",
 			return_value=mock_client,
 		):
 			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
@@ -12852,55 +12856,69 @@ REGIONAL = "taxjar_integration.taxjar_integration.regional.united_states"
 
 
 class TestResolveDefaultLedgers(UnitTestCase):
+	"""One read of the company's chart, rather than two queries per ledger.
+
+	The mock is the account rows themselves rather than a per-query answer, so
+	these tests describe what the chart of accounts holds - which is the thing
+	that actually decides the outcome - instead of describing the shape of the
+	queries used to find it."""
+
+	def _chart(self, rows):
+		def fake_get_all(doctype, filters=None, or_filters=None, fields=None, **kwargs):
+			assert filters["company"] == "Test Co", "the lookup must be company-scoped"
+			return [frappe._dict(r) for r in rows]
+
+		return patch(f"{REGIONAL}.frappe.get_all", side_effect=fake_get_all)
 
 	def test_matches_by_account_number_first(self):
-		def fake_get_value(doctype, filters):
-			if filters.get("account_number") == "21400":
-				return "Sales Tax Payable - TC"
-			if filters.get("account_number") == "41200":
-				return "Shipping and Freight Income - TC"
-			return None
-
-		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value):
+		with self._chart([
+			{"name": "Sales Tax Payable - TC", "account_number": "21400", "account_name": "Sales Tax Payable"},
+			{"name": "Shipping and Freight Income - TC", "account_number": "41200", "account_name": "Shipping and Freight Income"},
+		]):
 			result = resolve_default_ledgers("Test Co")
 
 		self.assertEqual(result["tax_account_head"], "Sales Tax Payable - TC")
 		self.assertEqual(result["shipping_account_head"], "Shipping and Freight Income - TC")
 
 	def test_falls_back_to_account_name_when_number_not_found(self):
-		def fake_get_value(doctype, filters):
-			if "account_number" in filters:
-				return None
-			if filters.get("account_name") == "Sales Tax Payable":
-				return "Custom Sales Tax - TC"
-			if filters.get("account_name") == "Shipping and Freight Income":
-				return "Custom Freight - TC"
-			return None
-
-		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value):
+		"""A chart that carries the standard names without the standard numbers."""
+		with self._chart([
+			{"name": "Custom Sales Tax - TC", "account_number": None, "account_name": "Sales Tax Payable"},
+			{"name": "Custom Freight - TC", "account_number": None, "account_name": "Shipping and Freight Income"},
+		]):
 			result = resolve_default_ledgers("Test Co")
 
 		self.assertEqual(result["tax_account_head"], "Custom Sales Tax - TC")
 		self.assertEqual(result["shipping_account_head"], "Custom Freight - TC")
 
+	def test_the_number_wins_when_both_are_present_on_different_accounts(self):
+		"""Numbers survive a rename; names do not, so the number is authoritative."""
+		with self._chart([
+			{"name": "Renamed Liability - TC", "account_number": "21400", "account_name": "Something Else"},
+			{"name": "Decoy - TC", "account_number": "99999", "account_name": "Sales Tax Payable"},
+		]):
+			result = resolve_default_ledgers("Test Co")
+
+		self.assertEqual(result["tax_account_head"], "Renamed Liability - TC")
+
 	def test_returns_none_when_neither_found(self):
 		"""Non-standard chart of accounts: no account, no exception."""
-		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=_scalar_get_value(None)):
+		with self._chart([]):
 			result = resolve_default_ledgers("Test Co")
 
 		self.assertIsNone(result["tax_account_head"])
 		self.assertIsNone(result["shipping_account_head"])
 
 	def test_lookup_is_company_scoped(self):
-		def fake_get_value(doctype, filters):
-			if filters.get("company") == "Test Co" and filters.get("account_number") == "21400":
-				return "Sales Tax Payable - TC"
-			return None
+		"""Asserted inside the stub: a lookup that reached another company's chart
+		is how a ledger from the wrong company got onto a config row."""
+		with self._chart([]):
+			resolve_default_ledgers("Test Co")
 
-		with patch(f"{REGIONAL}.frappe.db.get_value", side_effect=fake_get_value):
-			result = resolve_default_ledgers("Other Co")
+	def test_group_accounts_are_not_offered(self):
+		import inspect
 
-		self.assertIsNone(result["tax_account_head"])
+		self.assertIn('"is_group": 0', inspect.getsource(resolve_default_ledgers))
 
 
 class TestEnsureCompanyLedgersAndTemplate(UnitTestCase):
@@ -13667,7 +13685,7 @@ class TestWhitelistedEndpointContract(UnitTestCase):
 
 		with patch.object(mod.frappe, "has_permission", side_effect=frappe.PermissionError) as guard:
 			with self.assertRaises(frappe.PermissionError):
-				mod.resync_customer("CUST-PERM-001")
+				mod.resync_customer("CUST-PERM-001", "Test Co")
 		self.assertEqual(guard.call_args[0][:2], ("Customer", "write"))
 		self.assertEqual(guard.call_args[1]["doc"], "CUST-PERM-001")
 
@@ -14347,13 +14365,10 @@ class TestWhitelistedBoundariesValidateTypes(TaxJarTestCase):
 
 class TestClientCredentialIsAlwaysCompanyScoped(TaxJarTestCase):
 
-	@unittest.expectedFailure
 	def test_a3_get_client_requires_a_company(self):
 		"""get_client() with no company breaks on the first credential row, so
 		address validation and the Customer form's Sync button talk to whichever
-		TaxJar account happens to sit first in the table.
-
-		Fixed in step 6 (drop the None default; both callers pass a company)."""
+		TaxJar account happens to sit first in the table."""
 		import inspect
 
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
@@ -14367,13 +14382,10 @@ class TestClientCredentialIsAlwaysCompanyScoped(TaxJarTestCase):
 
 class TestInternationalDestinationsDegrade(TaxJarTestCase):
 
-	@unittest.expectedFailure
 	def test_c2_us_company_can_record_an_export_sale(self):
 		"""SUPPORTED_STATE_CODES holds 51 US codes, so any destination that
 		resolves to something else falls into get_state_code() and throws during
-		validate - a US company cannot save an invoice shipping to Ontario.
-
-		Fixed in step 6 (degrade to "no nexus", as an unregistered state does)."""
+		validate - a US company cannot save an invoice shipping to Ontario."""
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
 		address = frappe._dict(country="Canada", state="Ontario", taxjar_state_code=None)
@@ -14872,3 +14884,180 @@ class TestBulkBoundariesRefuseNonNames(UnitTestCase):
 
 		with self.assertRaises(frappe.ValidationError):
 			parse_document_names('"SINV-001"')
+
+
+# ── Step 6: address split, failure modes, bulk paths ──────────────────────────
+
+
+class TestAddressRulesApplyWhereTaxJarIsLive(UnitTestCase):
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_a_site_with_no_servable_company_leaves_addresses_alone(self):
+		"""Installing this app used to tighten every US and Canadian address on
+		the site, whether or not TaxJar was switched on for anything."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import validate_address
+
+		doc = _MockAddress(country="United States", state=None, taxjar_state_code=None, pincode=None)
+		with patch(f"{self.MOD}.frappe.db.get_value", side_effect=_scalar_get_value("US")), \
+		     patch(f"{self.MOD}.taxjar_serves_any_company", return_value=False):
+			validate_address(doc, None)  # must not raise
+
+	def test_taxjar_serves_any_company_requires_a_company_it_can_serve(self):
+		"""The site-level question asked properly. An install whose only
+		configured companies are outside the United States serves none of them."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		settings = MagicMock()
+		settings.taxjar_enabled = 1
+		settings.company_config = [IN_FLAGGED.config]
+
+		with patch.object(module.frappe.db, "get_single_value", return_value=1), \
+		     patch.object(module, "get_region", side_effect=lambda c: _BY_NAME[c].country):
+			self.assertFalse(module.taxjar_serves_any_company(settings))
+
+		settings.company_config = [IN_FLAGGED.config, US_CALC.config]
+		with patch.object(module.frappe.db, "get_single_value", return_value=1), \
+		     patch.object(module, "get_region", side_effect=lambda c: _BY_NAME[c].country):
+			self.assertTrue(module.taxjar_serves_any_company(settings))
+
+
+class TestDestinationRequirementMovedToSubmit(TaxJarTestCase):
+	"""A draft with no address yet is unfinished, not wrong."""
+
+	def _doc(self, company):
+		doc = _make_doc(company=company, taxes=[])
+		doc.shipping_address_name = None
+		doc.customer_address = None
+		return doc
+
+	def test_a_draft_without_an_address_still_saves(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = self._doc(US_CALC.name)
+		with self.scope_patches(), \
+		     patch.object(module, "check_sales_tax_exemption", return_value=(False, None)), \
+		     patch.object(module, "log_taxjar_call"):
+			module.set_sales_tax(doc, None)  # must not raise
+
+		self.assertEqual(doc.taxjar_nexus_reason, "No shipping or billing address set")
+
+	def test_submitting_without_a_destination_is_refused_when_the_company_files(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			with self.assertRaises(frappe.ValidationError) as caught:
+				module.validate_taxable_destination(self._doc(US_FILE.name))
+
+		self.assertIn(US_FILE.name, str(caught.exception), "name the company that needs it")
+
+	def test_a_calculating_company_is_not_blocked_at_submit(self):
+		"""Calculate-only degrades to no tax and a stated reason, which is visible
+		and correctable; a blocked submit is neither."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			module.validate_taxable_destination(self._doc(US_CALC.name))  # must not raise
+
+
+class TestExportSalesAreRecordable(TaxJarTestCase):
+
+	def test_a_destination_taxjar_cannot_price_is_a_reason_not_a_block(self):
+		"""SUPPORTED_STATE_CODES holds the fifty states. A sale into Ontario used
+		to fail the save with a message asking for a "valid State" - on an address
+		whose state was perfectly valid, just not one TaxJar prices."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=US_CALC.name, taxes=[])
+		doc.shipping_address_name = "ADDR-CA"
+
+		with self.scope_patches(), \
+		     patch.object(module, "check_sales_tax_exemption", return_value=(False, None)), \
+		     patch.object(module, "get_tax_data", return_value=None), \
+		     patch.object(module, "_destination_outside_coverage_reason",
+		                  return_value="Destination is in Canada, which TaxJar does not price"), \
+		     patch.object(module, "log_taxjar_call"):
+			module.set_sales_tax(doc, None)  # must not raise
+
+		self.assertEqual(doc.taxjar_has_nexus, 0)
+		self.assertIn("Canada", doc.taxjar_nexus_reason)
+
+
+class TestMissingCredentialSaysWhichKind(UnitTestCase):
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _describe(self, rows, api_mode="Live"):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			describe_missing_credential,
+		)
+
+		settings = MagicMock()
+		settings.api_mode = api_mode
+		settings.table_hvjw = rows
+		with patch(f"{self.MOD}.frappe.get_single", return_value=settings):
+			return describe_missing_credential("Frappe Inc")
+
+	def test_no_row_at_all(self):
+		self.assertIn("not configured", self._describe([]))
+
+	def test_a_row_with_no_token_for_the_current_mode(self):
+		"""One field on a form the admin has already filled in once - a very
+		different amount of work from "this company was never added"."""
+		row = MagicMock(company="Frappe Inc", live_token=None, sandbox_token="sk_test")
+		message = self._describe([row], api_mode="Live")
+		self.assertIn("Live", message)
+		self.assertIn("Frappe Inc", message)
+
+
+class TestBulkExemptionDoesNotRunInline(UnitTestCase):
+	PAGE = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
+
+	def test_a_small_selection_is_applied_immediately(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers import (
+			taxjar_customers as page,
+		)
+
+		with patch.object(page, "_write_exemption") as mock_write, \
+		     patch.object(page.frappe, "enqueue") as mock_enqueue:
+			result = page._apply_exemption(["C1", "C2"], "Wholesale", [])
+
+		self.assertEqual(mock_write.call_count, 2)
+		mock_enqueue.assert_not_called()
+		self.assertFalse(result["queued"])
+
+	def test_a_large_selection_goes_to_a_background_job(self):
+		"""Each customer is a full save, and every save enqueues a TaxJar sync per
+		configured company - inline, a hundred of them runs well past the point
+		where a request should have answered."""
+		from taxjar_integration.taxjar_integration.page.taxjar_customers import (
+			taxjar_customers as page,
+		)
+
+		names = [f"C{i}" for i in range(50)]
+		with patch.object(page, "_write_exemption") as mock_write, \
+		     patch.object(page.frappe, "enqueue") as mock_enqueue:
+			result = page._apply_exemption(names, "Wholesale", [])
+
+		mock_write.assert_not_called()
+		mock_enqueue.assert_called_once()
+		self.assertTrue(mock_enqueue.call_args[1]["enqueue_after_commit"])
+		self.assertTrue(result["queued"])
+
+	def test_one_customer_failing_does_not_lose_the_rest(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers import (
+			taxjar_customers as page,
+		)
+
+		done = []
+
+		def _write(name, exemption_type, regions):
+			if name == "C2":
+				raise frappe.ValidationError("nope")
+			done.append(name)
+
+		with patch.object(page, "_write_exemption", side_effect=_write), \
+		     patch.object(page.frappe, "log_error") as mock_log, \
+		     patch.object(page.frappe, "publish_realtime"):
+			page.apply_exemption_in_background(["C1", "C2", "C3"], "Wholesale", [])
+
+		self.assertEqual(done, ["C1", "C3"])
+		self.assertIn("C2", mock_log.call_args[1]["title"])

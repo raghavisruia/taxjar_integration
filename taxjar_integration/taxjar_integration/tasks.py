@@ -4,7 +4,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_MAX_SYNC_RETRIES,
 	_is_taxjar_enabled,
 	company_scope,
-	get_client,
+	get_catalogue_client,
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
 	fetch_and_insert_categories,
@@ -47,7 +47,7 @@ def sync_product_tax_categories():
 	if not _is_taxjar_enabled():
 		return
 
-	client = get_client()
+	client = get_catalogue_client()
 	if not client:
 		return
 

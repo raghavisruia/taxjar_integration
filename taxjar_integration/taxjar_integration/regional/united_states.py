@@ -35,13 +35,29 @@ def resolve_default_ledgers(company):
 	ledgers for a company. Lookup by account_number first (survives renames), exact
 	account_name second. Never creates an account; returns None for whatever isn't
 	found on this company's chart of accounts."""
-	resolved = {}
-	for fieldname, (account_number, account_name) in _STANDARD_LEDGERS.items():
-		resolved[fieldname] = (
-			frappe.db.get_value("Account", {"company": company, "account_number": account_number})
-			or frappe.db.get_value("Account", {"company": company, "account_name": account_name})
-		)
-	return resolved
+	# One read for the company's whole chart rather than two per ledger. This runs
+	# for every configured company on every migrate, so the query count is the
+	# number of companies rather than four times it.
+	wanted_numbers = {number for number, _name in _STANDARD_LEDGERS.values()}
+	wanted_names = {name for _number, name in _STANDARD_LEDGERS.values()}
+	accounts = frappe.get_all(
+		"Account",
+		filters={"company": company, "is_group": 0},
+		or_filters=[
+			["account_number", "in", list(wanted_numbers)],
+			["account_name", "in", list(wanted_names)],
+		],
+		fields=["name", "account_number", "account_name"],
+	)
+
+	by_number = {a.account_number: a.name for a in accounts if a.account_number}
+	by_name = {a.account_name: a.name for a in accounts if a.account_name}
+
+	return {
+		# Number first: it survives a rename, which the name by definition does not.
+		fieldname: by_number.get(account_number) or by_name.get(account_name)
+		for fieldname, (account_number, account_name) in _STANDARD_LEDGERS.items()
+	}
 
 
 def _taxjar_template_rows(tax_account_head, shipping_account_head, cost_center):

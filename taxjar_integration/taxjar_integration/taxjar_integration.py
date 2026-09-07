@@ -17,39 +17,6 @@ from frappe.utils.password import get_decrypted_password
 from erpnext import get_region
 from erpnext.setup.utils import get_exchange_rate
 
-SUPPORTED_COUNTRY_CODES = [
-	"AT",
-	"AU",
-	"BE",
-	"BG",
-	"CA",
-	"CY",
-	"CZ",
-	"DE",
-	"DK",
-	"EE",
-	"ES",
-	"FI",
-	"FR",
-	"GB",
-	"GR",
-	"HR",
-	"HU",
-	"IE",
-	"IT",
-	"LT",
-	"LU",
-	"LV",
-	"MT",
-	"NL",
-	"PL",
-	"PT",
-	"RO",
-	"SE",
-	"SI",
-	"SK",
-	"US",
-]
 # ISO 3166-2 region names, in the order the State Code select offers them (by
 # state name, not by code). The same two maps, with the same values, are
 # US_STATE_NAMES / CA_PROVINCE_NAMES in public/js/taxjar_utils.js - the client
@@ -227,30 +194,88 @@ def get_company_config(company):
 	return None
 
 
-def get_client(company=None):
-	taxjar_settings = frappe.get_single("TaxJar Settings")
-	is_sandbox = taxjar_settings.api_mode == "Sandbox"
-	api_url = taxjar.SANDBOX_API_URL if is_sandbox else taxjar.DEFAULT_API_URL
-	token_field = "sandbox_token" if is_sandbox else "live_token"
+def _build_client(cred, token_field, api_url):
+	if not cred or not api_url:
+		return None
+	if not getattr(cred, token_field, None):
+		return None
 
-	api_key = None
-	for cred in taxjar_settings.table_hvjw or []:
-		if not company or cred.company == company:
-			if getattr(cred, token_field, None):
-				api_key = get_decrypted_password("TaxJar API Credential", cred.name, token_field)
-			break
+	api_key = get_decrypted_password("TaxJar API Credential", cred.name, token_field)
+	if not api_key:
+		return None
 
-	if api_key and api_url:
-		client = taxjar.Client(api_key=api_key, api_url=api_url)
-		client.set_api_config("headers", {"x-api-version": "2022-01-24"})
-		return client
+	client = taxjar.Client(api_key=api_key, api_url=api_url)
+	client.set_api_config("headers", {"x-api-version": "2022-01-24"})
+	return client
 
 
-# One condition, one sentence: a company with transaction filing switched on but
-# no usable API credential for the current Sandbox/Live mode. Named rather than
-# repeated so the on_submit hook and the two workers cannot drift apart on the
-# wording, having already drifted apart on the verdict.
-_NOT_CONFIGURED_ERROR = "TaxJar is not configured for this company."
+def _api_mode(settings):
+	is_sandbox = settings.api_mode == "Sandbox"
+	return (
+		"sandbox_token" if is_sandbox else "live_token",
+		taxjar.SANDBOX_API_URL if is_sandbox else taxjar.DEFAULT_API_URL,
+	)
+
+
+def get_client(company: str):
+	"""The TaxJar client for one company's own credential.
+
+	``company`` is required. It used to default to None, and the loop below used
+	to break on the first row when it was - so address validation and the
+	Customer form's Sync button talked to whichever TaxJar account happened to
+	sit first in the table, and recorded data against it. A default that picks a
+	tenant by row order is not a default, so there is no longer one. Where a
+	credential genuinely is not company-specific, say so by calling
+	get_catalogue_client() instead.
+	"""
+	settings = frappe.get_single("TaxJar Settings")
+	token_field, api_url = _api_mode(settings)
+	cred = next((c for c in (settings.table_hvjw or []) if c.company == company), None)
+	return _build_client(cred, token_field, api_url)
+
+
+def get_catalogue_client():
+	"""A client for TaxJar's own product-tax-category catalogue.
+
+	That catalogue is global to TaxJar rather than per-company, so any configured
+	credential can read it and the first usable one is picked deliberately. Named
+	apart from get_client() so "no company here" reads as a decision rather than
+	an omission.
+	"""
+	settings = frappe.get_single("TaxJar Settings")
+	token_field, api_url = _api_mode(settings)
+	for cred in settings.table_hvjw or []:
+		client = _build_client(cred, token_field, api_url)
+		if client:
+			return client
+
+
+def describe_missing_credential(company: str) -> str:
+	"""Why get_client() came back empty, in the terms the reader can act on.
+
+	"No credential row for this company" and "a row, but no token for the API
+	mode the site is in" are one message away from each other and a very
+	different amount of work apart - the second is one field on a form the admin
+	has already filled in once.
+	"""
+	settings = frappe.get_single("TaxJar Settings")
+	token_field, _url = _api_mode(settings)
+	cred = next((c for c in (settings.table_hvjw or []) if c.company == company), None)
+
+	if not cred:
+		return _("TaxJar is not configured for {0}. Add its API credential in the guided setup.").format(company)
+	if not getattr(cred, token_field, None):
+		return _(
+			"{0} has no {1} API token, and TaxJar is in {1} mode. Enter one in the guided setup."
+		).format(company, settings.api_mode or _("Live"))
+	return _("TaxJar is not configured for {0}.").format(company)
+
+
+# One condition, one sentence - now describe_missing_credential(), which every
+# path calls rather than repeating a string. Kept as the name the lockstep test
+# looks for: the point was never the constant, it was that the hooks and the
+# workers cannot drift apart on how they report the same thing.
+_NOT_CONFIGURED_ERROR = describe_missing_credential
 
 
 # Why a submitted transaction was deliberately kept out of TaxJar, stored on the
@@ -328,7 +353,7 @@ def enqueue_taxjar_sync(doc, method):
 		doc.db_set(
 			_sync_status_fields(
 				"Failed",
-				error=_NOT_CONFIGURED_ERROR,
+				error=describe_missing_credential(doc.company),
 				# retry_failed_taxjar_syncs() picks these up once the token is
 				# entered. It re-checks company_creates_transactions per invoice and
 				# gives up after TAXJAR_MAX_SYNC_RETRIES, so a company that is never
@@ -377,7 +402,7 @@ def enqueue_taxjar_delete(doc, method):
 		doc.db_set(
 			_sync_status_fields(
 				"Failed",
-				error=_NOT_CONFIGURED_ERROR,
+				error=describe_missing_credential(doc.company),
 				retryable=True,
 				prior_retry_count=cint(getattr(doc, "taxjar_sync_retry_count", 0)),
 			),
@@ -466,7 +491,10 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	client = get_client(doc.company)
 	if not client:
-		_set_sync_status(invoice_name, "Failed", error=_NOT_CONFIGURED_ERROR, retryable=True)
+		_set_sync_status(
+			invoice_name, "Failed",
+			error=describe_missing_credential(doc.company), retryable=True,
+		)
 		return
 
 	# Matched by account_head, not description - the row's description is
@@ -478,7 +506,16 @@ def sync_transaction_to_taxjar(invoice_name):
 		if company_config and tax.account_head == company_config.tax_account_head
 	)
 
-	tax_dict = get_tax_data(doc)
+	try:
+		tax_dict = get_tax_data(doc)
+	except Exception as err:
+		# Outside a try, this used to escape the worker entirely: the job died,
+		# the status stayed "Queued", and retry_failed_taxjar_syncs only ever
+		# looks for "Failed" - so the invoice reported Queued for good, with
+		# nothing but an Error Log to say otherwise.
+		_record_sync_failure(err, "create_transaction", {}, ctx, invoice_name)
+		return
+
 	if not tax_dict:
 		_set_sync_status(
 			invoice_name,
@@ -537,7 +574,10 @@ def delete_transaction_from_taxjar(invoice_name):
 
 	client = get_client(doc.company)
 	if not client:
-		_set_sync_status(invoice_name, "Failed", error=_NOT_CONFIGURED_ERROR, retryable=True)
+		_set_sync_status(
+			invoice_name, "Failed",
+			error=describe_missing_credential(doc.company), retryable=True,
+		)
 		return
 
 	is_refund = doc.is_return
@@ -849,6 +889,11 @@ def get_tax_data(doc):
 	if to_shipping_state not in SUPPORTED_STATE_CODES:
 		to_shipping_state = get_state_code(to_address, "Shipping")
 
+	# No usable state at either end means TaxJar has nothing to price this
+	# against. The caller records why; it is not a reason to stop the save.
+	if not from_shipping_state or not to_shipping_state:
+		return None
+
 	usd_rate = _get_usd_exchange_rate(doc)
 	if usd_rate:
 		shipping = flt(shipping * usd_rate, 2)
@@ -901,14 +946,24 @@ def get_tax_data(doc):
 
 
 def get_state_code(address, location):
-	if address is not None:
-		state_code = get_iso_3166_2_state_code(address)
-		if state_code not in SUPPORTED_STATE_CODES:
-			frappe.throw(_("Please enter a valid State in the {0} Address").format(location))
-	else:
-		frappe.throw(_("Please enter a valid State in the {0} Address").format(location))
+	"""The US state code for an address, or None if it does not have one.
 
-	return state_code
+	None rather than a throw. TaxJar prices United States sales tax, so a
+	destination it does not cover - an export to Ontario, a sale into Bavaria -
+	is a reason to charge no tax and say so, exactly as an unregistered state is.
+	Throwing made it a reason the document could not be saved at all, which meant
+	a US company could not record an export sale; the message even asked for a
+	"valid State" on an address whose state was perfectly valid, just not one of
+	the fifty.
+
+	The caller decides what to do about None. get_tax_data() stops building a
+	payload, and set_sales_tax() records why on the document.
+	"""
+	if address is None:
+		return None
+
+	state_code = get_iso_3166_2_state_code(address)
+	return state_code if state_code in SUPPORTED_STATE_CODES else None
 
 
 def _get_item_product_tax_category(item):
@@ -1167,24 +1222,29 @@ def set_sales_tax(doc, method):
 		return
 
 	if not doc.shipping_address_name and not doc.customer_address:
-		if doc.doctype == "Quotation":
-			_set_tax_status_fields(doc,
-				nexus_reason="No shipping or billing address set")
-			log_taxjar_call(action="tax_for_order", status="skipped",
-				error="No shipping or billing address set on Quotation", context=_ctx)
-			_remove_taxjar_rows(doc, company_config)
-			return
-
-		frappe.throw(
-			_("Please set a Shipping Address or Billing Address on this transaction before saving."),
-			title=_("Address Required"),
-		)
+		# Degrade rather than block. Nothing has been calculated or filed at save
+		# time, so a half-built draft with no address yet is not wrong - it is
+		# unfinished, and refusing to save it is how a user ends up unable to put
+		# work down. Where the document really must carry a destination, because
+		# the company files it to TaxJar, validate_taxable_destination() says so
+		# at submit, which is the moment the document claims to be final.
+		_set_tax_status_fields(doc,
+			nexus_reason="No shipping or billing address set")
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error="No shipping or billing address set", context=_ctx)
+		_remove_taxjar_rows(doc, company_config)
+		return
 
 	tax_dict = get_tax_data(doc)
 
 	if not tax_dict:
 		log_taxjar_call(action="tax_for_order", status="skipped",
 			error="No TaxJar payload generated from addresses/items", context=_ctx)
+		_set_tax_status_fields(
+			doc,
+			has_nexus=False,
+			nexus_reason=_destination_outside_coverage_reason(doc),
+		)
 		_remove_taxjar_rows(doc, company_config)
 		return
 
@@ -1280,6 +1340,45 @@ def set_sales_tax(doc, method):
 
 		doc.run_method("calculate_taxes_and_totals")
 		doc.run_method("set_total_in_words")
+
+
+def _destination_outside_coverage_reason(doc):
+	"""Why no payload could be built, in the destination's own terms.
+
+	Named rather than left as a bare "no tax": a sale to Ontario and a sale to a
+	state with no nexus are both untaxed here, and only one of them is something
+	the reader could change.
+	"""
+	address_name = _destination_address(doc)
+	country = None
+	if address_name and frappe.db.exists("Address", address_name):
+		country = frappe.db.get_value("Address", address_name, "country")
+
+	if country and country != "United States":
+		return f"Destination is in {country}, which TaxJar does not price"
+	return "Destination has no United States state TaxJar can price"
+
+
+def validate_taxable_destination(doc, method=None):
+	"""before_submit: a document a company files to TaxJar needs somewhere to file it.
+
+	The completeness rule the Address form could not apply, applied where the
+	company is known. Only under `files`: a company that merely calculates gets a
+	tax figure of zero and a stated reason, which is visible and correctable,
+	whereas a blocked submit is neither.
+	"""
+	scope = company_scope(doc.company)
+	if not scope.files:
+		return
+
+	if not doc.get("shipping_address_name") and not doc.get("customer_address"):
+		frappe.throw(
+			_(
+				"{0} files its transactions to TaxJar, which needs a destination. "
+				"Set a Shipping Address or Billing Address before submitting."
+			).format(frappe.bold(doc.company)),
+			title=_("Destination Required to File"),
+		)
 
 
 def validate_return_against(doc, method):
@@ -2021,56 +2120,93 @@ def get_iso_3166_2_state_code(address):
 		return taxjar_code
 
 	state = address.get("state")
-	if not state:
-		frappe.throw(_("Please enter a valid State in the address"))
-
 	country_code = frappe.db.get_value("Country", address.get("country"), "code", cache=True)
+	if not state or not country_code:
+		return None
 
-	error_message = _(
-		"""{0} is not a valid state! Check for typos or enter the ISO code for your state."""
-	).format(state)
 	state = state.upper().strip()
 
 	# The max length for ISO state codes is 3, excluding the country code
 	if len(state) <= 3:
 		# PyCountry returns state code as {country_code}-{state-code} (e.g. US-FL)
 		address_state = (country_code + "-" + state).upper()
+		states = [pystate.code for pystate in pycountry.subdivisions.get(country_code=country_code.upper()) or []]
+		return state if address_state in states else None
 
-		states = pycountry.subdivisions.get(country_code=country_code.upper())
-		states = [pystate.code for pystate in states]
+	try:
+		lookup_state = pycountry.subdivisions.lookup(state)
+	except LookupError:
+		return None
+	return lookup_state.code.split("-")[1]
 
-		if address_state in states:
-			return state
 
-		frappe.throw(_(error_message))
-	else:
-		try:
-			lookup_state = pycountry.subdivisions.lookup(state)
-		except LookupError:
-			frappe.throw(_(error_message))
-		else:
-			return lookup_state.code.split("-")[1]
+def taxjar_serves_any_company(settings=None):
+	"""Whether TaxJar is live for at least one company it can actually serve.
+
+	The site-level question, asked properly: the master switch on, and some
+	company that is in the United States with a feature enabled. _is_taxjar_enabled()
+	answers the first two and skips the third, which is why an install with only
+	non-US companies configured still tightened every address on the site.
+	"""
+	if settings is None:
+		if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+			return False
+		settings = frappe.get_single("TaxJar Settings")
+	elif not settings.taxjar_enabled:
+		return False
+
+	return any(
+		company_scope(config.company, config=config).uses_taxjar
+		for config in (settings.company_config or [])
+	)
 
 
 def validate_address(doc, method):
-	"""Enforce mandatory address fields for US and Canadian addresses."""
+	"""Keep US and Canadian addresses complete enough for TaxJar to use.
+
+	An Address has no company, so this hook cannot know whether the document that
+	will eventually use it is one TaxJar prices - which is why it used to enforce
+	its rules on every US and Canadian address on the site, whether or not TaxJar
+	was switched on for anything, and why it called TaxJar's address-verification
+	endpoint from inside a document's own validate, on a credential picked by row
+	order.
+
+	What is left here is the part that is safe to say without knowing the company:
+	a completeness rule, applied only where TaxJar is actually live for some
+	company it can serve. The part that depends on the company - whether an
+	incomplete address should stop the work - now lives on the transaction, where
+	the company is known. See _require_taxable_destination().
+	"""
 	if not doc.country:
 		return
 
 	country_code = (frappe.db.get_value("Country", doc.country, "code", cache=True) or "").upper()
+	if country_code not in ("US", "CA"):
+		return
 
-	if country_code in ("US", "CA"):
-		if not doc.state:
-			frappe.throw(_("State/Province is mandatory for {0} addresses.").format(doc.country))
+	if not taxjar_serves_any_company():
+		return
 
-	if country_code == "US":
-		if not doc.get("taxjar_state_code"):
-			frappe.throw(_("State Code is mandatory for United States addresses."))
-		if not doc.pincode:
-			frappe.throw(_("Postal Code is mandatory for United States addresses."))
+	if not doc.state:
+		frappe.throw(
+			_("State/Province is required for {0} addresses so sales tax can be calculated.").format(doc.country),
+			title=_("State Required"),
+		)
 
-		if _is_taxjar_enabled():
-			_validate_address_with_taxjar(doc)
+	if country_code != "US":
+		return
+
+	if not doc.get("taxjar_state_code"):
+		frappe.throw(
+			_("State Code is required for United States addresses - it decides which state's sales tax applies."),
+			title=_("State Code Required"),
+		)
+
+	if not doc.pincode:
+		frappe.throw(
+			_("Postal Code is required for United States addresses, and decides the tax rate."),
+			title=_("Postal Code Required"),
+		)
 
 
 def _is_taxjar_enabled(settings=None):
@@ -2232,7 +2368,30 @@ def get_company_scope(company: str):
 	}
 
 
-def _validate_address_with_taxjar(doc):
+@frappe.whitelist()
+def verify_address_with_taxjar(address_name: str, company: str):
+	"""Ask TaxJar whether it can find this address in the real world.
+
+	An explicit, non-blocking check that returns a verdict, rather than what it
+	was: an outbound HTTP call inside Address.validate, on a credential picked by
+	row order, that failed a save whenever TaxJar could not match an address the
+	user may well have entered correctly from a source TaxJar does not know.
+
+	Nothing calls this from the UI yet - offering it as an action on the address
+	or transaction form is follow-up work. It is kept, and kept callable, because
+	the check itself is useful; it was where and how it ran that was wrong.
+	"""
+	frappe.has_permission("Address", "read", doc=address_name, throw=True)
+	frappe.has_permission("Company", "read", doc=company, throw=True)
+
+	if not company_scope(company).uses_taxjar:
+		return {"checked": False, "reason": "out_of_scope"}
+
+	doc = frappe.get_doc("Address", address_name)
+	return _validate_address_with_taxjar(doc, company)
+
+
+def _validate_address_with_taxjar(doc, company):
 	"""Call TaxJar's address validation endpoint for US addresses.
 
 	A found address (or a normalized/standardized suggestion of one) is a
@@ -2244,7 +2403,7 @@ def _validate_address_with_taxjar(doc):
 	(401/422/5xx, connection issues) is not this address's fault, so it
 	doesn't block the save - same tolerant handling as before.
 	"""
-	client = get_client()
+	client = get_client(company)
 	if not client:
 		return
 
@@ -2264,36 +2423,20 @@ def _validate_address_with_taxjar(doc):
 		log_taxjar_call(action="validate_address", status="success", payload=address_data, response=result, context=ctx)
 	except taxjar.exceptions.TaxJarConnectionError:
 		log_taxjar_call(action="validate_address", status="error", error="TaxJar API is unreachable", context=ctx)
-		return
+		return {"checked": False, "reason": "unreachable"}
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
 		status_code = full.get("status_code") if isinstance(full, dict) else None
 		log_taxjar_call(action="validate_address", status="error", error=getattr(err, "full_response", str(err)), context=ctx)
 		if status_code == 404:
-			_throw_invalid_address()
-		return
+			return {"checked": True, "valid": False}
+		return {"checked": False, "reason": "error"}
 	except Exception:
 		log_taxjar_call(action="validate_address", status="error", error=traceback.format_exc(), context=ctx)
-		return
+		return {"checked": False, "reason": "error"}
 
 	matches = list(result) if hasattr(result, "__iter__") else []
-	if not matches:
-		_throw_invalid_address()
-
-
-def _throw_invalid_address():
-	"""TaxJar found no real-world match for this address. Its "no match"
-	response carries no further reason to pass on.
-
-	Not reusing _describe_response_error()/classify_taxjar_error() here:
-	their 404 wording ("Transaction not found in TaxJar") is specific to the
-	transaction-sync endpoints and would be actively misleading for an
-	address that was simply never found, not a transaction gone missing.
-	"""
-	frappe.throw(
-		_("The given address is not valid, please reverify the street, city, state, or postal code."),
-		title=_("Invalid Address"),
-	)
+	return {"checked": True, "valid": bool(matches)}
 
 
 def _get_customer_name(doc):
@@ -2635,7 +2778,7 @@ def _record_customer_sync_failure(err, action, payload, ctx, customer_name):
 
 
 @frappe.whitelist(methods=["POST"])
-def resync_customer(customer_name: str, company: str | None = None):
+def resync_customer(customer_name: str, company: str):
 	"""Permission-checked entry point for the Customer "Sync to TaxJar" button.
 
 	Inline rather than enqueued, for the same reason as resync_transaction: the

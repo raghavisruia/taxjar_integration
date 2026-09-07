@@ -137,6 +137,8 @@ after_uninstall = "taxjar_integration.uninstall.after_uninstall"
 doc_events = {
 	"Sales Invoice": {
 		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_return_against",
+		# At submit, not at save: an incomplete draft is unfinished, not wrong.
+		"before_submit": "taxjar_integration.taxjar_integration.taxjar_integration.validate_taxable_destination",
 		"on_submit": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_sync",
 		"on_cancel": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_delete",
 	},

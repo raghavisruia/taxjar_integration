@@ -10,7 +10,10 @@ from taxjar_integration.taxjar_integration.pagination import (
 	parse_page_size,
 	permitted_count,
 )
-from taxjar_integration.taxjar_integration.taxjar_integration import _publish_customer_update
+from taxjar_integration.taxjar_integration.taxjar_integration import (
+	_publish_customer_update,
+	company_scope,
+)
 
 # A representative TaxJar custom field; if this column is absent the fields were
 # never created, so reads would hit MySQLdb (1054) Unknown column.
@@ -258,15 +261,7 @@ def configure_exemption(
 	if not exemption_type:
 		regions = []
 
-	for name in customers:
-		doc = frappe.get_doc("Customer", name)
-		doc.taxjar_exemption_type = exemption_type or ""
-		doc.set("taxjar_exempt_regions", [])
-		for r in regions:
-			doc.append("taxjar_exempt_regions", {"country": r["country"], "state": r["state"]})
-		doc.save()
-
-	return {"updated": len(customers)}
+	return _apply_exemption(customers, exemption_type or "", regions)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -276,13 +271,61 @@ def bulk_clear_exemption(customers: list | str):
 	customers = parse_document_names(customers, label=frappe._("customers"))
 	_check_each(customers)
 
-	for name in customers:
-		doc = frappe.get_doc("Customer", name)
-		doc.taxjar_exemption_type = ""
-		doc.set("taxjar_exempt_regions", [])
-		doc.save()
+	return _apply_exemption(customers, "", [])
 
-	return {"updated": len(customers)}
+
+# Above this many customers the edit goes to a background job. Each one is a full
+# document save, and every save fires on_customer_update, which enqueues a TaxJar
+# sync per configured company - so a hundred selected customers is a hundred saves
+# and a couple of hundred enqueues. Inline, that runs past the point where a
+# request should have answered; the page has a realtime channel already and can
+# report progress on it.
+_INLINE_EXEMPTION_LIMIT = 10
+
+
+def _write_exemption(name, exemption_type, regions):
+	doc = frappe.get_doc("Customer", name)
+	doc.taxjar_exemption_type = exemption_type
+	doc.set("taxjar_exempt_regions", [])
+	for region in regions:
+		doc.append("taxjar_exempt_regions", {"country": region["country"], "state": region["state"]})
+	doc.save()
+
+
+def apply_exemption_in_background(customers, exemption_type, regions):
+	"""Background worker for a bulk exemption edit. Not whitelisted: the endpoint
+	above has already checked write permission on every name."""
+	for name in customers:
+		try:
+			_write_exemption(name, exemption_type, regions)
+		except Exception:
+			# One customer's failure is not the batch's. Logged per row so the
+			# admin can see which, rather than losing the rest to a dead job.
+			frappe.log_error(
+				title=f"TaxJar: could not set exemption on {name}",
+				message=frappe.get_traceback(with_context=True),
+			)
+	frappe.publish_realtime(
+		"taxjar_customer_sync_update", {"bulk_exemption_done": len(customers)}, user=frappe.session.user
+	)
+
+
+def _apply_exemption(customers, exemption_type, regions):
+	if len(customers) <= _INLINE_EXEMPTION_LIMIT:
+		for name in customers:
+			_write_exemption(name, exemption_type, regions)
+		return {"updated": len(customers), "queued": False}
+
+	frappe.enqueue(
+		"taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.apply_exemption_in_background",
+		customers=customers,
+		exemption_type=exemption_type,
+		regions=regions,
+		queue="long",
+		enqueue_after_commit=True,
+		now=frappe.flags.in_test,
+	)
+	return {"updated": len(customers), "queued": True}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -300,17 +343,29 @@ def bulk_sync_to_taxjar(customers: list | str):
 	customers = parse_document_names(customers, label=frappe._("customers"))
 	_check_each(customers)
 
+	# Read once. frappe.get_single() rebuilds the settings document and its child
+	# tables on every call, and this used to sit inside the loop - a hundred
+	# selected customers meant a hundred rebuilds of a list that cannot change
+	# during the request.
+	taxjar_settings = frappe.get_single("TaxJar Settings")
+	companies = [
+		config for config in (taxjar_settings.company_config or [])
+		if company_scope(config.company, config=config).uses_taxjar
+	]
+
 	queued = 0
 	for name in customers:
-		customer_id = frappe.db.get_value("Customer", name, "taxjar_customer_id")
-		exemption_type = frappe.db.get_value("Customer", name, "taxjar_exemption_type")
-		if not customer_id and not exemption_type:
+		# One row, one read: two get_value calls for two columns of the same row
+		# is two round trips where one will do.
+		fields = frappe.db.get_value(
+			"Customer", name, ["taxjar_customer_id", "taxjar_exemption_type"], as_dict=True
+		) or {}
+		if not fields.get("taxjar_customer_id") and not fields.get("taxjar_exemption_type"):
 			continue
 
 		frappe.db.set_value("Customer", name, "taxjar_customer_sync_status", "Queued", update_modified=False)
 		_publish_customer_update(name, "Queued")
-		taxjar_settings = frappe.get_single("TaxJar Settings")
-		for config in taxjar_settings.company_config or []:
+		for config in companies:
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
 				customer_name=name,

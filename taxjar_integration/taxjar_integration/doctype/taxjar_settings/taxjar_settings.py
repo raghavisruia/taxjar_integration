@@ -23,6 +23,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TRANSACTION_EXCLUSION_REASONS,
 	_is_taxjar_enabled,
 	clear_company_config_cache,
+	get_catalogue_client,
 	get_client,
 	log_taxjar_call,
 	sanitize_error_response,
@@ -317,7 +318,7 @@ class TaxJarSettings(Document):
 		# this calls TaxJar and inserts Product Tax Category rows.
 		self.check_permission("write")
 
-		client = get_client()
+		client = get_catalogue_client()
 		if not client:
 			frappe.throw(
 				frappe._("Could not connect to TaxJar. Check your API credentials."),

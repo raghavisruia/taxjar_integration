@@ -164,7 +164,10 @@ frappe.ui.form.on("Customer", {
 				() => {
 					frappe.xcall(
 						"taxjar_integration.taxjar_integration.taxjar_integration.resync_customer",
-						{ customer_name: frm.doc.name },
+						// A Customer is not company-scoped, but a TaxJar account is:
+						// without naming one this pushed the exemption to whichever
+						// credential sat first in the table.
+						{ customer_name: frm.doc.name, company: frappe.defaults.get_user_default("Company") },
 					).then(() => frm.reload_doc()).then(() => {
 						if (frm.doc.taxjar_customer_sync_status === "Failed") {
 							taxjar_integration.show_taxjar_sync_error(

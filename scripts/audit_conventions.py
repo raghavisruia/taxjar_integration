@@ -36,16 +36,11 @@ ROOT = APP.parent
 
 # --- exemptions ---------------------------------------------------------------
 #
-# Throws inside code that step 6 of the remediation plan deletes or relocates:
-# get_state_code() and get_iso_3166_2_state_code() become a degrade path, and
-# validate_address()'s mandatory-field throws become hints on the Address form.
-# Titling them now would be work thrown away and a merge conflict with that step.
-# Step 6 rewrites all eight with titles and empties this list.
-THROW_TITLE_EXEMPT = {
-	("taxjar_integration/taxjar_integration/taxjar_integration.py", "get_state_code"),
-	("taxjar_integration/taxjar_integration/taxjar_integration.py", "get_iso_3166_2_state_code"),
-	("taxjar_integration/taxjar_integration/taxjar_integration.py", "validate_address"),
-}
+# Empty, and meant to stay that way. It briefly held the throws in get_state_code(),
+# get_iso_3166_2_state_code() and validate_address() while those were being
+# rewritten - the first two no longer throw at all, and validate_address()'s
+# remaining messages carry titles.
+THROW_TITLE_EXEMPT: set[tuple[str, str]] = set()
 
 # frappe.enqueue calls that deliberately do not defer to commit, with the reason.
 ENQUEUE_EXEMPT: dict[tuple[str, int], str] = {}
