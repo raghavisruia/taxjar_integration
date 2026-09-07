@@ -2184,29 +2184,12 @@ def company_scope(company, config=None) -> CompanyScope:
 	)
 
 
-def company_calculates_tax(company, config=None):
-	"""Whether sales-tax calculation is on for a company (master switch AND the
-	company's own Calculate Sales Tax flag).
-
-	Superseded by company_scope(company).calculates, which also accounts for
-	whether TaxJar applies to the company at all. Kept, unchanged, until every
-	caller has been moved across - this one answers "is the switch on", which is
-	a different question from "should this run", and callers currently rely on
-	the former.
-	"""
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
-		return False
-	if config is None:
-		config = get_company_config(company)
-	return bool(config and config.taxjar_calculate_tax)
-
-
 def transaction_exclusion_reason(company, config=None):
 	"""Which switch keeps this company's transactions out of TaxJar, or None if
 	none of them does.
 
-	The same question company_creates_transactions() asks, answered with the
-	specific reason instead of a bare no. enqueue_taxjar_sync records the answer
+	The same question company_scope().files answers, given with the specific
+	reason instead of a bare no. enqueue_taxjar_sync records the answer
 	on the invoice; the Transaction Sync page asks it live for rows written
 	before it was recorded.
 	"""
@@ -2221,22 +2204,15 @@ def transaction_exclusion_reason(company, config=None):
 	return None
 
 
-def company_creates_transactions(company, config=None):
-	"""Whether transaction filing is on for a company (master switch AND the
-	company's own File Transactions flag)."""
-	return not transaction_exclusion_reason(company, config)
-
-
 @frappe.whitelist()
 def get_company_scope(company: str):
 	"""The whole scope answer for one company, in one round trip.
 
-	The form currently asks two endpoints two different halves of this - whether
-	tax is calculated (for the applicability matrix) and whether transactions are
-	filed (for the sidebar pill) - and neither says whether TaxJar applies to the
-	company at all, which is why an out-of-scope document still renders TaxJar
-	chrome and still asks for a shipping address. Step 5 moves the client onto
-	this and retires both.
+	The form used to ask two endpoints two halves of this - whether tax is
+	calculated, for the applicability matrix, and whether transactions are filed,
+	for the sidebar pill - and neither could say whether TaxJar applies to the
+	company at all. That is why an out-of-scope document still rendered TaxJar
+	chrome and still blocked its own save for a missing shipping address.
 
 	``reason`` matters as much as the booleans: a company registered outside the
 	United States and one with a switch turned off are both "no", but only one of
@@ -2254,47 +2230,6 @@ def get_company_scope(company: str):
 		"reason": scope.reason,
 		"country": get_region(company),
 	}
-
-
-@frappe.whitelist()
-def get_company_tax_status(company: str):
-	"""Live read for the Tax Applicability Matrix (_render_empty_status in
-	taxjar_utils.js): why set_sales_tax would not run for this company at all.
-
-	set_sales_tax stops for two quite different reasons, and an empty matrix
-	that names the wrong one sends the reader to the wrong place: a company
-	outside the United States is outside TaxJar's remit entirely, and no
-	setting on the setup page will change that, whereas calculation being
-	switched off is a setting the reader can go and turn on. So both are
-	reported, and the caller says something different for each.
-
-	Deliberately a different question from is_taxjar_enabled_for_company below,
-	which the sidebar pill asks - that one is about sending transactions, this
-	one about calculating tax, and they are separate flags on the same config.
-
-	Gated on Company rather than Sales Invoice: the matrix renders on Quotation
-	and Sales Order too, and all this reports is whether a feature is on for a
-	company the caller can already see.
-	"""
-	frappe.has_permission("Company", "read", doc=company, throw=True)
-	country = get_region(company)
-	return {
-		"country": country,
-		"is_united_states": country == "United States",
-		"calculates_tax": company_calculates_tax(company),
-	}
-
-
-@frappe.whitelist()
-def is_taxjar_enabled_for_company(company: str):
-	"""Live read for the sidebar sync-status pill (see render_sync_status_sidebar_pill
-	in taxjar_utils.js) - checked on every form refresh rather than cached on the
-	transaction doc, since a stored flag would go stale for a Draft left unsaved
-	or a Cancelled doc (which is never saved again) after the company's TaxJar
-	config changes.
-	"""
-	frappe.has_permission("Sales Invoice", "read", throw=True)
-	return company_creates_transactions(company)
 
 
 def _validate_address_with_taxjar(doc):

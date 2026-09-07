@@ -11,6 +11,7 @@ frappe.ui.form.on("Sales Invoice", {
 	},
 
 	refresh(frm) {
+		taxjar_integration.toggle_taxjar_ui(frm);
 		taxjar_integration.render_shipping_taxability(frm);
 		taxjar_integration.render_tax_breakdown(frm);
 		taxjar_integration.render_sync_status_sidebar_pill(frm);
@@ -61,13 +62,9 @@ function _add_taxjar_buttons(frm) {
 	// answer lands after refresh() has finished, which is fine - add_inner_button
 	// dedupes by label, so a late callback cannot stack a second button.
 	const docname = frm.doc.name;
-	frappe.call({
-		method: "taxjar_integration.taxjar_integration.taxjar_integration.is_taxjar_enabled_for_company",
-		args: { company: frm.doc.company },
-		callback: (r) => {
-			if (!r.message || frm.doc.name !== docname) return;
-			_add_sync_button(frm);
-		},
+	taxjar_integration.scope(frm.doc.company).then((scope) => {
+		if (!scope || !scope.files || frm.doc.name !== docname) return;
+		_add_sync_button(frm);
 	});
 }
 

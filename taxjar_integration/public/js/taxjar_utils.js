@@ -63,6 +63,67 @@ taxjar_integration.region_full_name = function (country, code) {
 // interactive dialog. The stored Sync Error field itself stays plain text
 // (it's a Small Text field, which renders as text, not HTML) - only this
 // dialog rendering gets the link.
+// ── Company scope ──
+// Every TaxJar feature on a transaction form depends on one question - what may
+// TaxJar do for this document's company - and the form used to ask two different
+// halves of it, on two endpoints, several times per load, while the features that
+// block a save asked nothing at all. That is why a company registered outside the
+// United States was told its shipping address was required and that it had no
+// nexus in Karnataka.
+//
+// One promise per company, memoised for the life of the page. Memoised on the
+// promise rather than its result so that the several callers that run together on
+// a single refresh share one request instead of racing four.
+//
+// The company is read fresh from the form each time rather than captured: changing
+// the company on a draft has to change the answer.
+taxjar_integration._scope_cache = {};
+
+taxjar_integration.scope = function (company) {
+	if (!company) return Promise.resolve(null);
+
+	if (!taxjar_integration._scope_cache[company]) {
+		taxjar_integration._scope_cache[company] = frappe
+			.xcall("taxjar_integration.taxjar_integration.taxjar_integration.get_company_scope", {
+				company,
+			})
+			.catch(() => {
+				// A failed read must not leave a permanently poisoned entry, and
+				// must not leave the form asserting things about a company it
+				// could not resolve. Null reads as "out of scope" everywhere.
+				delete taxjar_integration._scope_cache[company];
+				return null;
+			});
+	}
+
+	return taxjar_integration._scope_cache[company];
+};
+
+// Sugar for the common shape: run `fn` only when the company is in TaxJar's
+// remit and `predicate` holds for it. Every entry point below goes through this,
+// so "does this apply here?" is asked one way in one place.
+taxjar_integration.when_scoped = function (frm, predicate, fn) {
+	return taxjar_integration.scope(frm.doc.company).then((scope) => {
+		if (!scope || !scope.in_scope) return;
+		if (predicate && !predicate(scope)) return;
+		return fn(scope);
+	});
+};
+
+// The TaxJar tab, its exemption section and the breakdown section are created on
+// every Quotation, Sales Order and Sales Invoice at install, so a company TaxJar
+// does not serve carries a tab full of sections that can never say anything.
+// Hidden from the field definition rather than by emptying the HTML inside it:
+// a section whose control still exists is re-shown by the next refresh_sections().
+taxjar_integration.toggle_taxjar_ui = function (frm) {
+	return taxjar_integration.scope(frm.doc.company).then((scope) => {
+		const show = Boolean(scope && scope.in_scope);
+		["taxjar_tab", "taxjar_exemption_section", "taxjar_breakdown_section"].forEach((f) => {
+			if (frm.fields_dict[f]) frm.set_df_property(f, "hidden", show ? 0 : 1);
+		});
+	});
+};
+
 taxjar_integration.show_taxjar_sync_error = function (title, message) {
 	const html = frappe.utils
 		.escape_html(message)
@@ -248,6 +309,18 @@ taxjar_integration.check_shipping_address = function (frm) {
 		return;
 	}
 
+	// A ship-to is only required because TaxJar needs a destination to price or
+	// to file against. Without either feature there is nothing this address is
+	// for, and blocking the save asks the user to satisfy a integration that is
+	// not going to look at the answer.
+	return taxjar_integration.when_scoped(
+		frm,
+		(scope) => scope.uses_taxjar,
+		() => taxjar_integration._prompt_for_shipping_address(frm, party_name)
+	);
+};
+
+taxjar_integration._prompt_for_shipping_address = function (frm, party_name) {
 	return frappe.xcall(
 		"taxjar_integration.taxjar_integration.taxjar_integration.get_customer_addresses",
 		{ customer: party_name }
@@ -287,6 +360,17 @@ taxjar_integration.check_shipping_address = function (frm) {
 // from the same classifier get_tax_data() itself uses server-side (design
 // doc §5) - what the dialog shows is guaranteed to match what gets sent.
 taxjar_integration.confirm_foreign_tax_rows = function (frm) {
+	// The server answers empty for a company out of scope, so this used to be a
+	// round trip on every save of every transaction on the site to be told there
+	// was nothing to say.
+	return taxjar_integration.when_scoped(
+		frm,
+		(scope) => scope.uses_taxjar,
+		() => taxjar_integration._confirm_foreign_tax_rows(frm)
+	);
+};
+
+taxjar_integration._confirm_foreign_tax_rows = function (frm) {
 	return frappe
 		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.preview_foreign_tax_rows", {
 			doc_json: JSON.stringify(frm.doc),
@@ -560,6 +644,16 @@ taxjar_integration._set_tax_message = function (frm, text, color) {
 };
 
 taxjar_integration.show_no_address_tax_message = function (frm) {
+	// Nothing here is true of a document TaxJar will not price: no address is
+	// missing "hence taxes are not calculated", and no destination lacks nexus.
+	return taxjar_integration.when_scoped(
+		frm,
+		(scope) => scope.calculates,
+		() => taxjar_integration._show_tax_message(frm)
+	);
+};
+
+taxjar_integration._show_tax_message = function (frm) {
 	if (!(frm.doc.shipping_address_name || frm.doc.customer_address)) {
 		let party_name = frm.doc.party_name || frm.doc.customer;
 		if (party_name) {
@@ -686,6 +780,17 @@ taxjar_integration._open_new_address = function (frm) {
 // Destination follows the same ship-to-then-bill-to fallback the server uses,
 // so this re-runs whenever either address changes.
 taxjar_integration.apply_region_exemption = function (frm) {
+	// Locking a transaction's exemption fields is a statement that TaxJar has
+	// decided the matter. For a company it does not serve it has decided nothing,
+	// and the fields should stay the user's own.
+	return taxjar_integration.when_scoped(
+		frm,
+		(scope) => scope.uses_taxjar,
+		() => taxjar_integration._apply_region_exemption(frm)
+	);
+};
+
+taxjar_integration._apply_region_exemption = function (frm) {
 	const fields = ["taxjar_transaction_exempt", "taxjar_transaction_exemption_type"];
 	const customer = frm.doc.party_name || frm.doc.customer;
 	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
@@ -749,13 +854,10 @@ taxjar_integration._render_empty_status = function (frm, wrapper) {
 	const docname = frm.doc.name;
 	wrapper.empty();
 
-	frappe
-		.xcall(
-			"taxjar_integration.taxjar_integration.taxjar_integration.get_company_tax_status",
-			{ company: frm.doc.company }
-		)
+	taxjar_integration
+		.scope(frm.doc.company)
 		.then((status) => {
-			if (frm.doc.name !== docname) return;
+			if (frm.doc.name !== docname || !status) return;
 
 			const company = frappe.utils.escape_html(frm.doc.company);
 
@@ -765,7 +867,7 @@ taxjar_integration._render_empty_status = function (frm, wrapper) {
 			// if the switch were on. No "Configure TaxJar" link either: the
 			// setup page holds nothing that can resolve this, and the country
 			// is changed on the Company, not in TaxJar.
-			if (!status.is_united_states) {
+			if (status.reason === "not_us") {
 				const country = status.country && frappe.utils.escape_html(status.country);
 				wrapper.html(`
 					<p class="text-muted">
@@ -785,7 +887,7 @@ taxjar_integration._render_empty_status = function (frm, wrapper) {
 				return;
 			}
 
-			if (!status.calculates_tax) {
+			if (!status.calculates) {
 				wrapper.html(`
 					<p class="text-muted">
 						${__("Sales tax calculation is turned off for {0}, so there is no tax status to show.", [
@@ -1181,18 +1283,17 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 	// a stored flag would go stale for a Draft left unsaved, or worse for a
 	// Cancelled doc (which is never saved again), once the company's TaxJar
 	// config changes after the doc was last written.
-	frappe.call({
-		method: "taxjar_integration.taxjar_integration.taxjar_integration.is_taxjar_enabled_for_company",
-		args: { company: frm.doc.company },
-		callback: (r) => {
-			if (frm.doc.name !== docname) return;
+	taxjar_integration.scope(frm.doc.company).then((scope) => {
+		if (frm.doc.name !== docname) return;
+		// Out of TaxJar's remit entirely: no pill, and no link either - the setup
+		// page has nothing to offer a company it cannot serve.
+		if (!scope || !scope.in_scope) return;
 
-			if (!r.message) {
-				taxjar_integration._render_taxjar_not_enabled_link(frm);
-			} else {
-				taxjar_integration._render_taxjar_sync_status_pill(frm);
-			}
-		},
+		if (scope.files) {
+			taxjar_integration._render_taxjar_sync_status_pill(frm);
+		} else {
+			taxjar_integration._render_taxjar_not_enabled_link(frm);
+		}
 	});
 };
 
@@ -1205,12 +1306,9 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 // service and the guided setup wizard it links to has nothing to offer a
 // non-US company, so the link would just be a dead end for one.
 taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
-	const docname = frm.doc.name;
-
-	frappe.db.get_value("Company", frm.doc.company, "country").then((r) => {
-		if (frm.doc.name !== docname) return;
-		if ((r.message || {}).country !== "United States") return;
-
+	// Reached only for a company already known to be in scope, so the country
+	// round trip this used to make has nothing left to decide.
+	{
 		const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
 		// The logo sits beside the link rather than inside it, so it is not
 		// dragged into the link's own colour or hover treatment.
@@ -1233,7 +1331,7 @@ taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
 			</div>
 		`);
 		taxjar_integration._mount_sidebar_section($section);
-	});
+	}
 };
 
 // Why a submitted document was kept out of TaxJar, as the sentence it deserves.

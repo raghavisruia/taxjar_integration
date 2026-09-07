@@ -50,7 +50,6 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	get_company_config,
 	get_line_item_dict,
 	get_taxjar_breakdown_html,
-	is_taxjar_enabled_for_company,
 	on_customer_delete,
 	on_customer_update,
 	on_customer_validate,
@@ -913,7 +912,7 @@ class TestPreviewForeignTaxRows(UnitTestCase):
 			{"account_head": "Handling - TC", "description": "Fee", "tax_amount": 20.0, "idx": 1},
 		])
 		with patch(f"{self.MOD}.frappe.has_permission"), \
-		     patch(f"{self.MOD}.company_calculates_tax", return_value=True), \
+		     patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1), \
 		     patch(f"{self.MOD}.get_region", return_value="United States"), \
 		     patch(f"{self.MOD}.get_company_config", return_value=None):
 			result = preview_foreign_tax_rows(doc_data)
@@ -3902,24 +3901,6 @@ class TestExclusionReason(UnitTestCase):
 		     patch(f"{self.MOD}.get_region", return_value="United States"):
 			self.assertIsNone(transaction_exclusion_reason("_Test Company", config))
 
-	def test_it_is_the_same_question_company_creates_transactions_asks(self):
-		"""Two answers to one question would let the hook record a reason for a
-		company the rest of the app treats as filing, or the reverse."""
-		from taxjar_integration.taxjar_integration.taxjar_integration import (
-			company_creates_transactions,
-			transaction_exclusion_reason,
-		)
-
-		for enabled, config in ((0, None), (1, None), (1, frappe._dict(taxjar_create_transactions=0)),
-		                        (1, frappe._dict(taxjar_create_transactions=1))):
-			with self.subTest(enabled=enabled, config=config):
-				with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=enabled), \
-				     patch(f"{self.MOD}.get_company_config", return_value=config):
-					self.assertEqual(
-						company_creates_transactions("_Test Company"),
-						not transaction_exclusion_reason("_Test Company"),
-					)
-
 	def test_the_reason_is_cleared_by_every_other_status(self):
 		"""A document kept out in March and synced in April must not go on
 		explaining why it once was not."""
@@ -4617,7 +4598,7 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 
 	def test_region_exemption_locks_and_fills_the_override(self):
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("taxjar_integration.apply_region_exemption = function (frm) {")[1].split("\n};")[0]
+		fn = js.split("taxjar_integration._apply_region_exemption = function (frm) {")[1].split("\n};")[0]
 
 		# Ship-to first, bill-to as fallback - the same order the server uses.
 		self.assertIn("frm.doc.shipping_address_name || frm.doc.customer_address", fn)
@@ -4776,7 +4757,7 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		self.assertIn('if (!$container.children().length) $container.addClass("hidden")', setter)
 
 		# Every branch goes through the setter, or one of them stacks again.
-		fn = js.split("taxjar_integration.show_no_address_tax_message = function (frm) {")[1].split("\n};")[0]
+		fn = js.split("taxjar_integration._show_tax_message = function (frm) {")[1].split("\n};")[0]
 		self.assertNotIn("frm.layout.show_message(", fn)
 
 	def test_no_address_message_has_a_create_address_link(self):
@@ -4785,7 +4766,7 @@ class TestSyncStatusRealtimeJS(UnitTestCase):
 		form, linked to this customer via the same helper the shipping-
 		address picker's own "Add New Address" action already uses."""
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("taxjar_integration.show_no_address_tax_message = function (frm) {")[1].split("\n};")[0]
+		fn = js.split("taxjar_integration._show_tax_message = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("Customer address is not set, hence taxes are not calculated.", fn)
 		self.assertIn('class="taxjar-create-address-link"', fn)
 		self.assertIn("taxjar_integration._open_new_address(frm)", fn)
@@ -6657,39 +6638,6 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		self.assertEqual(doc.db_set.call_args[0][0]["taxjar_sync_retry_count"], 4)
 
 
-class TestIsTaxjarEnabledForCompany(UnitTestCase):
-	"""Live read backing the sidebar's not-enabled link (see
-	render_sync_status_sidebar_pill in taxjar_utils.js) - mirrors
-	enqueue_taxjar_sync/enqueue_taxjar_delete's own company_creates_transactions
-	check so the sidebar never disagrees with what submit/cancel actually do."""
-
-	def test_requires_sales_invoice_read_permission(self):
-		frappe.set_user("Guest")
-		try:
-			with self.assertRaises(frappe.PermissionError):
-				is_taxjar_enabled_for_company("_Test Company")
-		finally:
-			frappe.set_user("Administrator")
-
-	def test_delegates_to_company_creates_transactions(self):
-		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions",
-			return_value=True,
-		) as mock_check:
-			self.assertTrue(is_taxjar_enabled_for_company("_Test Company"))
-		mock_check.assert_called_once_with("_Test Company")
-
-	def test_false_when_company_creates_transactions_is_false(self):
-		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.company_scope",
-			return_value=_files_scope(False),
-		):
-			self.assertFalse(is_taxjar_enabled_for_company("_Test Company"))
-
-
-# ── Phase 3: sync_transaction_to_taxjar — cancelled invoice routing ──────────
-
-
 class TestSyncCancelledInvoice(UnitTestCase):
 
 	def test_cancelled_invoice_routes_to_delete(self):
@@ -6756,7 +6704,7 @@ class TestSalesInvoiceClientScript(UnitTestCase):
 		file, offering to do the one thing it cannot."""
 		js = self._read_js()
 		fn = js.split("function _add_taxjar_buttons(frm) {")[1].split("\n}\n")[0]
-		self.assertIn("is_taxjar_enabled_for_company", fn)
+		self.assertIn("taxjar_integration.scope(", fn)
 		self.assertIn("_add_sync_button(frm)", fn)
 		# The button itself is added only from inside that callback.
 		self.assertNotIn("add_custom_button", fn)
@@ -6808,7 +6756,7 @@ class TestResyncTransactionGate(UnitTestCase):
 		from taxjar_integration.taxjar_integration.taxjar_integration import resync_transaction
 
 		with patch(f"{self.MOD}.frappe.has_permission", side_effect=frappe.PermissionError), \
-		     patch(f"{self.MOD}.company_creates_transactions") as mock_flag:
+		     patch(f"{self.MOD}.company_scope") as mock_flag:
 			with self.assertRaises(frappe.PermissionError):
 				resync_transaction("SINV-TEST-001")
 
@@ -10466,98 +10414,20 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 		# A new document genuinely does just need saving.
 		self.assertIn("if (frm.is_new() || !frm.doc.company) {", fn)
-		self.assertIn("get_company_tax_status", fn)
+		self.assertIn(".scope(frm.doc.company)", fn)
 		self.assertIn("Sales tax calculation is turned off for {0}", fn)
 		self.assertIn('<a href="/app/taxjar-setup">', fn)
 		# Blank while the answer is in flight, rather than a guess that
 		# corrects itself a moment later.
 		self.assertIn("wrapper.empty();", fn)
-		# The company can change (or the form be swapped) mid-flight.
-		self.assertIn("if (frm.doc.name !== docname) return;", fn)
+		# The company can change (or the form be swapped) mid-flight, and a scope
+		# that failed to resolve must not be rendered as an answer.
+		self.assertIn("if (frm.doc.name !== docname || !status) return;", fn)
 
 		# The renderer delegates rather than deciding for itself.
 		cards_fn = js.split("taxjar_integration.render_status_cards = function (frm) {")[1].split("\n};")[0]
 		self.assertIn("taxjar_integration._render_empty_status(frm, wrapper);", cards_fn)
 		self.assertNotIn("Tax status will be available after saving.", cards_fn)
-
-	def test_calculates_tax_endpoint_answers_its_own_question(self):
-		"""Sending transactions and calculating tax are separate flags on the
-		same config; the matrix reports the second, the sidebar pill the first."""
-		import inspect
-
-		from taxjar_integration.taxjar_integration.taxjar_integration import (
-			get_company_tax_status,
-			is_taxjar_enabled_for_company,
-		)
-
-		self.assertIn(
-			"company_calculates_tax(company)", inspect.getsource(get_company_tax_status)
-		)
-		self.assertIn(
-			"company_creates_transactions(company)",
-			inspect.getsource(is_taxjar_enabled_for_company),
-		)
-
-		# Gated on Company: the matrix renders on Quotation and Sales Order too,
-		# so a Sales Invoice permission would be the wrong question to ask.
-		self.assertIn(
-			'frappe.has_permission("Company", "read", doc=company, throw=True)',
-			inspect.getsource(get_company_tax_status),
-		)
-
-	def test_calculates_tax_endpoint_requires_company_permission(self):
-		from taxjar_integration.taxjar_integration.taxjar_integration import (
-			get_company_tax_status,
-		)
-
-		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.has_permission",
-			side_effect=frappe.PermissionError,
-		):
-			self.assertRaises(
-				frappe.PermissionError, get_company_tax_status, "Any Co"
-			)
-
-	def test_tax_status_endpoint_reports_the_company_region(self):
-		"""set_sales_tax stops for a non-US company whatever the calculation
-		flag says, so the endpoint the matrix asks reports both - one round
-		trip, two different messages."""
-		from taxjar_integration.taxjar_integration.taxjar_integration import (
-			get_company_tax_status,
-		)
-
-		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.has_permission",
-			return_value=True,
-		), patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.get_region",
-			return_value="India",
-		), patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.company_calculates_tax",
-			return_value=True,
-		):
-			status = get_company_tax_status("Frappe Pvt Ltd")
-
-		self.assertEqual(status["country"], "India")
-		self.assertFalse(status["is_united_states"])
-		# Reported independently: the flag being on changes nothing for a
-		# company TaxJar does not cover.
-		self.assertTrue(status["calculates_tax"])
-
-		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.has_permission",
-			return_value=True,
-		), patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.get_region",
-			return_value="United States",
-		), patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.company_calculates_tax",
-			return_value=False,
-		):
-			status = get_company_tax_status("US Co")
-
-		self.assertTrue(status["is_united_states"])
-		self.assertFalse(status["calculates_tax"])
 
 	def test_empty_matrix_names_the_country_before_the_setting(self):
 		"""A company outside the United States is outside TaxJar entirely, and
@@ -10566,7 +10436,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 		js = self._read_js("taxjar_utils.js")
 		fn = js.split("taxjar_integration._render_empty_status = function (frm, wrapper) {")[1].split("\n};")[0]
 
-		self.assertIn("if (!status.is_united_states) {", fn)
+		self.assertIn('if (status.reason === "not_us") {', fn)
 		self.assertIn("TaxJar only handles United States sales tax", fn)
 		# The country is named where the company has one, and the sentence
 		# still reads without it where it does not.
@@ -10575,11 +10445,11 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 		# Region first, calculation switch second.
 		self.assertLess(
-			fn.index("is_united_states"), fn.index("status.calculates_tax")
+			fn.index('status.reason === "not_us"'), fn.index("!status.calculates")
 		)
 
 		# The setup link belongs to the switched-off message only.
-		region_branch = fn.split("if (!status.calculates_tax) {")[0]
+		region_branch = fn.split("if (!status.calculates) {")[0]
 		self.assertNotIn("/app/taxjar-setup", region_branch)
 
 	def test_empty_addresses_hide_their_section(self):
@@ -10758,10 +10628,10 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		Cancelled doc, which is never saved again."""
 		fn = self._dispatcher_fn()
 		self.assertIn(
-			'method: "taxjar_integration.taxjar_integration.taxjar_integration.is_taxjar_enabled_for_company"',
+			"taxjar_integration.scope(frm.doc.company)",
 			fn,
 		)
-		self.assertIn("args: { company: frm.doc.company }", fn)
+		self.assertIn("taxjar_integration.scope(frm.doc.company)", fn)
 
 	def test_dispatcher_requires_company(self):
 		fn = self._dispatcher_fn()
@@ -10821,14 +10691,21 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		States, so the link must check the company's country before rendering
 		rather than assuming every company it's asked about is a candidate."""
 		fn = self._not_enabled_fn()
-		self.assertIn('frappe.db.get_value("Company", frm.doc.company, "country")', fn)
-		self.assertIn('!== "United States"', fn)
+		self.assertNotIn(
+			'frappe.db.get_value("Company", frm.doc.company, "country")', fn,
+			"in_scope already means the company is in the United States - asking "
+			"again is a round trip whose answer cannot change the outcome",
+		)
 
-		# The guard must sit before the section is built/inserted, not after -
-		# otherwise the section briefly exists for a non-US company.
-		guard_pos = fn.index('!== "United States"')
-		section_pos = fn.index("taxjar-sync-sidebar-pill-section")
-		self.assertLess(guard_pos, section_pos)
+		# The decision moved up to the dispatcher, which only reaches this at all
+		# for a company already known to be in scope - so what matters now is that
+		# this renders unconditionally rather than re-deciding with a stale answer.
+		dispatcher = self._dispatcher_fn()
+		self.assertIn("if (!scope || !scope.in_scope) return;", dispatcher)
+		self.assertLess(
+			dispatcher.index("in_scope"),
+			dispatcher.index("_render_taxjar_not_enabled_link"),
+		)
 
 	def test_draft_shows_submit_to_sync_label(self):
 		fn = self._render_fn()
@@ -14329,16 +14206,15 @@ class TestTheInstrumentItself(TaxJarTestCase):
 				f"Sales Tax - {US_CALC.name}",
 			)
 
-	def test_existing_predicates_disagree_per_company(self):
+	def test_the_predicate_disagrees_per_company(self):
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
 		with self.scope_patches():
-			self.assertTrue(module.company_calculates_tax(US_CALC.name))
-			self.assertFalse(module.company_calculates_tax(US_FILE.name))
-			self.assertTrue(module.company_creates_transactions(US_FILE.name))
-			self.assertFalse(module.company_creates_transactions(US_CALC.name))
-			self.assertFalse(module.company_calculates_tax(US_OFF.name))
-			self.assertFalse(module.company_creates_transactions(US_OFF.name))
+			self.assertTrue(module.company_scope(US_CALC.name).calculates)
+			self.assertFalse(module.company_scope(US_FILE.name).calculates)
+			self.assertTrue(module.company_scope(US_FILE.name).files)
+			self.assertFalse(module.company_scope(US_CALC.name).files)
+			self.assertFalse(module.company_scope(US_OFF.name).uses_taxjar)
 
 
 class TestScopeMatrixTaxCalculation(TaxJarTestCase):

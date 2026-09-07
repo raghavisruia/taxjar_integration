@@ -1,5 +1,6 @@
 frappe.ui.form.on("Quotation", {
 	refresh(frm) {
+		taxjar_integration.toggle_taxjar_ui(frm);
 		taxjar_integration.render_shipping_taxability(frm);
 		taxjar_integration.render_tax_breakdown(frm);
 		taxjar_integration.render_status_cards(frm);
