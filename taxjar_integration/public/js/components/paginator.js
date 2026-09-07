@@ -38,7 +38,7 @@ taxjar_integration.Paginator = class Paginator {
 
 		const $pages = $('<div class="taxjar-paginator-pages"></div>').appendTo($nav);
 
-		this.add_step($pages, __("← Prev"), state.page - 1, state.page <= 1);
+		this.add_step($pages, { label: __("Prev"), icon: "chevron-left" }, state.page - 1, state.page <= 1);
 
 		// Numbers only earn their place once there is a choice to make.
 		if (total_pages > 1) {
@@ -48,34 +48,46 @@ taxjar_integration.Paginator = class Paginator {
 					continue;
 				}
 				$pages.append(frappe.ui.button({
-					label: String(entry), size: "xs",
+					label: String(entry),
 					variant: entry === state.page ? "solid" : "subtle",
 					onclick: () => entry !== state.page && this.on_page(entry),
 				}));
 			}
 		}
 
-		this.add_step($pages, __("Next →"), state.page + 1, state.page >= total_pages);
+		this.add_step(
+			$pages,
+			{ label: __("Next"), icon_right: "chevron-right" },
+			state.page + 1,
+			state.page >= total_pages
+		);
 	}
 
+	// The same segmented group the list view uses for its page length: the
+	// sizes are few and worth comparing at a glance, which a collapsed select
+	// hides. The current size is disabled - picking it again only reloads the
+	// page you are already on.
 	render_size_picker(state) {
 		const $picker = $('<div class="taxjar-paginator-size"></div>').appendTo(this.$wrapper);
-		const $select = $('<select class="form-control input-xs"></select>').appendTo($picker);
+		const $group = $('<div class="btn-group"></div>').appendTo($picker);
 
 		this.page_sizes.forEach((size) => {
-			$(`<option value="${size}" ${size === state?.page_size ? "selected" : ""}>${size}</option>`).appendTo(
-				$select
-			);
+			const current = size === state?.page_size;
+			$(`<button type="button" class="btn btn-default btn-sm btn-paging ${
+				current ? "btn-info" : ""
+			}" data-value="${size}" ${current ? "disabled" : ""}>${size}</button>`).appendTo($group);
 		});
 
 		// Changing the size reshuffles every boundary, so the old page number
 		// is meaningless - the caller resets to 1.
-		$select.on("change", (e) => this.on_page_size(parseInt(e.target.value, 10)));
+		$group.on("click", ".btn-paging", (e) =>
+			this.on_page_size(parseInt($(e.currentTarget).data("value"), 10))
+		);
 	}
 
-	add_step($pages, label, page, disabled) {
+	add_step($pages, opts, page, disabled) {
 		$pages.append(frappe.ui.button({
-			label, size: "xs", variant: "subtle", disabled,
+			...opts, variant: "subtle", disabled,
 			onclick: () => this.on_page(page),
 		}));
 	}

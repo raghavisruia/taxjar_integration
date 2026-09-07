@@ -291,8 +291,26 @@
 	// rows is set here.
 	padding: 14px 0 0;
 
-	.taxjar-paginator-size select {
-		width: 72px;
+	// Mirrors the list view's page-length group so the two read as the same
+	// control - frappe scopes those rules to .list-paging-area, whose top
+	// border we do not want here.
+	.taxjar-paginator-size .btn-group {
+		border: 1px solid var(--border-color);
+		border-radius: var(--radius);
+
+		.btn-paging {
+			background-color: var(--control-bg);
+		}
+
+		.btn-paging.btn-info {
+			background-color: var(--bg-color);
+			color: var(--text-color);
+			font-weight: var(--weight-medium);
+
+			&:not(:first-child) {
+				border-left: 1px solid var(--border-color);
+			}
+		}
 	}
 
 	// Where you are, stacked above the means of moving.
