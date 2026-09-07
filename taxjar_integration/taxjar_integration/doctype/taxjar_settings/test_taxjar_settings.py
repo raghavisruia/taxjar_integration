@@ -6155,6 +6155,50 @@ class TestValidateReturnAgainst(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True):
 			validate_return_against(doc, None)
 
+	def test_the_message_names_the_route_that_gets_it_right(self):
+		"""Naming the empty field leaves the reader to work out how to fill it;
+		a credit note started from the invoice carries the reference already,
+		so the message says to start there."""
+		doc = _make_doc()
+		doc.is_return = True
+		doc.return_against = None
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions",
+			return_value=True,
+		):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				validate_return_against(doc, None)
+
+		message = str(caught.exception)
+		self.assertIn(
+			"<b>Go to:</b> Sales Invoice<b> \u2192 </b>Create"
+			"<b> \u2192 </b>Return / Credit Note",
+			message,
+		)
+		self.assertIn("mandates providing reference to original invoice number", message)
+		self.assertNotIn("Return Against is mandatory", message)
+
+		# The reason leads; the route to take follows it.
+		self.assertLess(
+			message.index("mandates providing reference"), message.index("Go to:")
+		)
+		# Rendered as HTML in the dialog, so the breaks and the emphasis are
+		# tags - a newline there is just whitespace - and both are on
+		# clean_html()'s allowlist, unlike (say) an <img>.
+		self.assertIn("<br>", message)
+		# A blank line between the two, so the path stands on its own.
+		self.assertIn(
+			"credit note/return transactions.</b><br><br><b>Go to:</b>", message
+		)
+		self.assertNotIn("Please follow the steps", message)
+		self.assertIn(
+			"<b>TaxJar mandates providing reference to original invoice number "
+			"for credit note/return transactions.</b>",
+			message,
+		)
+		self.assertNotIn("\n", message)
+
 
 # ── Phase 3: enqueue_taxjar_sync / enqueue_taxjar_delete ─────────────────────
 

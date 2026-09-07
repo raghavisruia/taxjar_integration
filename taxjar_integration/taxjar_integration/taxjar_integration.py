@@ -1078,10 +1078,31 @@ def validate_return_against(doc, method):
 	if not company_creates_transactions(doc.company):
 		return
 	if not doc.return_against:
+		# Why first, then the route that gets it right: the reference is not an
+		# extra step to remember but the reason to start from the invoice at
+		# all, since TaxJar files a credit note against the transaction it
+		# reverses.
+		#
+		# <br> and <b> rather than newlines and indentation - the message is
+		# rendered as HTML in the dialog, where a newline is just whitespace.
+		# Both tags survive clean_html(), which strips anything off its
+		# allowlist. Sentence per translatable string, with the markup outside
+		# them.
 		frappe.throw(
-			_(
-				"Return Against is mandatory for credit notes when TaxJar transaction reporting is enabled. "
-				"Please link the original Sales Invoice."
+			"<b>"
+			+ _(
+				"TaxJar mandates providing reference to original invoice number "
+				"for credit note/return transactions."
+			)
+			+ "</b><br><br>"
+			+ "<b>"
+			+ _("Go to:")
+			+ "</b> "
+			# Joined rather than written as one string: the arrows are bold so
+			# the three stops in the path stand apart at a glance, and each stop
+			# is a label ERPNext already translates on its own.
+			+ "<b> \u2192 </b>".join(
+				[_("Sales Invoice"), _("Create"), _("Return / Credit Note")]
 			),
 			title=_("TaxJar: Missing Return Reference"),
 		)
