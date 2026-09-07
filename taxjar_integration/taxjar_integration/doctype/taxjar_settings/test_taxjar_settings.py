@@ -11764,20 +11764,54 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 
 	def test_connect_failure_reason_surfaces_on_the_token_field(self):
 		"""A failed connection has to say why. It no longer does that through a
-		bespoke info popover beside the action slot - the reason is set on the
-		token field itself (df.invalid + set_description, frappe's native
-		invalid-field primitive), so the message sits next to the input the user
-		has to correct rather than behind a second click."""
+		bespoke info popover beside the action slot - the input is marked
+		invalid (df.invalid + set_invalid, frappe's native invalid-field
+		primitive) and the reason is written under it, so the message sits next
+		to the input the user has to correct rather than behind a second
+		click."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
 		# Every render pushes the current error (or clears it) onto the field.
 		self.assertIn("this._set_token_error(entry, entry.lastError);", fn)
 		setter = js.split("_set_token_error(entry, message) {")[1].split("\n\t}\n")[0]
 		self.assertIn("df.invalid", setter)
-		self.assertIn("set_description", setter)
+		self.assertIn('.find(".ts-cred-error").text(message || "")', setter)
 		# The old popover machinery is gone, not merely unused.
 		self.assertNotIn("_info_btn_html", js)
 		self.assertNotIn("_toggle_info_popover", js)
+
+	def test_connect_failure_reason_gets_its_own_row_line_not_the_fields_help_box(self):
+		"""Regression guard: the Retry button sat level with the error text
+		instead of the input it retries.
+
+		set_description() renders into the control's own .help-box, inside the
+		token column - so an error made that column taller, and the tail
+		bottom-aligns to the row, which dragged the action slot (and the x
+		beside it) down below the inputs. The message therefore gets its own
+		line in the row: the fields' grid track stays label+input tall however
+		long the message runs, keeping the tail's bottom anchor on the inputs'
+		bottom edge. It can't simply be relocated instead - set_description()
+		looks the .help-box up within the control wrapper.
+		"""
+		js = self._js()
+		add_card = js.split("_add_credential_card(cred) {")[1].split("\n\t_render_cred_action")[0]
+		# A sibling of the two field slots and the tail, not nested in either.
+		row = add_card.split('<div class="ts-cred-row">')[1].split("`)")[0]
+		self.assertIn('<div class="ts-cred-error"></div>', row)
+		setter = js.split("_set_token_error(entry, message) {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("set_description", setter)
+
+		css = self._setup_css()
+		row_rule = css.split(".taxjar-setup .ts-cred-row {")[1].split("}")[0]
+		# Grid, so the error line is a track of its own rather than a fourth
+		# item widening or growing the field row.
+		self.assertIn("display: grid;", row_rule)
+		self.assertIn("grid-template-columns: 1fr 1fr auto;", row_rule)
+		error_rule = css.split(".taxjar-setup .ts-cred-row .ts-cred-error {")[1].split("}")[0]
+		# Column 2 - under the token input, where its help-box would have been.
+		self.assertIn("grid-column: 2;", error_rule)
+		# An empty grid item still contributes the row-gap above it.
+		self.assertIn(".ts-cred-error:empty { display: none; }", css)
 
 	def test_retry_state_is_visually_distinct_from_the_neutral_states(self):
 		"""The failed state needed to read as failed, not as another neutral

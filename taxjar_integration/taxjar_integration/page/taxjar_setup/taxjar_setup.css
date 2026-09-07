@@ -288,28 +288,39 @@
    layout is just .ts-card-b's own base flex-column/padding/gap - no extra
    rule needed. */
 
-/* Each credential row: Company / Live token / action slot side by side.
-   flex-start (not flex-end) - Company and Live token don't always have the
-   same height (a saved token's row used to be one line taller thanks to a
-   "Leave blank to keep the saved token." description, since removed, but
-   the underlying risk remains: any per-field description throws bottom-
-   alignment off and visibly staggers the two labels). Top-aligning the
-   labels is what stays correct regardless of which field ends up taller;
-   the tail (action slot + remove button) opts out via align-self: flex-end
-   so it lines up with the bottom of the input boxes themselves (Company
-   and Live token now being equal height, their shared bottom edge is a
-   reliable anchor) rather than align-self: center, which centers against
-   the row's full label+input span and visibly floats up near the label line.
+/* Each credential row: Company / Live token / action slot side by side, with
+   a second line under the token column for a failed connection's reason.
+   A grid, not a flex row, precisely so that message gets a line of its own:
+   as the token field's own description it grew that column, and the tail
+   bottom-aligns to the row, so the Retry button slid down level with the
+   error text instead of the input it retries (see _set_token_error).
+   flex-start (not flex-end) for the fields - Company and Live token don't
+   always have the same height (a saved token's row used to be one line taller
+   thanks to a "Leave blank to keep the saved token." description, since
+   removed, but the underlying risk remains: anything that grows one field
+   throws bottom-alignment off and visibly staggers the two labels).
+   Top-aligning the labels is what stays correct regardless of which field
+   ends up taller; the tail (action slot + remove button) opts out via
+   align-self: flex-end so it lines up with the bottom of the input boxes
+   themselves (Company and Live token now being equal height, their shared
+   bottom edge is a reliable anchor) rather than align-self: center, which
+   centers against the row's full label+input span and visibly floats up near
+   the label line. Both keep working here because the error line is a track of
+   its own: the fields' track stays label+input tall however long the message
+   runs, so the tail's bottom anchor is still the inputs' bottom edge.
    Divider between rows instead of each row being its own bordered card,
    since there's no longer a per-row header to divide. Only padding-top (not
    margin-top) on the divider rule - .ts-cred-rows (.ts-card-b) already
    contributes its own 12px flex gap between rows, and adding a margin on
    top of that would double-stack the same way .ts-card-b .form-group's
    margin fix above avoids doing. */
-.taxjar-setup .ts-cred-row { display: flex; align-items: flex-start; gap: 12px; }
+.taxjar-setup .ts-cred-row {
+	display: grid; grid-template-columns: 1fr 1fr auto; align-items: flex-start;
+	column-gap: 12px; row-gap: 6px;
+}
 .taxjar-setup .ts-cred-row + .ts-cred-row { padding-top: 12px; border-top: 1px solid var(--border-color); }
 .taxjar-setup .ts-cred-row .ts-field-company,
-.taxjar-setup .ts-cred-row .ts-field-token { flex: 1; min-width: 0; }
+.taxjar-setup .ts-cred-row .ts-field-token { min-width: 0; }
 /* Fixed basis, NOT flex: none - the slot's contents change per state (Connect
    button / Connecting… / a single check-or-retry icon), and a content-sized
    slot hands a different width to the two flex: 1 fields in every state. That
@@ -328,17 +339,20 @@
    A margin nudge on the button would have to be re-guessed for each of
    those, and again for any font or translation change. */
 .taxjar-setup .ts-cred-row .ts-cred-tail {
-	flex: none; display: flex; align-items: center; gap: 12px; align-self: flex-end;
+	display: flex; align-items: center; gap: 12px; align-self: flex-end;
 }
 .taxjar-setup .ts-cred-row .ts-cred-action {
 	flex: 0 0 84px; display: flex; align-items: center; gap: 6px;
 }
-/* Composes two of frappe's own primitives rather than inventing an error
-   style of our own: has-error/has-error-invalid (set via df.invalid +
-   set_invalid(), see _set_token_error) already turns the input's border red
-   (controls.scss); this just carries that same signal onto the description
-   text (.help-box) that set_description() renders below it. */
-.taxjar-setup .frappe-control.has-error .help-box { color: var(--error-color); }
+/* The failure reason, sitting in the token column's second line - exactly
+   where that field's own .help-box would have put it, and carrying the same
+   red as the input border frappe's has-error/has-error-invalid gives it
+   (controls.scss), so the two read as one signal. :empty rather than a
+   toggled class: an empty grid item would still contribute its row-gap. */
+.taxjar-setup .ts-cred-row .ts-cred-error {
+	grid-column: 2; font-size: var(--text-sm); color: var(--error-color);
+}
+.taxjar-setup .ts-cred-row .ts-cred-error:empty { display: none; }
 /* .ts-card-b's default align-items: stretch would otherwise stretch the
    "Add another company" button to the card's full width, since it's the
    row's only child. */

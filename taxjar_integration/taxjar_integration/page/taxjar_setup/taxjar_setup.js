@@ -12,8 +12,9 @@
 // the nexus banner, empty/loading states — is frappe's Espresso desk component
 // library (frappe.ui.button/.badge/.tab_buttons/.alert/.empty_state/.skeleton,
 // demoed live in Component Explorer, /app/component-explorer). A connection
-// failure surfaces as the token field's own error text (df.invalid +
-// set_description — frappe's native invalid-field primitive), not a popover.
+// failure surfaces as the token field's own error text (df.invalid — frappe's
+// native invalid-field primitive — plus a message line under the field), not a
+// popover.
 // Only the card layout around all of this is custom CSS. Connect, Accounts and Features
 // persist per step (Continue = collect -> save API -> reload state -> advance),
 // so the guide is resumable; Nexus persists via its own Fetch action instead of
@@ -457,6 +458,7 @@ class TaxJarSetup {
 					<div class="ts-cred-action"></div>
 					<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
 				</div>
+				<div class="ts-cred-error"></div>
 			</div>
 		`).appendTo(this.$body.find(".ts-cred-rows"));
 
@@ -621,17 +623,23 @@ class TaxJarSetup {
 		return $badge;
 	}
 
-	// Failure reason as the token field's own error, not a separate popover -
-	// df.invalid + set_invalid() is frappe's native invalid-field primitive
-	// (the same one a required/malformed field uses; see base_input.js), and
-	// set_description() is the same help-text slot every other field on this
-	// page already uses - .taxjar-setup .has-error .help-box (see the CSS)
-	// is what turns it red.
+	// Failure reason on the token field itself, not a separate popover. The red
+	// border is frappe's native invalid-field primitive (df.invalid +
+	// set_invalid(), the same one a required/malformed field uses; see
+	// base_input.js). The message is NOT set_description(), though: that renders
+	// into the control's own .help-box, which made the token column taller than
+	// Company - and since the action slot bottom-aligns to the row, the Retry
+	// button slid down level with the error text instead of the input it
+	// retries. It can't just be moved either; set_description() looks the
+	// .help-box up inside the control wrapper. So the message gets its own line
+	// in the row (.ts-cred-error), styled and placed as that help-box was.
 	_set_token_error(entry, message) {
 		const tokenCtrl = entry.controls.token;
 		tokenCtrl.df.invalid = !!message;
 		tokenCtrl.set_invalid();
-		tokenCtrl.set_description(message || "");
+		// .text(), not .html() - the message is server-supplied (TaxJar's own
+		// error text for a rejected token), and :empty is what hides the line.
+		entry.$card.find(".ts-cred-error").text(message || "");
 	}
 
 	_remove_credential_card(entry, cred) {
