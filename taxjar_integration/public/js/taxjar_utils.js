@@ -747,25 +747,53 @@ taxjar_integration._render_empty_status = function (frm, wrapper) {
 
 	frappe
 		.xcall(
-			"taxjar_integration.taxjar_integration.taxjar_integration.does_company_calculate_tax",
+			"taxjar_integration.taxjar_integration.taxjar_integration.get_company_tax_status",
 			{ company: frm.doc.company }
 		)
-		.then((calculates_tax) => {
+		.then((status) => {
 			if (frm.doc.name !== docname) return;
 
-			if (calculates_tax) {
-				wrapper.html(after_saving);
+			const company = frappe.utils.escape_html(frm.doc.company);
+
+			// TaxJar computes US sales tax, so a company registered anywhere
+			// else has no tax status here and never will - said before the
+			// calculation switch, which is the reason that would still be true
+			// if the switch were on. No "Configure TaxJar" link either: the
+			// setup page holds nothing that can resolve this, and the country
+			// is changed on the Company, not in TaxJar.
+			if (!status.is_united_states) {
+				const country = status.country && frappe.utils.escape_html(status.country);
+				wrapper.html(`
+					<p class="text-muted">
+						${
+							country
+								? __(
+										"{0} is based in {1}, and TaxJar only handles United States sales tax, so no TaxJar features apply to this document.",
+										[company, country]
+								  )
+								: __(
+										"{0} is not based in the United States, and TaxJar only handles United States sales tax, so no TaxJar features apply to this document.",
+										[company]
+								  )
+						}
+					</p>
+				`);
 				return;
 			}
 
-			wrapper.html(`
-				<p class="text-muted">
-					${__("Sales tax calculation is turned off for {0}, so there is no tax status to show.", [
-						frappe.utils.escape_html(frm.doc.company),
-					])}
-					<a href="/app/taxjar-setup">${__("Configure TaxJar")} \u2192</a>
-				</p>
-			`);
+			if (!status.calculates_tax) {
+				wrapper.html(`
+					<p class="text-muted">
+						${__("Sales tax calculation is turned off for {0}, so there is no tax status to show.", [
+							company,
+						])}
+						<a href="/app/taxjar-setup">${__("Configure TaxJar")} \u2192</a>
+					</p>
+				`);
+				return;
+			}
+
+			wrapper.html(after_saving);
 		});
 };
 
@@ -960,15 +988,31 @@ taxjar_integration._inject_status_card_styles = function () {
 	document.head.appendChild(style);
 };
 
+// Show or hide a whole Section Break by fieldname, heading included. Emptying
+// an HTML field inside a section leaves its heading behind, which announces a
+// section that then says nothing - the state a non-US company's TaxJar tab was
+// permanently in. Sections live in layout.sections_dict, not in fields_dict
+// alongside the controls, and carry their own show/hide.
+taxjar_integration._toggle_section = function (frm, fieldname, show) {
+	const section = frm.layout && frm.layout.sections_dict && frm.layout.sections_dict[fieldname];
+	if (!section) return;
+	show ? section.show() : section.hide();
+};
+
 taxjar_integration.render_addresses = function (frm) {
 	if (!frm.fields_dict.taxjar_addresses_html) return;
 	const wrapper = frm.fields_dict.taxjar_addresses_html.$wrapper;
 
+	// Nothing to show: neither address is stored until set_sales_tax has run,
+	// and for a company outside the United States it never does. Hidden
+	// outright rather than emptied, so the heading goes with it.
 	if (!frm.doc.taxjar_ship_from && !frm.doc.taxjar_ship_to) {
 		wrapper.html("");
+		taxjar_integration._toggle_section(frm, "taxjar_addresses_section", false);
 		return;
 	}
 
+	taxjar_integration._toggle_section(frm, "taxjar_addresses_section", true);
 	taxjar_integration._inject_status_card_styles();
 
 	const from_text = frm.doc.taxjar_ship_from || __("Not set");

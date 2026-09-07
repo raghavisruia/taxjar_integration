@@ -9744,7 +9744,7 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 		# A new document genuinely does just need saving.
 		self.assertIn("if (frm.is_new() || !frm.doc.company) {", fn)
-		self.assertIn("does_company_calculate_tax", fn)
+		self.assertIn("get_company_tax_status", fn)
 		self.assertIn("Sales tax calculation is turned off for {0}", fn)
 		self.assertIn('<a href="/app/taxjar-setup">', fn)
 		# Blank while the answer is in flight, rather than a guess that
@@ -9764,12 +9764,12 @@ class TestTaxBreakdownJS(UnitTestCase):
 		import inspect
 
 		from taxjar_integration.taxjar_integration.taxjar_integration import (
-			does_company_calculate_tax,
+			get_company_tax_status,
 			is_taxjar_enabled_for_company,
 		)
 
 		self.assertIn(
-			"company_calculates_tax(company)", inspect.getsource(does_company_calculate_tax)
+			"company_calculates_tax(company)", inspect.getsource(get_company_tax_status)
 		)
 		self.assertIn(
 			"company_creates_transactions(company)",
@@ -9780,12 +9780,12 @@ class TestTaxBreakdownJS(UnitTestCase):
 		# so a Sales Invoice permission would be the wrong question to ask.
 		self.assertIn(
 			'frappe.has_permission("Company", "read", doc=company, throw=True)',
-			inspect.getsource(does_company_calculate_tax),
+			inspect.getsource(get_company_tax_status),
 		)
 
 	def test_calculates_tax_endpoint_requires_company_permission(self):
 		from taxjar_integration.taxjar_integration.taxjar_integration import (
-			does_company_calculate_tax,
+			get_company_tax_status,
 		)
 
 		with patch(
@@ -9793,8 +9793,91 @@ class TestTaxBreakdownJS(UnitTestCase):
 			side_effect=frappe.PermissionError,
 		):
 			self.assertRaises(
-				frappe.PermissionError, does_company_calculate_tax, "Any Co"
+				frappe.PermissionError, get_company_tax_status, "Any Co"
 			)
+
+	def test_tax_status_endpoint_reports_the_company_region(self):
+		"""set_sales_tax stops for a non-US company whatever the calculation
+		flag says, so the endpoint the matrix asks reports both - one round
+		trip, two different messages."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			get_company_tax_status,
+		)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.has_permission",
+			return_value=True,
+		), patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.get_region",
+			return_value="India",
+		), patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_calculates_tax",
+			return_value=True,
+		):
+			status = get_company_tax_status("Frappe Pvt Ltd")
+
+		self.assertEqual(status["country"], "India")
+		self.assertFalse(status["is_united_states"])
+		# Reported independently: the flag being on changes nothing for a
+		# company TaxJar does not cover.
+		self.assertTrue(status["calculates_tax"])
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.has_permission",
+			return_value=True,
+		), patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.get_region",
+			return_value="United States",
+		), patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_calculates_tax",
+			return_value=False,
+		):
+			status = get_company_tax_status("US Co")
+
+		self.assertTrue(status["is_united_states"])
+		self.assertFalse(status["calculates_tax"])
+
+	def test_empty_matrix_names_the_country_before_the_setting(self):
+		"""A company outside the United States is outside TaxJar entirely, and
+		no setting resolves it - so that is what an empty matrix says, and it
+		says it without a link to a setup page that cannot help."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration._render_empty_status = function (frm, wrapper) {")[1].split("\n};")[0]
+
+		self.assertIn("if (!status.is_united_states) {", fn)
+		self.assertIn("TaxJar only handles United States sales tax", fn)
+		# The country is named where the company has one, and the sentence
+		# still reads without it where it does not.
+		self.assertIn("{0} is based in {1}", fn)
+		self.assertIn("{0} is not based in the United States", fn)
+
+		# Region first, calculation switch second.
+		self.assertLess(
+			fn.index("is_united_states"), fn.index("status.calculates_tax")
+		)
+
+		# The setup link belongs to the switched-off message only.
+		region_branch = fn.split("if (!status.calculates_tax) {")[0]
+		self.assertNotIn("/app/taxjar-setup", region_branch)
+
+	def test_empty_addresses_hide_their_section(self):
+		"""Emptying the HTML field left the "Addresses" heading announcing a
+		section with nothing under it - permanently so for a non-US company,
+		which never gets a ship-from or ship-to."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration.render_addresses = function (frm) {")[1].split("\n};")[0]
+
+		self.assertIn(
+			'taxjar_integration._toggle_section(frm, "taxjar_addresses_section", false);', fn
+		)
+		self.assertIn(
+			'taxjar_integration._toggle_section(frm, "taxjar_addresses_section", true);', fn
+		)
+
+		# Sections are not in fields_dict with the controls.
+		toggle = js.split("taxjar_integration._toggle_section = function (frm, fieldname, show) {")[1].split("\n};")[0]
+		self.assertIn("frm.layout.sections_dict[fieldname]", toggle)
+		self.assertIn("section.show() : section.hide()", toggle)
 
 	def test_status_cards_use_skipped_instead_of_na(self):
 		js = self._read_js("taxjar_utils.js")

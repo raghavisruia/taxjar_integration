@@ -1881,9 +1881,16 @@ def company_creates_transactions(company, config=None):
 
 
 @frappe.whitelist()
-def does_company_calculate_tax(company: str):
-	"""Live read for the Tax Applicability Matrix (render_status_cards in
-	taxjar_utils.js): whether set_sales_tax would run for this company at all.
+def get_company_tax_status(company: str):
+	"""Live read for the Tax Applicability Matrix (_render_empty_status in
+	taxjar_utils.js): why set_sales_tax would not run for this company at all.
+
+	set_sales_tax stops for two quite different reasons, and an empty matrix
+	that names the wrong one sends the reader to the wrong place: a company
+	outside the United States is outside TaxJar's remit entirely, and no
+	setting on the setup page will change that, whereas calculation being
+	switched off is a setting the reader can go and turn on. So both are
+	reported, and the caller says something different for each.
 
 	Deliberately a different question from is_taxjar_enabled_for_company below,
 	which the sidebar pill asks - that one is about sending transactions, this
@@ -1894,7 +1901,12 @@ def does_company_calculate_tax(company: str):
 	company the caller can already see.
 	"""
 	frappe.has_permission("Company", "read", doc=company, throw=True)
-	return company_calculates_tax(company)
+	country = get_region(company)
+	return {
+		"country": country,
+		"is_united_states": country == "United States",
+		"calculates_tax": company_calculates_tax(company),
+	}
 
 
 @frappe.whitelist()
