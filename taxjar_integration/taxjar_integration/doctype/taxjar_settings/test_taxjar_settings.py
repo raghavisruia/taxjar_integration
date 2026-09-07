@@ -5,7 +5,7 @@ import json
 import unittest
 from datetime import datetime
 
-from unittest.mock import DEFAULT, MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, call, patch
 
 import frappe
 from frappe.tests import UnitTestCase
@@ -206,6 +206,24 @@ class _FakeDoc:
 # unrelated work - loading a Meta, resolving a custom field. A test stubbing
 # get_value must let these through.
 _FRAMEWORK_DOCTYPES = frozenset({"DocType", "DocField", "Custom Field", "Property Setter", "DocPerm"})
+
+
+def _files_scope(files=True, calculates=False, in_scope=True, reason=None, config=None):
+	"""A CompanyScope for tests whose subject is a hook's branching, not the
+	predicate itself.
+
+	The hooks used to ask company_creates_transactions() and now ask
+	company_scope().files, so these patches moved with them. Building a real
+	CompanyScope rather than a MagicMock keeps the substitution honest: a mock
+	would answer True to every attribute, including in_scope, and a hook that
+	started reading a different one would go on passing.
+	"""
+	from taxjar_integration.taxjar_integration.taxjar_integration import CompanyScope
+
+	return CompanyScope(
+		company="Test Co", in_scope=in_scope, calculates=calculates,
+		files=files, config=config, reason=reason,
+	)
 
 
 def _scalar_get_value(value):
@@ -818,9 +836,19 @@ class TestPreviewForeignTaxRows(UnitTestCase):
 		}
 
 	def _call(self, doc_data, calculates_tax=True, region="United States"):
-		mock_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+		# Drives company_scope() through its own inputs - the master switch, the
+		# config row's flag and the company's country - rather than stubbing the
+		# predicate. Patching company_calculates_tax here stopped controlling
+		# anything once the endpoint moved onto the scope predicate, and a mock
+		# that controls nothing is worse than no mock at all.
+		mock_config = MagicMock(
+			tax_account_head="Sales Tax - TC",
+			shipping_account_head="Freight - TC",
+			taxjar_calculate_tax=1 if calculates_tax else 0,
+			taxjar_create_transactions=0,
+		)
 		with patch(f"{self.MOD}.frappe.has_permission"), \
-		     patch(f"{self.MOD}.company_calculates_tax", return_value=calculates_tax), \
+		     patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1), \
 		     patch(f"{self.MOD}.get_region", return_value=region), \
 		     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
 		     patch(f"{self.MOD}.frappe.db.get_value", side_effect=_scalar_get_value("Handling Charges")):
@@ -891,14 +919,25 @@ class TestPreviewForeignTaxRows(UnitTestCase):
 			result = preview_foreign_tax_rows(doc_data)
 		self.assertEqual(result, {"foreign_rows": []})
 
-	def test_checks_read_permission_on_the_document_doctype(self):
+	def test_checks_read_permission_on_the_doctype_and_the_company(self):
+		"""Both come out of the payload, so both are the caller's word.
+
+		Checking only the doctype let a caller name one they may read and a
+		company they may not, and learn from the shape of the answer whether
+		that company calculates tax."""
 		doc_data = self._doc_data()
 		with patch(f"{self.MOD}.frappe.has_permission") as mock_perm, \
-		     patch(f"{self.MOD}.company_calculates_tax", return_value=True), \
+		     patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1), \
 		     patch(f"{self.MOD}.get_region", return_value="United States"), \
 		     patch(f"{self.MOD}.get_company_config", return_value=MagicMock()):
 			preview_foreign_tax_rows(doc_data)
-		mock_perm.assert_called_once_with("Sales Invoice", "read", throw=True)
+
+		self.assertIn(
+			call("Sales Invoice", "read", throw=True), mock_perm.call_args_list
+		)
+		self.assertIn(
+			call("Company", "read", doc="Test Co", throw=True), mock_perm.call_args_list
+		)
 
 	def test_accepts_a_json_string_as_well_as_a_dict(self):
 		"""frappe.xcall may deliver the form field as a raw JSON string rather
@@ -1480,6 +1519,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_client = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
@@ -1502,6 +1542,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
@@ -1527,6 +1568,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0, "amount": 1650.0}), \
@@ -1546,6 +1588,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
@@ -1568,6 +1611,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=mock_config), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
@@ -1584,6 +1628,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10.0}), \
@@ -3156,7 +3201,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_customer.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call") as mock_log, \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set:
@@ -3180,7 +3226,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_customer.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set:
@@ -3199,7 +3246,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.update_customer.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value"):
@@ -3222,7 +3270,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client.update_customer.side_effect = err
 		mock_client.create_customer.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set:
@@ -3273,7 +3322,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_customer.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value"):
@@ -3288,7 +3338,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_customer.return_value = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value"):
@@ -3305,7 +3356,8 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.create_customer.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
@@ -3416,6 +3468,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue, \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status, \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msgprint:
@@ -3447,6 +3500,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
 		mock_enqueue.assert_called_once()
@@ -3460,6 +3514,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
 		mock_enqueue.assert_called_once()
@@ -3481,6 +3536,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
 		mock_enqueue.assert_called_once()
@@ -3494,6 +3550,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
 
@@ -3510,6 +3567,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
 
@@ -3825,6 +3883,7 @@ class TestExclusionReason(UnitTestCase):
 			self.assertEqual(transaction_exclusion_reason("_Test Company"), EXCLUSION_TAXJAR_DISABLED)
 
 		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{self.MOD}.get_region", return_value="United States"), \
 		     patch(f"{self.MOD}.get_company_config", return_value=None):
 			self.assertEqual(
 				transaction_exclusion_reason("_Test Company"), EXCLUSION_SYNC_NOT_ENABLED
@@ -3836,7 +3895,11 @@ class TestExclusionReason(UnitTestCase):
 		)
 
 		config = frappe._dict(taxjar_create_transactions=1)
-		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1):
+		# The company has to be one TaxJar can serve before "it does file" is even
+		# a coherent answer - the reason now comes from company_scope, which asks
+		# that first.
+		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{self.MOD}.get_region", return_value="United States"):
 			self.assertIsNone(transaction_exclusion_reason("_Test Company", config))
 
 	def test_it_is_the_same_question_company_creates_transactions_asks(self):
@@ -3980,7 +4043,7 @@ class TestTransactionsPageRealtime(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		with patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
 		     patch(f"{self.MOD}.get_client", return_value=MagicMock()), \
 		     patch(f"{self.MOD}.frappe.enqueue"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
@@ -3997,7 +4060,7 @@ class TestTransactionsPageRealtime(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		with patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
 		     patch(f"{self.MOD}.get_client", return_value=MagicMock()), \
 		     patch(f"{self.MOD}.frappe.enqueue"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
@@ -4017,7 +4080,7 @@ class TestTransactionsPageRealtime(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch(f"{self.MOD}.company_creates_transactions", return_value=False), \
+		with patch(f"{self.MOD}.company_scope", return_value=_files_scope(False)), \
 		     patch(f"{self.MOD}.transaction_exclusion_reason", return_value="TaxJar Disabled"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
 			enqueue_taxjar_sync(doc, None)
@@ -4036,7 +4099,7 @@ class TestTransactionsPageRealtime(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		with patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
 		     patch(f"{self.MOD}.get_client", return_value=None), \
 		     patch(f"{self.MOD}.frappe.enqueue"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
@@ -5666,6 +5729,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
@@ -5682,6 +5746,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_refund.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 0, "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
@@ -5699,6 +5764,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 0, "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
@@ -5716,6 +5782,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
@@ -5732,6 +5799,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
@@ -5768,6 +5836,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
@@ -5787,6 +5856,7 @@ class TestSyncTransactionCompliance(UnitTestCase):
 		mock_client.create_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
@@ -5808,6 +5878,7 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 		mock_client.delete_order.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
@@ -5823,6 +5894,7 @@ class TestDeleteTransactionCompliance(UnitTestCase):
 		mock_client.delete_refund.return_value = MagicMock()
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
@@ -5935,7 +6007,8 @@ class TestValidateTaxRequestOutage(UnitTestCase):
 		mock_client = MagicMock()
 		mock_client.tax_for_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.msgprint") as mock_msg:
 			result = validate_tax_request({"dummy": True})
@@ -5959,6 +6032,7 @@ class TestSyncTransactionOutage(UnitTestCase):
 		mock_client.create_order.side_effect = taxjar.exceptions.TaxJarConnectionError("timeout")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"shipping": 10, "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_sync_status") as mock_status, \
@@ -6301,21 +6375,21 @@ class TestValidateReturnAgainst(UnitTestCase):
 		doc = _make_doc()
 		doc.is_return = True
 		doc.return_against = None
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(False)):
 			validate_return_against(doc, None)
 
 	def test_throws_when_return_without_return_against(self):
 		doc = _make_doc()
 		doc.is_return = True
 		doc.return_against = None
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)):
 			self.assertRaises(frappe.ValidationError, validate_return_against, doc, None)
 
 	def test_passes_when_return_with_return_against(self):
 		doc = _make_doc()
 		doc.is_return = True
 		doc.return_against = "SINV-ORIG-001"
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)):
 			validate_return_against(doc, None)
 
 	def test_the_message_names_the_route_that_gets_it_right(self):
@@ -6327,8 +6401,8 @@ class TestValidateReturnAgainst(UnitTestCase):
 		doc.return_against = None
 
 		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions",
-			return_value=True,
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_scope",
+			return_value=_files_scope(True),
 		):
 			with self.assertRaises(frappe.ValidationError) as caught:
 				validate_return_against(doc, None)
@@ -6376,7 +6450,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(False)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.transaction_exclusion_reason", return_value="Transaction Sync not enabled for company"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
@@ -6400,7 +6474,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
@@ -6438,7 +6512,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set_value, \
@@ -6454,7 +6528,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		doc.db_set = MagicMock()
 		mock_client = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
@@ -6476,7 +6550,7 @@ class TestEnqueueTaxjarSync(UnitTestCase):
 		doc.db_set = MagicMock()
 		mock_client = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
@@ -6491,7 +6565,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 
 	def test_skips_when_create_transactions_disabled(self):
 		doc = _make_doc()
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(False)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_delete(doc, None)
 		mock_enqueue.assert_not_called()
@@ -6501,7 +6575,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc.db_set = MagicMock()
 		mock_client = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_delete(doc, None)
@@ -6522,7 +6596,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
@@ -6541,7 +6615,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
@@ -6553,7 +6627,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc = _make_doc()
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
@@ -6574,7 +6648,7 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		doc.taxjar_sync_retry_count = 3
 		doc.db_set = MagicMock()
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
@@ -6607,8 +6681,8 @@ class TestIsTaxjarEnabledForCompany(UnitTestCase):
 
 	def test_false_when_company_creates_transactions_is_false(self):
 		with patch(
-			"taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions",
-			return_value=False,
+			"taxjar_integration.taxjar_integration.taxjar_integration.company_scope",
+			return_value=_files_scope(False),
 		):
 			self.assertFalse(is_taxjar_enabled_for_company("_Test Company"))
 
@@ -6710,7 +6784,7 @@ class TestResyncTransactionGate(UnitTestCase):
 
 		with patch(f"{self.MOD}.frappe.has_permission"), \
 		     patch(f"{self.MOD}.frappe.db.get_value", return_value="_Test Company"), \
-		     patch(f"{self.MOD}.company_creates_transactions", return_value=False), \
+		     patch(f"{self.MOD}.company_scope", return_value=_files_scope(False)), \
 		     patch(f"{self.MOD}.sync_transaction_to_taxjar") as mock_sync:
 			with self.assertRaises(frappe.ValidationError):
 				resync_transaction("SINV-TEST-001")
@@ -6722,7 +6796,7 @@ class TestResyncTransactionGate(UnitTestCase):
 
 		with patch(f"{self.MOD}.frappe.has_permission"), \
 		     patch(f"{self.MOD}.frappe.db.get_value", return_value="_Test Company"), \
-		     patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		     patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
 		     patch(f"{self.MOD}.sync_transaction_to_taxjar") as mock_sync:
 			resync_transaction("SINV-TEST-001")
 
@@ -6760,7 +6834,7 @@ class TestRetryFailedTaxjarSyncs(UnitTestCase):
 			frappe._dict(name="SINV-002", company="Co B"),
 		]
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.tasks.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.company_scope", return_value=_files_scope(True)), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=invoices), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_syncs()
@@ -6774,8 +6848,8 @@ class TestRetryFailedTaxjarSyncs(UnitTestCase):
 		]
 		# Only "Co A" still has transaction filing enabled.
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.tasks.company_creates_transactions",
-		           side_effect=lambda company: company == "Co A"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.company_scope",
+		           side_effect=lambda company: _files_scope(company == "Co A")), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=invoices), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_syncs()
@@ -8082,6 +8156,7 @@ class TestOnCustomerDelete(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar") as mock_delete:
 			on_customer_delete(doc, None)
 
@@ -8113,6 +8188,7 @@ class TestOnCustomerDelete(UnitTestCase):
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar", side_effect=Exception("API down")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_taxjar_logger"):
@@ -14050,6 +14126,7 @@ class TestEnqueueDefersToCommit(UnitTestCase):
 		     patch.object(module, "_is_taxjar_enabled", return_value=True), \
 		     patch.object(module, "_publish_customer_update"), \
 		     patch.object(module.frappe, "get_single", return_value=settings), \
+		     patch.object(module, "get_region", return_value="United States"), \
 		     patch.object(module.frappe, "enqueue") as mock_enqueue:
 			module.on_customer_update(self._customer_doc(), None)
 
@@ -14178,7 +14255,12 @@ IN_CO = TaxJarCompanyProfile("India Co", country="India", configured=False)
 # scope predicate has to be the thing that refuses to act on it.
 IN_FLAGGED = TaxJarCompanyProfile("India Flagged Co", country="India", calculate=1, file=1)
 
-TAXJAR_COMPANIES = (US_CALC, US_FILE, US_OFF, IN_CO, IN_FLAGGED)
+# A company TaxJar could serve that nobody has configured yet - which is a
+# different answer from "registered outside the United States", and sends the
+# reader somewhere different.
+US_UNCONFIGURED = TaxJarCompanyProfile("US Unconfigured Co", configured=False)
+
+TAXJAR_COMPANIES = (US_CALC, US_FILE, US_OFF, IN_CO, IN_FLAGGED, US_UNCONFIGURED)
 _BY_NAME = {profile.name: profile for profile in TAXJAR_COMPANIES}
 
 
@@ -14330,28 +14412,22 @@ class TestScopeMatrixSubmitStamping(TaxJarTestCase):
 		written = doc.db_set.call_args[0][0]
 		self.assertEqual(written["taxjar_sync_status"], "Excluded")
 
-	@unittest.expectedFailure
 	def test_b4_out_of_scope_company_is_not_stamped_at_all(self):
 		"""An India company's invoices should carry no TaxJar status: they are
 		not excluded by a switch someone could go and turn on, they are outside
 		TaxJar's remit. Today every submitted invoice on the site is stamped
-		"Excluded" with a reason naming a setting that would be wrong to enable.
-
-		Fixed in step 4 (gate enqueue_taxjar_sync on in_scope)."""
+		"Excluded" with a reason naming a setting that would be wrong to enable."""
 		doc = self._submit(IN_CO)
 		doc.db_set.assert_not_called()
 
 
 class TestNexusIsScopedToItsCompany(TaxJarTestCase):
 
-	@unittest.expectedFailure
 	def test_a5_check_nexus_does_not_answer_for_another_company(self):
 		"""check_for_nexus() filters TaxJar Nexus on region_code AND company;
 		the whitelisted check_nexus() the form calls filters on region_code
 		alone and takes no company at all - so one company's registrations
-		silently answer for another's sale.
-
-		Fixed in step 4 (give check_nexus a company argument)."""
+		silently answer for another's sale."""
 		import inspect
 
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
@@ -14365,14 +14441,11 @@ class TestNexusIsScopedToItsCompany(TaxJarTestCase):
 
 class TestWhitelistedBoundariesValidateTypes(TaxJarTestCase):
 
-	@unittest.expectedFailure
 	def test_q5_bulk_retry_refuses_a_non_string_name(self):
 		"""In frappe a dict where a docname is expected is not a type error, it
 		is a filter - so client JSON reaches the ORM and picks its own row. The
 		per-document permission loop stops it turning into a bypass, but it
-		surfaces as an unattributable 500 rather than a clean refusal.
-
-		Fixed in step 4 (_require_names at each bulk boundary)."""
+		surfaces as an unattributable 500 rather than a clean refusal."""
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
 			taxjar_transactions as page,
 		)
@@ -14381,14 +14454,11 @@ class TestWhitelistedBoundariesValidateTypes(TaxJarTestCase):
 			with self.assertRaises(frappe.ValidationError):
 				page.bulk_retry([{"docstatus": 1}])
 
-	@unittest.expectedFailure
 	def test_q9_preview_does_not_answer_about_an_arbitrary_company(self):
 		"""preview_foreign_tax_rows checks read permission on whatever doctype
 		string the payload carries, then answers using whatever company it
 		carries - so a caller can learn whether a company they cannot see has
-		tax calculation on.
-
-		Fixed in step 4 (permission-check the company, not just the doctype)."""
+		tax calculation on."""
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
 		with patch.object(module.frappe, "has_permission") as mock_perm:
@@ -14464,22 +14534,30 @@ class TestCompanyScope(TaxJarTestCase):
 	def test_company_without_a_config_row_is_not_configured(self):
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
-		scope = self._scope(IN_CO)
+		scope = self._scope(US_UNCONFIGURED)
 		self.assertFalse(scope.in_scope)
 		self.assertEqual(scope.reason, module.SCOPE_NOT_CONFIGURED)
 		self.assertIsNone(scope.config)
 
-	def test_non_us_company_is_out_of_scope_however_its_switches_are_set(self):
-		"""The finding this whole predicate exists for. Both features are on for
-		this company, and both effective answers are still no: TaxJar computes
-		United States sales tax, and no setting on the setup page changes where
-		a Company is registered."""
+	def test_country_is_answered_before_configuration(self):
+		"""An India company nobody configured is out of scope because of where it
+		is registered, not because a row is missing - and the difference decides
+		whether there is anything for the reader to go and do."""
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
+		self.assertEqual(self._scope(IN_CO).reason, module.SCOPE_NOT_US)
+
+	def test_non_us_company_is_out_of_scope_however_its_switches_are_set(self):
+		"""The finding this whole predicate exists for. Both features are switched
+		on for this company and it must still do nothing: TaxJar computes United
+		States sales tax, and no setting on the setup page changes where a Company
+		is registered."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		self.assertTrue(IN_FLAGGED.calculate and IN_FLAGGED.file, "both switches on")
+
 		scope = self._scope(IN_FLAGGED)
-		self.assertTrue(scope.calculate_enabled, "the switch is on")
-		self.assertTrue(scope.file_enabled, "the switch is on")
-		self.assertFalse(scope.calculates, "but it must not calculate")
+		self.assertFalse(scope.calculates, "it must not calculate")
 		self.assertFalse(scope.files, "and it must not file")
 		self.assertFalse(scope.uses_taxjar)
 		self.assertEqual(scope.reason, module.SCOPE_NOT_US)
@@ -14510,15 +14588,14 @@ class TestCompanyScope(TaxJarTestCase):
 
 	# — the distinction the old predicates could not express —
 
-	def test_switch_state_and_effective_answer_are_separate(self):
+	def test_in_scope_companies_report_their_switches(self):
+		"""Effective answers already account for scope, so a caller never has to
+		remember to check in_scope as well - that is the mistake the whole
+		predicate exists to make impossible."""
 		for profile in (US_CALC, US_FILE, US_OFF):
 			scope = self._scope(profile)
-			self.assertEqual(scope.calculates, scope.calculate_enabled, profile.name)
-			self.assertEqual(scope.files, scope.file_enabled, profile.name)
-
-		out = self._scope(IN_FLAGGED)
-		self.assertNotEqual(out.calculates, out.calculate_enabled)
-		self.assertNotEqual(out.files, out.file_enabled)
+			self.assertEqual(scope.calculates, bool(profile.calculate), profile.name)
+			self.assertEqual(scope.files, bool(profile.file), profile.name)
 
 	def test_uses_taxjar_is_true_for_either_feature(self):
 		"""Both features send the same payload, so a rule about the payload
@@ -14540,13 +14617,14 @@ class TestCompanyScope(TaxJarTestCase):
 				module.company_scope(US_CALC.name)
 			mock_region.assert_not_called()
 
-	def test_company_lookup_is_skipped_for_an_unconfigured_company(self):
+	def test_config_lookup_is_skipped_for_a_company_outside_the_us(self):
+		"""No point reading a configuration for a company that cannot be served."""
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
 		with self.scope_patches():
-			with patch.object(module, "get_region") as mock_region:
+			with patch.object(module, "get_company_config") as mock_config:
 				module.company_scope(IN_CO.name)
-			mock_region.assert_not_called()
+			mock_config.assert_not_called()
 
 	def test_a_caller_holding_the_config_row_is_not_made_to_look_it_up_again(self):
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
@@ -14788,3 +14866,133 @@ class TestTemplateSyncIsIsolatedPerRow(UnitTestCase):
 		self.assertEqual(handled, ["Good Co A", "Good Co B"])
 		mock_log.assert_called_once()
 		self.assertIn("Bad Co", mock_log.call_args[1]["title"])
+
+
+# ── Step 4: server-side gating ────────────────────────────────────────────────
+
+
+class TestGetCompanyScopeEndpoint(TaxJarTestCase):
+	"""One round trip, and it carries why - which is what the two endpoints it
+	replaces could not say."""
+
+	def _call(self, profile):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), patch.object(module.frappe, "has_permission"):
+			return module.get_company_scope(profile.name)
+
+	def test_reports_the_effective_answers(self):
+		self.assertEqual(
+			{k: v for k, v in self._call(US_CALC).items() if k in ("calculates", "files", "in_scope")},
+			{"calculates": True, "files": False, "in_scope": True},
+		)
+
+	def test_says_why_a_company_is_out_of_scope(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		self.assertEqual(self._call(IN_CO)["reason"], module.SCOPE_NOT_US)
+		self.assertEqual(self._call(US_UNCONFIGURED)["reason"], module.SCOPE_NOT_CONFIGURED)
+		self.assertIsNone(self._call(US_OFF)["reason"], "in scope, so nothing to explain")
+
+	def test_permission_is_checked_on_the_company(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), patch.object(module.frappe, "has_permission") as mock_perm:
+			module.get_company_scope(US_CALC.name)
+
+		mock_perm.assert_called_once_with("Company", "read", doc=US_CALC.name, throw=True)
+
+
+class TestCustomerSyncFansOutOnlyToServableCompanies(TaxJarTestCase):
+
+	def _customer(self):
+		doc = MagicMock()
+		doc.name = "CUST-001"
+		doc.get.side_effect = lambda f, d=None: {
+			"taxjar_exemption_type": "Wholesale",
+			"taxjar_customer_id": "cust_001",
+			"taxjar_customer_sync_status": "",
+		}.get(f, d)
+		return doc
+
+	def test_a_company_taxjar_cannot_serve_gets_no_customer_sync(self):
+		"""A Customer is not company-scoped, so the sync fans out across every
+		configured company - which is right, and which is exactly why the gate
+		has to be applied per company rather than once for the site."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), \
+		     patch.object(module, "_has_taxjar_fields_changed", return_value=True), \
+		     patch.object(module, "_is_taxjar_enabled", return_value=True), \
+		     patch.object(module, "_publish_customer_update"), \
+		     patch.object(module.frappe, "enqueue") as mock_enqueue:
+			module.on_customer_update(self._customer(), None)
+
+		companies = {c[1]["company"] for c in mock_enqueue.call_args_list}
+		self.assertIn(US_CALC.name, companies)
+		self.assertIn(US_FILE.name, companies)
+		self.assertNotIn(IN_FLAGGED.name, companies, "both switches on, but TaxJar cannot serve it")
+		self.assertNotIn(US_OFF.name, companies, "in scope, but neither feature is on")
+
+
+class TestWorkerRechecksScopeOnEntry(TaxJarTestCase):
+
+	def test_a_job_queued_before_the_company_stopped_filing_does_nothing(self):
+		"""A job can sit in the queue, or be re-tried by the cron, long after the
+		configuration that queued it changed."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=US_CALC.name, taxes=[])
+		doc.docstatus = 1
+
+		with self.scope_patches(), \
+		     patch.object(module.frappe, "get_doc", return_value=doc), \
+		     patch.object(module, "get_client") as mock_client, \
+		     patch.object(module, "log_taxjar_call"):
+			module.sync_transaction_to_taxjar("SINV-001")
+
+		mock_client.assert_not_called()
+
+
+class TestCustomerAddressesRespectUserPermissions(UnitTestCase):
+
+	def test_uses_the_permission_aware_query(self):
+		"""frappe.get_all ignores User Permissions entirely, so a user restricted
+		to one company could enumerate any customer's addresses by name."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_customer_addresses
+
+		source = inspect.getsource(get_customer_addresses)
+		self.assertIn("frappe.get_list(", source)
+		self.assertNotIn("frappe.get_all(", source)
+
+
+class TestBulkBoundariesRefuseNonNames(UnitTestCase):
+	"""In frappe a dict where a docname belongs is not a type error, it is a
+	filter - so unvalidated client JSON picks its own row."""
+
+	def _endpoints(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers import taxjar_customers as cust
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as txn,
+		)
+
+		return (
+			(txn, lambda: txn.bulk_retry([{"docstatus": 1}])),
+			(cust, lambda: cust.bulk_clear_exemption([{"customer_group": "All"}])),
+			(cust, lambda: cust.bulk_sync_to_taxjar(["CUST-001", {"x": 1}])),
+		)
+
+	def test_every_bulk_endpoint_refuses_a_filter_shaped_argument(self):
+		for module, call_endpoint in self._endpoints():
+			with patch.object(module.frappe, "has_permission", return_value=True), \
+			     patch.object(module, "_ensure_taxjar_customer_fields", create=True):
+				with self.assertRaises(frappe.ValidationError):
+					call_endpoint()
+
+	def test_a_bare_string_is_not_iterated_character_by_character(self):
+		from taxjar_integration.taxjar_integration.pagination import parse_document_names
+
+		with self.assertRaises(frappe.ValidationError):
+			parse_document_names('"SINV-001"')

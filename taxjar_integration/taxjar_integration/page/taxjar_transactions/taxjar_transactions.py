@@ -4,6 +4,7 @@ from frappe import _
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
 	not_configured_response,
+	parse_document_names,
 	paginated_response,
 	parse_filters,
 	parse_page_size,
@@ -217,7 +218,7 @@ def bulk_retry(invoices: list | str):
 			_("TaxJar is not set up yet. Enable a TaxJar feature in TaxJar Settings first."),
 			title=_("TaxJar Not Configured"),
 		)
-	invoices = frappe.parse_json(invoices) if isinstance(invoices, str) else invoices
+	invoices = parse_document_names(invoices, label=frappe._("invoices"))
 
 	# The blanket check above only proves the caller may write *some* Sales
 	# Invoice; these names came from the client, and the loop below writes with

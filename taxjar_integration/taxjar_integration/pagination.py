@@ -11,6 +11,38 @@ def parse_filters(filters):
 	return frappe.parse_json(filters) if filters else {}
 
 
+def parse_document_names(names, label="documents"):
+	"""Normalise and type-check the list of document names a bulk endpoint acts on.
+
+	In frappe a dict where a docname is expected is not a type error, it is a
+	filter: frappe.get_doc("Customer", {"customer_group": "X"}) looks up the
+	first match rather than refusing. The per-document permission loops that
+	follow stop that becoming a bypass - has_permission() only wraps str and int
+	in a document, so a dict falls through and raises - but it surfaces as an
+	unattributable 500 rather than a refusal that says what was wrong.
+
+	A bare string is also rejected rather than iterated: "SINV-001" is a
+	sequence, so a caller who forgets the list gets 8 single-character lookups
+	and a confusing silence instead of an error.
+	"""
+	names = frappe.parse_json(names) if isinstance(names, str) else names
+
+	if not isinstance(names, list | tuple):
+		frappe.throw(
+			frappe._("Expected a list of {0}.").format(label),
+			title=frappe._("Invalid Request"),
+		)
+
+	bad = [n for n in names if not isinstance(n, str) or not n.strip()]
+	if bad:
+		frappe.throw(
+			frappe._("Expected {0} to be names. Got {1}.").format(label, frappe.bold(str(bad[0])[:80])),
+			title=frappe._("Invalid Request"),
+		)
+
+	return list(names)
+
+
 def parse_page_size(page_size):
 	"""Clamp a caller-supplied page size to the sizes the UI offers.
 

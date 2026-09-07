@@ -275,7 +275,18 @@ TRANSACTION_EXCLUSION_REASONS = (
 
 def enqueue_taxjar_sync(doc, method):
 	"""on_submit hook: enqueue background TaxJar transaction sync."""
-	if not company_creates_transactions(doc.company):
+	scope = company_scope(doc.company)
+
+	if scope.reason == SCOPE_NOT_US:
+		# Nothing to record. "Excluded" is a statement about a switch someone
+		# could go and turn on, and for a company registered outside the United
+		# States there is no such switch - the invoice would carry a status
+		# naming a setting that would be wrong to enable, and would show up on
+		# the Transaction Sync page alongside invoices that really are waiting
+		# on something. A company TaxJar cannot serve has no TaxJar state.
+		return
+
+	if not scope.files:
 		# Recorded rather than returned silently. "Excluded" is the field's own
 		# default, so a deliberate exclusion used to be indistinguishable from a
 		# row nothing had ever looked at - and even once read as deliberate, it
@@ -346,7 +357,7 @@ def enqueue_taxjar_sync(doc, method):
 
 def enqueue_taxjar_delete(doc, method):
 	"""on_cancel hook: enqueue background TaxJar transaction deletion."""
-	if not company_creates_transactions(doc.company):
+	if not company_scope(doc.company).files:
 		return
 
 	if not get_client(doc.company):
@@ -427,7 +438,7 @@ def resync_transaction(invoice_name: str):
 	frappe.has_permission("Sales Invoice", "write", doc=invoice_name, throw=True)
 
 	company = frappe.db.get_value("Sales Invoice", invoice_name, "company")
-	if not company_creates_transactions(company):
+	if not company_scope(company).files:
 		frappe.throw(
 			_("TaxJar transaction filing is turned off for {0}. Turn it on in TaxJar Settings "
 			  "to sync this document.").format(company),
@@ -444,6 +455,13 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	if doc.docstatus == 2:
 		delete_transaction_from_taxjar(invoice_name)
+		return
+
+	# Re-checked here, not just at enqueue time: a job can sit in the queue or be
+	# retried by the cron long after the configuration that queued it changed.
+	if not company_scope(doc.company).files:
+		log_taxjar_call(action="create_transaction", status="skipped",
+			error="Company no longer files transactions through TaxJar", context=ctx)
 		return
 
 	client = get_client(doc.company)
@@ -1074,7 +1092,15 @@ def preview_foreign_tax_rows(doc_json: dict | str):
 	frappe.has_permission(doc_data.get("doctype"), "read", throw=True)
 
 	company = doc_data.get("company")
-	if not company_calculates_tax(company) or get_region(company) != "United States":
+	if not company:
+		return {"foreign_rows": []}
+
+	# The doctype above is whatever the payload said, and so is the company. A
+	# caller could otherwise name a doctype they may read and a company they may
+	# not, and learn from the answer whether that company calculates tax.
+	frappe.has_permission("Company", "read", doc=company, throw=True)
+
+	if not company_scope(company).calculates:
 		return {"foreign_rows": []}
 
 	company_config = get_company_config(company)
@@ -1118,14 +1144,11 @@ def preview_foreign_tax_rows(doc_json: dict | str):
 def set_sales_tax(doc, method):
 	_ctx = {"doctype": doc.doctype, "name": doc.name, "company": doc.company}
 
-	if not company_calculates_tax(doc.company):
+	scope = company_scope(doc.company)
+	if not scope.calculates:
 		log_taxjar_call(action="tax_for_order", status="skipped",
-			error="taxjar_calculate_tax is disabled", context=_ctx)
-		return
-
-	if get_region(doc.company) != "United States":
-		log_taxjar_call(action="tax_for_order", status="skipped",
-			error="Company region is not United States", context=_ctx)
+			error=f"Company does not calculate tax through TaxJar ({scope.reason or 'switched off'})",
+			context=_ctx)
 		return
 
 	if not doc.items:
@@ -1133,11 +1156,7 @@ def set_sales_tax(doc, method):
 			error="Document has no items", context=_ctx)
 		return
 
-	company_config = get_company_config(doc.company)
-	if not company_config:
-		log_taxjar_call(action="tax_for_order", status="skipped",
-			error="No TaxJar Company Config found for company {0}".format(doc.company), context=_ctx)
-		return
+	company_config = scope.config
 
 	is_exempt, exempt_reason = check_sales_tax_exemption(doc, company_config)
 	if is_exempt:
@@ -1267,7 +1286,7 @@ def validate_return_against(doc, method):
 	"""Enforce return_against on credit notes when TaxJar transaction reporting is enabled."""
 	if not getattr(doc, "is_return", False):
 		return
-	if not company_creates_transactions(doc.company):
+	if not company_scope(doc.company).files:
 		return
 	if not doc.return_against:
 		# Why first, then the route that gets it right: the reference is not an
@@ -1902,11 +1921,24 @@ def get_company_address_details(doc):
 
 
 @frappe.whitelist()
-def check_nexus(shipping_address_name: str):
+def check_nexus(shipping_address_name: str, company: str):
+	"""Whether this destination is outside the company's registered nexus.
+
+	Scoped to the company, as check_for_nexus() already is. Without that, one
+	company's registrations answered for another's sale - the form said there
+	was nexus and the server, asking the same question properly, disagreed.
+
+	Gated on the company calculating tax rather than on TaxJar being enabled
+	somewhere: a destination is only interesting if this document is going to be
+	priced, and a company outside TaxJar's remit resolves a state code happily
+	enough to be told it has no nexus in Karnataka.
+	"""
 	if not isinstance(shipping_address_name, str) or not shipping_address_name.strip():
 		return
+	if not isinstance(company, str) or not company.strip():
+		return
 
-	if not _is_taxjar_enabled():
+	if not company_scope(company).calculates:
 		return
 
 	if not frappe.db.exists("Address", shipping_address_name):
@@ -1922,7 +1954,10 @@ def check_nexus(shipping_address_name: str):
 		address = frappe.get_doc("Address", shipping_address_name)
 		state_code = get_iso_3166_2_state_code(address)
 
-		if not frappe.db.get_value("TaxJar Nexus", filters={"region_code": state_code, "parent": "TaxJar Settings"}):
+		if not frappe.db.get_value(
+			"TaxJar Nexus",
+			filters={"region_code": state_code, "parent": "TaxJar Settings", "company": company},
+		):
 			# The country code goes with it: a region code only names a region
 			# within a country, and the caller renders it as a full name.
 			country_code = (frappe.db.get_value("Country", address.country, "code", cache=True) or "").upper()
@@ -1934,7 +1969,9 @@ def check_nexus(shipping_address_name: str):
 @frappe.whitelist()
 def get_customer_addresses(customer: str):
 	frappe.has_permission("Address", "read", throw=True)
-	return frappe.get_all(
+	# get_list, not get_all: get_all ignores User Permissions entirely, so a user
+	# restricted to one company could enumerate any customer's addresses by name.
+	return frappe.get_list(
 		"Address",
 		filters=[
 			["Dynamic Link", "link_doctype", "=", "Customer"],
@@ -2091,30 +2128,21 @@ class CompanyScope:
 	States ended up being asked for a shipping address, and how one company's
 	nexus ended up answering for another's sale.
 
-	The distinction that matters, and that the old predicates could not express:
-
-	* ``calculate_enabled`` / ``file_enabled`` are the switches, as set.
-	* ``in_scope`` is whether TaxJar applies to this company at all - it has a
-	  configuration row and it is registered in the United States.
-	* ``calculates`` / ``files`` are the effective answers, which is what a
-	  caller almost always wants. A switch that is on for a company TaxJar
-	  cannot serve is not an instruction to act.
+	``in_scope`` is whether TaxJar applies to this company at all - registered in
+	the United States, and configured. ``calculates`` and ``files`` are the
+	effective answers, already accounting for it: a switch that is on for a
+	company TaxJar cannot serve is not an instruction to act, and no caller
+	should have to remember to check both. ``reason`` says which of the three
+	ways a company can be out of scope applies, because they send the reader to
+	three different places.
 	"""
 
 	company: str
 	in_scope: bool
-	calculate_enabled: bool
-	file_enabled: bool
+	calculates: bool
+	files: bool
 	config: object | None
 	reason: str | None
-
-	@property
-	def calculates(self) -> bool:
-		return self.in_scope and self.calculate_enabled
-
-	@property
-	def files(self) -> bool:
-		return self.in_scope and self.file_enabled
 
 	@property
 	def uses_taxjar(self) -> bool:
@@ -2134,21 +2162,26 @@ def company_scope(company, config=None) -> CompanyScope:
 	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
 		return CompanyScope(company, False, False, False, None, SCOPE_SITE_OFF)
 
+	# TaxJar computes United States sales tax. A company registered anywhere else
+	# is not one with the feature switched off, it is one the feature cannot
+	# serve - and that is worth saying ahead of "no configuration row", which
+	# would send the reader off to add a row that is then refused.
+	if get_region(company) != "United States":
+		return CompanyScope(company, False, False, False, None, SCOPE_NOT_US)
+
 	if config is None:
 		config = get_company_config(company)
 	if not config:
 		return CompanyScope(company, False, False, False, None, SCOPE_NOT_CONFIGURED)
 
-	calculate_enabled = bool(config.taxjar_calculate_tax)
-	file_enabled = bool(config.taxjar_create_transactions)
-
-	if get_region(company) != "United States":
-		# TaxJar computes United States sales tax. A company registered anywhere
-		# else is not a company with the feature switched off - it is a company
-		# the feature cannot serve, and no setting on the setup page changes that.
-		return CompanyScope(company, False, calculate_enabled, file_enabled, config, SCOPE_NOT_US)
-
-	return CompanyScope(company, True, calculate_enabled, file_enabled, config, None)
+	return CompanyScope(
+		company,
+		True,
+		bool(config.taxjar_calculate_tax),
+		bool(config.taxjar_create_transactions),
+		config,
+		None,
+	)
 
 
 def company_calculates_tax(company, config=None):
@@ -2177,11 +2210,10 @@ def transaction_exclusion_reason(company, config=None):
 	on the invoice; the Transaction Sync page asks it live for rows written
 	before it was recorded.
 	"""
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+	scope = company_scope(company, config=config)
+	if scope.reason == SCOPE_SITE_OFF:
 		return EXCLUSION_TAXJAR_DISABLED
-	if config is None:
-		config = get_company_config(company)
-	if not (config and config.taxjar_create_transactions):
+	if not scope.files:
 		# One reason for both "this company has no TaxJar config row" and "it has
 		# one with filing switched off": the reader fixes either in the same
 		# place, so splitting them would name two routes to one screen.
@@ -2193,6 +2225,35 @@ def company_creates_transactions(company, config=None):
 	"""Whether transaction filing is on for a company (master switch AND the
 	company's own File Transactions flag)."""
 	return not transaction_exclusion_reason(company, config)
+
+
+@frappe.whitelist()
+def get_company_scope(company: str):
+	"""The whole scope answer for one company, in one round trip.
+
+	The form currently asks two endpoints two different halves of this - whether
+	tax is calculated (for the applicability matrix) and whether transactions are
+	filed (for the sidebar pill) - and neither says whether TaxJar applies to the
+	company at all, which is why an out-of-scope document still renders TaxJar
+	chrome and still asks for a shipping address. Step 5 moves the client onto
+	this and retires both.
+
+	``reason`` matters as much as the booleans: a company registered outside the
+	United States and one with a switch turned off are both "no", but only one of
+	them is something the reader can go and change.
+	"""
+	frappe.has_permission("Company", "read", doc=company, throw=True)
+
+	scope = company_scope(company)
+	return {
+		"company": company,
+		"in_scope": scope.in_scope,
+		"calculates": scope.calculates,
+		"files": scope.files,
+		"uses_taxjar": scope.uses_taxjar,
+		"reason": scope.reason,
+		"country": get_region(company),
+	}
 
 
 @frappe.whitelist()
@@ -2905,7 +2966,7 @@ def on_customer_update(doc, method):
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:
-		if not (config.taxjar_calculate_tax or config.taxjar_create_transactions):
+		if not company_scope(config.company, config=config).uses_taxjar:
 			continue
 		frappe.enqueue(
 			"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
@@ -2934,7 +2995,7 @@ def on_customer_delete(doc, method):
 
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:
-		if not (config.taxjar_calculate_tax or config.taxjar_create_transactions):
+		if not company_scope(config.company, config=config).uses_taxjar:
 			continue
 		try:
 			delete_customer_from_taxjar(taxjar_customer_id, config.company)

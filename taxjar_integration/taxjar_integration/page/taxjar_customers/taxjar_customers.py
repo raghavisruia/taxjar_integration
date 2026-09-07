@@ -3,6 +3,7 @@ from frappe import _
 
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
+	parse_document_names,
 	not_configured_response,
 	paginated_response,
 	parse_filters,
@@ -248,7 +249,7 @@ def configure_exemption(
 	frappe.has_permission("Customer", "write", throw=True)
 	_ensure_taxjar_customer_fields()
 
-	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
+	customers = parse_document_names(customers, label=frappe._("customers"))
 	regions = frappe.parse_json(regions) if isinstance(regions, str) else (regions or [])
 	_check_each(customers)
 
@@ -272,7 +273,7 @@ def configure_exemption(
 def bulk_clear_exemption(customers: list | str):
 	frappe.has_permission("Customer", "write", throw=True)
 	_ensure_taxjar_customer_fields()
-	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
+	customers = parse_document_names(customers, label=frappe._("customers"))
 	_check_each(customers)
 
 	for name in customers:
@@ -296,7 +297,7 @@ def bulk_sync_to_taxjar(customers: list | str):
 	"""
 	frappe.has_permission("Customer", "write", throw=True)
 	_ensure_taxjar_customer_fields()
-	customers = frappe.parse_json(customers) if isinstance(customers, str) else customers
+	customers = parse_document_names(customers, label=frappe._("customers"))
 	_check_each(customers)
 
 	queued = 0

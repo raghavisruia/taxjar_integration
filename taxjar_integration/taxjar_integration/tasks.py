@@ -3,7 +3,7 @@ import frappe
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_MAX_SYNC_RETRIES,
 	_is_taxjar_enabled,
-	company_creates_transactions,
+	company_scope,
 	get_client,
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
@@ -90,7 +90,7 @@ def retry_failed_taxjar_syncs():
 	)
 
 	for invoice in failed_invoices:
-		if not company_creates_transactions(invoice.company):
+		if not company_scope(invoice.company).files:
 			continue
 		frappe.enqueue(
 			"taxjar_integration.taxjar_integration.taxjar_integration.sync_transaction_to_taxjar",

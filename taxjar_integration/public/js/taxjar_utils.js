@@ -631,9 +631,13 @@ taxjar_integration._check_nexus_for_selected_address = function (frm) {
 	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
 	if (!address) return;
 
+	// Nexus is registered per company, so it has to be asked per company - the
+	// server scopes the lookup the same way, and used to be handed a question
+	// that could only be answered site-wide.
 	frappe
 		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.check_nexus", {
 			shipping_address_name: address,
+			company: frm.doc.company,
 		})
 		.then((missing) => {
 			// The pick can change (or the form can be swapped out) while this
