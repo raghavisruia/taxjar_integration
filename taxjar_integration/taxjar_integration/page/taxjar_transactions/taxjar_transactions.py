@@ -9,7 +9,10 @@ from taxjar_integration.taxjar_integration.pagination import (
 	parse_page_size,
 	permitted_count,
 )
-from taxjar_integration.taxjar_integration.taxjar_integration import _publish_transaction_update
+from taxjar_integration.taxjar_integration.taxjar_integration import (
+	_publish_transaction_update,
+	transaction_exclusion_reason,
+)
 
 # A representative TaxJar custom field; if this column is absent the fields were
 # never created, so reads would hit MySQLdb (1054) Unknown column.
@@ -86,8 +89,9 @@ def get_transactions(
 		filters=conditions,
 		fields=[
 			"name", "posting_date", "customer_name", "grand_total", "docstatus",
-			"is_return", "is_debit_note",
+			"is_return", "is_debit_note", "company",
 			"taxjar_sync_status", "taxjar_last_synced", "taxjar_sync_error",
+			"taxjar_exclusion_reason",
 		],
 		order_by="posting_date desc, name desc",
 		start=(page - 1) * page_size,
@@ -110,7 +114,46 @@ def get_transactions(
 		if row.taxjar_sync_error and len(row.taxjar_sync_error) > 300:
 			row["taxjar_sync_error"] = row.taxjar_sync_error[:300] + "..."
 
+	if scope == NOT_APPLICABLE_SCOPE:
+		_explain_exclusions(invoices)
+
 	return paginated_response("invoices", invoices, total, page, page_size)
+
+
+def _explain_exclusions(invoices):
+	"""Give every excluded row something to say about why it was kept out.
+
+	Two different answers, and the difference matters enough to be flagged rather
+	than smoothed over. A row written since enqueue_taxjar_sync started recording
+	the reason carries the one that was true when it was submitted. A row written
+	before that carries nothing, and the reason cannot be recovered - the
+	configuration has moved on since, so reading today's settings and reporting
+	them as history would state something that was never true. What can honestly
+	be said is what the configuration says now, so that is sent, marked current so
+	the client words it in the present tense.
+
+	The live answer is asked once per company rather than once per row - a page
+	holds at most page_size rows and usually far fewer companies.
+	"""
+	inferred = {}
+
+	for row in invoices:
+		# The scope is "submitted and not sent", which also catches rows written
+		# before the sync status field existed. They are excluded in fact, so the
+		# column says so rather than leaving a blank where every other row has a
+		# pill.
+		if not row.get("taxjar_sync_status"):
+			row["taxjar_sync_status"] = "Excluded"
+
+		if row.get("taxjar_exclusion_reason"):
+			continue
+
+		if row.company not in inferred:
+			inferred[row.company] = transaction_exclusion_reason(row.company)
+
+		if inferred[row.company]:
+			row["taxjar_exclusion_reason"] = inferred[row.company]
+			row["taxjar_exclusion_reason_is_current"] = 1
 
 
 @frappe.whitelist()
@@ -174,9 +217,11 @@ def bulk_retry(invoices: list | str):
 		if status != "Failed":
 			continue
 
-		# Not routed through _set_sync_status: that also nulls
-		# taxjar_last_synced, which would discard the real last-sync time on a
-		# doc that synced fine and only later failed its cancel-delete.
+		# Not routed through _set_sync_status: a re-attempt moves the status and
+		# nothing else, whereas that would also blank taxjar_sync_error and reset
+		# taxjar_sync_retry_count - discarding the count of how many times TaxJar
+		# has already rejected this document, which is what caps the cron's
+		# automatic retries.
 		frappe.db.set_value(
 			"Sales Invoice", name, "taxjar_sync_status", "Queued", update_modified=False
 		)

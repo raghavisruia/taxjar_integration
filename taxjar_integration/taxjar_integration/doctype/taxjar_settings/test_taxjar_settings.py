@@ -3802,6 +3802,118 @@ class TestSetSyncStatusRetryCount(UnitTestCase):
 		self.assertEqual(fields["taxjar_sync_retry_count"], 0)
 
 
+class TestExclusionReason(UnitTestCase):
+	"""Why a submitted document was kept out of TaxJar. "Excluded" is the sync
+	status field's own default, so before this a deliberate exclusion was
+	indistinguishable from a row nothing had ever looked at - and even read as
+	deliberate, it never said which switch was the one that was off."""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_the_two_switches_are_named_apart(self):
+		"""The site-wide switch and the company's own flag are fixed on
+		different screens, so answering "one of them is off" would send the
+		reader looking in the wrong place."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			EXCLUSION_SYNC_NOT_ENABLED,
+			EXCLUSION_TAXJAR_DISABLED,
+			transaction_exclusion_reason,
+		)
+
+		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=0):
+			self.assertEqual(transaction_exclusion_reason("_Test Company"), EXCLUSION_TAXJAR_DISABLED)
+
+		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{self.MOD}.get_company_config", return_value=None):
+			self.assertEqual(
+				transaction_exclusion_reason("_Test Company"), EXCLUSION_SYNC_NOT_ENABLED
+			)
+
+	def test_no_reason_when_the_company_does_file(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			transaction_exclusion_reason,
+		)
+
+		config = frappe._dict(taxjar_create_transactions=1)
+		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=1):
+			self.assertIsNone(transaction_exclusion_reason("_Test Company", config))
+
+	def test_it_is_the_same_question_company_creates_transactions_asks(self):
+		"""Two answers to one question would let the hook record a reason for a
+		company the rest of the app treats as filing, or the reverse."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			company_creates_transactions,
+			transaction_exclusion_reason,
+		)
+
+		for enabled, config in ((0, None), (1, None), (1, frappe._dict(taxjar_create_transactions=0)),
+		                        (1, frappe._dict(taxjar_create_transactions=1))):
+			with self.subTest(enabled=enabled, config=config):
+				with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=enabled), \
+				     patch(f"{self.MOD}.get_company_config", return_value=config):
+					self.assertEqual(
+						company_creates_transactions("_Test Company"),
+						not transaction_exclusion_reason("_Test Company"),
+					)
+
+	def test_the_reason_is_cleared_by_every_other_status(self):
+		"""A document kept out in March and synced in April must not go on
+		explaining why it once was not."""
+		for status in ("Synced", "Queued", "Failed"):
+			with self.subTest(status=status):
+				with patch(f"{self.MOD}.frappe.db.get_value", return_value=0), \
+				     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+				     patch(f"{self.MOD}.frappe.publish_realtime"):
+					_set_sync_status("SINV-TEST-001", status)
+				self.assertEqual(mock_set.call_args[0][2]["taxjar_exclusion_reason"], "")
+
+	def test_the_field_options_come_from_the_one_list(self):
+		"""make_custom_fields re-runs on every migrate, so a value the code can
+		write but the Select does not offer would be rejected on the next save
+		of the document."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			TRANSACTION_EXCLUSION_REASONS,
+		)
+
+		field = next(
+			f for f in get_custom_fields()["Sales Invoice"]
+			if f.get("fieldname") == "taxjar_exclusion_reason"
+		)
+		self.assertEqual(field["options"], "\n" + "\n".join(TRANSACTION_EXCLUSION_REASONS))
+		# Shown only where it means something.
+		self.assertIn("taxjar_sync_status == 'Excluded'", field["depends_on"])
+
+
+class TestLastSyncedIsNeverCleared(UnitTestCase):
+	"""When a document last reached TaxJar is a historical fact. A failure that
+	happens afterwards does not unmake it, and it is the only record that the
+	document was ever filed at all - which matters most for the case that
+	surfaced it, a document that synced fine and later failed its cancel-delete
+	because the credential had gone."""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _fields_for(self, status, **kwargs):
+		with patch(f"{self.MOD}.frappe.db.get_value", return_value=0), \
+		     patch(f"{self.MOD}.frappe.db.set_value") as mock_set, \
+		     patch(f"{self.MOD}.frappe.publish_realtime"):
+			_set_sync_status("SINV-TEST-001", status, **kwargs)
+		return mock_set.call_args[0][2]
+
+	def test_synced_stamps_the_time(self):
+		self.assertIn("taxjar_last_synced", self._fields_for("Synced"))
+
+	def test_no_other_status_touches_it(self):
+		"""Left out of the written fields entirely rather than set to None -
+		writing None is what used to erase it."""
+		for status in ("Failed", "Queued", "Excluded"):
+			with self.subTest(status=status):
+				self.assertNotIn("taxjar_last_synced", self._fields_for(status))
+
+
 class TestSetCustomerSyncStatusRetryCount(UnitTestCase):
 
 	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
@@ -3897,17 +4009,49 @@ class TestTransactionsPageRealtime(UnitTestCase):
 			after_commit=True,
 		)
 
-	def test_nothing_published_when_sync_is_skipped(self):
+	def test_excluded_on_submit_is_published(self):
+		"""The exclusion is now a write like any other, so the Transaction Sync
+		page hears about it the same way Queued and Failed do - otherwise the
+		row and its reason only appear on the next manual reload."""
 		doc = _make_doc()
+		doc.db_set = MagicMock()
+
 		with patch(f"{self.MOD}.company_creates_transactions", return_value=False), \
+		     patch(f"{self.MOD}.transaction_exclusion_reason", return_value="TaxJar Disabled"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
 			enqueue_taxjar_sync(doc, None)
-		mock_publish.assert_not_called()
+
+		mock_publish.assert_called_once_with(
+			"taxjar_transactions_update",
+			{"name": doc.name, "taxjar_sync_status": "Excluded"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
+
+	def test_failed_on_submit_is_published(self):
+		"""A missing credential leaves the invoice Failed rather than skipped,
+		so the Transaction Sync page has to hear about it the same way Queued
+		does - otherwise the row only appears on the next manual reload."""
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		     patch(f"{self.MOD}.get_client", return_value=None), \
+		     patch(f"{self.MOD}.frappe.enqueue"), \
+		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
+			enqueue_taxjar_sync(doc, None)
+
+		mock_publish.assert_called_once_with(
+			"taxjar_transactions_update",
+			{"name": doc.name, "taxjar_sync_status": "Failed"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
 
 	def test_bulk_retry_publishes_queued(self):
 		"""bulk_retry writes Queued with a targeted set_value rather than
-		_set_sync_status (which would null taxjar_last_synced), so it needs its
-		own publish."""
+		_set_sync_status (which would also blank the error and reset the retry
+		count), so it needs its own publish."""
 		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
 			bulk_retry,
@@ -4853,7 +4997,10 @@ class TestExcludedRename(UnitTestCase):
 
 		from taxjar_integration.taxjar_integration.taxjar_integration import delete_transaction_manual
 
-		self.assertIn('_set_sync_status(invoice_name, "Excluded")', inspect.getsource(delete_transaction_manual))
+		source = inspect.getsource(delete_transaction_manual)
+		self.assertIn('_set_sync_status(invoice_name, "Excluded"', source)
+		# ...and says why, like every other route into that status.
+		self.assertIn("exclusion_reason=EXCLUSION_REMOVED_FROM_TAXJAR", source)
 
 	def test_no_stale_not_applicable_status_value_in_source(self):
 		"""Guards the stored status, not the words.
@@ -6205,20 +6352,86 @@ class TestValidateReturnAgainst(UnitTestCase):
 
 class TestEnqueueTaxjarSync(UnitTestCase):
 
-	def test_skips_when_create_transactions_disabled(self):
+	def test_records_why_the_document_was_excluded(self):
+		"""Excluded is the field's own default, so a deliberate exclusion used
+		to be indistinguishable from a row nothing had ever looked at - and
+		even read as deliberate, it never said which of the two switches was
+		off. The reason is written alongside the status now."""
 		doc = _make_doc()
+		doc.db_set = MagicMock()
+
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=False), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.transaction_exclusion_reason", return_value="Transaction Sync not enabled for company"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
-		mock_enqueue.assert_not_called()
 
-	def test_skips_when_no_client(self):
+		mock_enqueue.assert_not_called()
+		fields = doc.db_set.call_args[0][0]
+		self.assertEqual(fields["taxjar_sync_status"], "Excluded")
+		self.assertEqual(fields["taxjar_exclusion_reason"], "Transaction Sync not enabled for company")
+
+	def test_a_missing_credential_fails_rather_than_skipping(self):
+		"""Filing switched on with no token for the current API mode is a
+		misconfiguration, not an exclusion.
+
+		This used to return silently, leaving the invoice on the "Excluded"
+		default - which reads as a deliberate exclusion and is the one state
+		nothing ever retries, so a company simply stopped filing without
+		anything saying so. sync_transaction_to_taxjar has always called the
+		identical condition Failed; the two now agree.
+		"""
 		doc = _make_doc()
+		doc.db_set = MagicMock()
+
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			enqueue_taxjar_sync(doc, None)
+
 		mock_enqueue.assert_not_called()
+		fields = doc.db_set.call_args[0][0]
+		self.assertEqual(fields["taxjar_sync_status"], "Failed")
+		# Retryable, so retry_failed_taxjar_syncs() clears it once the token is
+		# entered instead of leaving it to be noticed by hand.
+		self.assertEqual(fields["taxjar_sync_retryable"], 1)
+		self.assertEqual(fields["taxjar_sync_retry_count"], 1)
+
+	def test_the_missing_credential_verdict_matches_the_worker(self):
+		"""One condition must not read two ways depending on which path found
+		it, so both say it through the same constant."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			delete_transaction_from_taxjar,
+			enqueue_taxjar_sync as hook,
+			sync_transaction_to_taxjar,
+		)
+
+		for fn in (hook, sync_transaction_to_taxjar, delete_transaction_from_taxjar):
+			with self.subTest(fn=fn.__name__):
+				source = inspect.getsource(fn)
+				self.assertIn("_NOT_CONFIGURED_ERROR", source)
+				self.assertNotIn('error="TaxJar is not configured', source)
+
+	def test_written_through_the_document_not_the_database(self):
+		"""on_submit runs inside the save, so the in-memory document is what
+		the client gets back. A frappe.db.set_value here would leave the form
+		claiming Excluded until something reloaded it."""
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value") as mock_set_value, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
+			enqueue_taxjar_sync(doc, None)
+
+		mock_set_value.assert_not_called()
+		doc.db_set.assert_called_once()
+		self.assertFalse(doc.db_set.call_args[1]["update_modified"])
 
 	def test_sets_queued_and_enqueues(self):
 		doc = _make_doc()
@@ -6282,6 +6495,76 @@ class TestEnqueueTaxjarDelete(UnitTestCase):
 		# Its own job_id, not shared with enqueue_taxjar_sync() - see the comment
 		# there on why a cancel's delete must never dedupe against a create job.
 		self.assertEqual(mock_enqueue.call_args[1]["job_id"], f"taxjar_transaction_delete_{doc.name}")
+
+	def test_a_missing_credential_fails_rather_than_skipping(self):
+		"""The sharper half of the same defect fixed on the submit side: this
+		document is quite likely already filed in TaxJar, so returning silently
+		left it reading "Synced" with the order still sitting there and the
+		cancellation never sent. Nothing would pick it up again either -
+		retry_failed_taxjar_syncs() only looks at Failed rows - so the
+		transaction stayed stranded in TaxJar for good."""
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
+			enqueue_taxjar_delete(doc, None)
+
+		mock_enqueue.assert_not_called()
+		fields = doc.db_set.call_args[0][0]
+		self.assertEqual(fields["taxjar_sync_status"], "Failed")
+		self.assertEqual(fields["taxjar_sync_retryable"], 1)
+
+	def test_the_document_keeps_when_it_reached_taxjar(self):
+		"""The status goes Synced -> Failed here, on a document that really did
+		file. Nulling taxjar_last_synced would throw away the one record of
+		that, which is exactly what the "Failed to Cancel" pill's sibling case
+		reads out."""
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
+			enqueue_taxjar_delete(doc, None)
+
+		self.assertNotIn("taxjar_last_synced", doc.db_set.call_args[0][0])
+
+	def test_the_failure_is_published(self):
+		doc = _make_doc()
+		doc.db_set = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime") as mock_publish:
+			enqueue_taxjar_delete(doc, None)
+
+		mock_publish.assert_called_once_with(
+			"taxjar_transactions_update",
+			{"name": doc.name, "taxjar_sync_status": "Failed"},
+			room="doctype:Sales Invoice",
+			after_commit=True,
+		)
+
+	def test_a_prior_failure_count_is_carried_forward(self):
+		"""A document that already failed its create sync a few times and is
+		now cancelled continues its run rather than restarting it -
+		TAXJAR_MAX_SYNC_RETRIES counts consecutive failures."""
+		doc = _make_doc()
+		doc.taxjar_sync_retry_count = 3
+		doc.db_set = MagicMock()
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.company_creates_transactions", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.publish_realtime"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue"):
+			enqueue_taxjar_delete(doc, None)
+
+		self.assertEqual(doc.db_set.call_args[0][0]["taxjar_sync_retry_count"], 4)
 
 
 class TestIsTaxjarEnabledForCompany(UnitTestCase):
@@ -6375,6 +6658,71 @@ class TestSalesInvoiceClientScript(UnitTestCase):
 		self.assertIn('frm.doc.taxjar_sync_status === "Failed"', callback_fn)
 		self.assertIn("taxjar_integration.show_taxjar_sync_error(", callback_fn)
 		self.assertIn("frm.doc.taxjar_sync_error", callback_fn)
+
+	def test_sync_button_is_gated_on_the_company_filing(self):
+		"""resync_transaction refuses to file for a company whose "create
+		transactions" flag is off, so the button must not be offered there - it
+		would otherwise sit beneath a sidebar pill saying this company does not
+		file, offering to do the one thing it cannot."""
+		js = self._read_js()
+		fn = js.split("function _add_taxjar_buttons(frm) {")[1].split("\n}\n")[0]
+		self.assertIn("is_taxjar_enabled_for_company", fn)
+		self.assertIn("_add_sync_button(frm)", fn)
+		# The button itself is added only from inside that callback.
+		self.assertNotIn("add_custom_button", fn)
+
+	def test_sync_button_ignores_an_answer_for_a_document_left_behind(self):
+		"""Same staleness guard the sidebar pill uses: the answer arrives after
+		refresh() has returned, by which time the form may hold another doc."""
+		js = self._read_js()
+		fn = js.split("function _add_taxjar_buttons(frm) {")[1].split("\n}\n")[0]
+		self.assertIn("const docname = frm.doc.name;", fn)
+		self.assertIn("frm.doc.name !== docname", fn)
+
+
+class TestResyncTransactionGate(UnitTestCase):
+	"""resync_transaction is the only HTTP way into the transaction sync worker,
+	and the worker itself checks only for a client - so the company's filing
+	flag has to be re-checked here. Everything else checks it before it
+	enqueues anything: the on_submit hook, and retry_failed_taxjar_syncs() per
+	invoice."""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def test_refuses_when_the_company_does_not_file(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import resync_transaction
+
+		with patch(f"{self.MOD}.frappe.has_permission"), \
+		     patch(f"{self.MOD}.frappe.db.get_value", return_value="_Test Company"), \
+		     patch(f"{self.MOD}.company_creates_transactions", return_value=False), \
+		     patch(f"{self.MOD}.sync_transaction_to_taxjar") as mock_sync:
+			with self.assertRaises(frappe.ValidationError):
+				resync_transaction("SINV-TEST-001")
+
+		mock_sync.assert_not_called()
+
+	def test_syncs_when_the_company_does_file(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import resync_transaction
+
+		with patch(f"{self.MOD}.frappe.has_permission"), \
+		     patch(f"{self.MOD}.frappe.db.get_value", return_value="_Test Company"), \
+		     patch(f"{self.MOD}.company_creates_transactions", return_value=True), \
+		     patch(f"{self.MOD}.sync_transaction_to_taxjar") as mock_sync:
+			resync_transaction("SINV-TEST-001")
+
+		mock_sync.assert_called_once_with("SINV-TEST-001")
+
+	def test_permission_is_checked_before_the_filing_flag(self):
+		"""A caller who may not write the invoice learns nothing about the
+		company's configuration."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import resync_transaction
+
+		with patch(f"{self.MOD}.frappe.has_permission", side_effect=frappe.PermissionError), \
+		     patch(f"{self.MOD}.company_creates_transactions") as mock_flag:
+			with self.assertRaises(frappe.PermissionError):
+				resync_transaction("SINV-TEST-001")
+
+		mock_flag.assert_not_called()
 
 
 # ── Phase 6: retry_failed_taxjar_syncs ───────────────────────────────────────
@@ -6567,6 +6915,103 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 
 		self.assertTrue(result["invoices"][0]["taxjar_sync_error"].endswith("..."))
 		self.assertEqual(len(result["invoices"][0]["taxjar_sync_error"]), 303)
+
+	def _excluded_rows(self, rows):
+		"""Run get_transactions over the excluded scope with these rows."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			NOT_APPLICABLE_SCOPE,
+			get_transactions,
+		)
+		MOD = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+		with patch(f"{MOD}.frappe.get_list", return_value=rows), \
+		     patch(f"{MOD}.permitted_count", return_value=len(rows)), \
+		     patch(f"{MOD}.transaction_exclusion_reason", return_value="TaxJar Disabled") as inferred:
+			result = get_transactions(filters={}, page=1, scope=NOT_APPLICABLE_SCOPE)
+		return result["invoices"], inferred
+
+	def _excluded_row(self, **overrides):
+		row = dict(
+			name="SINV-001", posting_date="2026-06-01", customer_name="A",
+			grand_total=100, is_return=False, is_debit_note=False,
+			company="_Test Company", taxjar_sync_status="Excluded",
+			taxjar_last_synced=None, taxjar_sync_error="", taxjar_exclusion_reason="",
+		)
+		row.update(overrides)
+		return frappe._dict(row)
+
+	def test_a_recorded_reason_is_left_alone(self):
+		"""What the document recorded is what was true when it was submitted -
+		the current configuration has no standing to overrule it."""
+		rows, inferred = self._excluded_rows([
+			self._excluded_row(taxjar_exclusion_reason="Removed from TaxJar"),
+		])
+
+		self.assertEqual(rows[0]["taxjar_exclusion_reason"], "Removed from TaxJar")
+		self.assertNotIn("taxjar_exclusion_reason_is_current", rows[0])
+		inferred.assert_not_called()
+
+	def test_a_row_with_no_recorded_reason_is_answered_from_today(self):
+		"""Rows written before the reason was recorded cannot have theirs
+		recovered - the configuration has moved on. What the settings say now
+		can still be said, flagged so the client words it in the present tense
+		rather than claiming to report history."""
+		rows, _ = self._excluded_rows([self._excluded_row()])
+
+		self.assertEqual(rows[0]["taxjar_exclusion_reason"], "TaxJar Disabled")
+		self.assertEqual(rows[0]["taxjar_exclusion_reason_is_current"], 1)
+
+	def test_a_row_written_before_the_status_field_still_reads_excluded(self):
+		"""The scope is "submitted and not sent", which catches rows predating
+		the field itself. They are excluded in fact, so the column says so
+		instead of leaving a blank where every other row has a pill."""
+		rows, _ = self._excluded_rows([self._excluded_row(taxjar_sync_status=None)])
+
+		self.assertEqual(rows[0]["taxjar_sync_status"], "Excluded")
+
+	def test_the_live_answer_is_asked_once_per_company(self):
+		"""A page holds at most page_size rows and usually far fewer
+		companies - the question is per company, not per row."""
+		rows = [
+			self._excluded_row(name="SINV-001"),
+			self._excluded_row(name="SINV-002"),
+			self._excluded_row(name="SINV-003", company="Other Co"),
+		]
+		_, inferred = self._excluded_rows(rows)
+
+		self.assertEqual(inferred.call_count, 2)
+
+	def test_a_company_the_settings_no_longer_explain_says_nothing(self):
+		"""Filing is on for this company today, so nothing current explains why
+		this row was kept out. Better to say nothing than to invent it - the
+		client shows no icon rather than one promising a detail that is not
+		there."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			NOT_APPLICABLE_SCOPE,
+			get_transactions,
+		)
+		MOD = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+		with patch(f"{MOD}.frappe.get_list", return_value=[self._excluded_row()]), \
+		     patch(f"{MOD}.permitted_count", return_value=1), \
+		     patch(f"{MOD}.transaction_exclusion_reason", return_value=None):
+			result = get_transactions(filters={}, page=1, scope=NOT_APPLICABLE_SCOPE)
+
+		self.assertFalse(result["invoices"][0]["taxjar_exclusion_reason"])
+		self.assertNotIn("taxjar_exclusion_reason_is_current", result["invoices"][0])
+
+	def test_the_reason_is_only_worked_out_for_the_excluded_scope(self):
+		"""Every other tab's rows were sent, or are drafts - neither has an
+		exclusion to explain, and the live lookup would be pure cost."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			FAILED_SCOPE,
+			get_transactions,
+		)
+		MOD = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+		with patch(f"{MOD}.frappe.get_list", return_value=[self._excluded_row()]), \
+		     patch(f"{MOD}.permitted_count", return_value=1), \
+		     patch(f"{MOD}.transaction_exclusion_reason") as inferred:
+			get_transactions(filters={}, page=1, scope=FAILED_SCOPE)
+
+		inferred.assert_not_called()
 
 	def test_get_summary_counts(self):
 		"""One call feeds both halves of the summary strip: the submitted /
@@ -6779,26 +7224,53 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		self.assertNotIn('__("Last Synced")', columns_fn)
 		self.assertNotIn('__("Error")', columns_fn)
 
-	def test_sync_status_column_only_on_the_sent_tabs(self):
-		"""Draft and Not Applicable are defined as the rows that never got a
-		sync status, so the column would read empty on every one of them. On a
-		sent tab it is not there to say which status - the tab is named after
-		it - but for the detail on the pill: the failure reason, or when it
-		last synced."""
+	def test_every_tab_carries_the_same_columns(self):
+		"""Both status columns used to be dropped from the tabs where every row
+		gave the same answer. It saved a repetitive column and cost more than it
+		saved: the columns moved under you as you crossed the tabs, so the same
+		reading sat in a different place on each one and the table stopped being
+		one table."""
 		columns_fn = self._columns_fn()
-		self.assertIn("if (SENT_TABS.includes(this.active_tab)) {", columns_fn)
-		sync_block = columns_fn.split("if (SENT_TABS.includes(this.active_tab)) {")[1]
-		self.assertIn('__("Sync Status")', sync_block)
+		self.assertNotIn("this.active_tab", columns_fn)
+		for label in ('__("Transaction Status")', '__("Sync Status")'):
+			self.assertIn(label, columns_fn)
 
+		# Nothing left selecting columns by tab.
 		js = self._transactions_js()
-		self.assertIn("const SENT_TABS = [FAILED_TAB, QUEUED_TAB, SYNCED_TAB];", js)
+		self.assertNotIn("SENT_TABS", js)
+		self.assertNotIn("STATUS_TABS", js)
+		# Retry is still offered only where a row was actually sent, though -
+		# the checkbox is a capability, not a reading, so it stays per-tab.
+		self.assertIn("checkboxColumn: key === FAILED_TAB", js)
 
-	def test_transaction_status_column_off_the_draft_tab(self):
-		"""Every row there would read "Draft", which the tab already says."""
-		columns_fn = self._columns_fn()
-		self.assertIn("if (this.active_tab !== DRAFT_TAB) {", columns_fn)
-		block = columns_fn.split("if (this.active_tab !== DRAFT_TAB) {")[1]
-		self.assertIn('__("Transaction Status")', block)
+	def test_a_draft_is_told_what_to_do_rather_than_given_a_status(self):
+		"""Nothing syncs before submit, so whatever the field holds for a draft -
+		"Excluded", by its own default - is not a report about the document, and
+		printing it would say the one thing that is false. Named as the invoice
+		form names it, so the state is not called two things on two screens."""
+		cell_fn = self._sync_status_cell_fn()
+		self.assertIn("if (row.docstatus === 0) {", cell_fn)
+		self.assertIn('__("Submit to Sync")', cell_fn)
+		# Ahead of the status read, which would otherwise answer first.
+		self.assertLess(
+			cell_fn.index("row.docstatus === 0"), cell_fn.index("const status = row.taxjar_sync_status;")
+		)
+
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			self.assertIn('__("Submit to Sync")', f.read())
+
+	def test_a_draft_pill_has_no_hover(self):
+		"""Every other state here hangs a detail off the pill. This one is an
+		instruction, complete in itself - and the form's matching sentence
+		repeated down a whole tab of drafts would be noise."""
+		cell_fn = self._sync_status_cell_fn()
+		draft_branch = cell_fn.split("if (row.docstatus === 0) {")[1].split("\n\t\t}")[0]
+		self.assertNotIn("taxjar-sync-trigger", draft_branch)
+		self.assertNotIn("data-info", draft_branch)
 
 	def test_only_the_failed_tab_has_a_checkbox_column(self):
 		"""Retry is the only bulk action, so selection is offered exactly where
@@ -6839,6 +7311,38 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		js = self._transactions_js()
 		return js.split("render_sync_status_cell(row) {")[1].split("\n\t}\n")[0]
 
+	def test_a_cancelled_failure_says_which_operation_failed(self):
+		"""Failed on a cancelled row means the cancellation never reached
+		TaxJar and the order is still filed there - the opposite of what
+		"Failed" beside a Cancelled transaction status reads as. Worded exactly
+		as the invoice form words it, so one state is not called two things on
+		two screens."""
+		cell_fn = self._sync_status_cell_fn()
+		self.assertIn("const cancelled = row.docstatus === 2;", cell_fn)
+		self.assertIn(
+			'cancelled && status === "Failed" ? __("Failed to Cancel") : __(status)', cell_fn
+		)
+
+	def test_the_cancelled_wording_matches_the_invoice_form(self):
+		"""Both screens name this state; neither may drift from the other."""
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			utils_js = f.read()
+		self.assertIn('__("Failed to Cancel")', utils_js)
+		self.assertIn('__("Failed to Cancel")', self._sync_status_cell_fn())
+
+	def test_docstatus_is_available_to_the_status_cell(self):
+		"""The wording above reads row.docstatus, so get_transactions has to
+		select it - a missing column would silently fall back to "Failed"."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+		import inspect
+		self.assertIn('"docstatus"', inspect.getsource(page.get_transactions))
+
 	def test_sync_status_cell_uses_one_shape_for_every_status(self):
 		"""Failed reads the same as every other status - a pill plus (when
 		there is something to say) a separate info icon, never a special-cased
@@ -6850,16 +7354,22 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		self.assertNotIn("taxjar-retry-one", cell_fn)
 		self.assertIn("row.taxjar_sync_error", cell_fn)
 
-	def test_info_icon_only_for_failed(self):
+	def test_info_icon_for_failed_and_excluded(self):
 		"""Synced makes the pill itself the trigger for its last-synced time.
 		Failed needs the separate icon, since the pill text cannot carry an
-		error. Queued and Excluded say all they have to say in the pill, so an
-		icon there would promise a detail that does not exist."""
+		error, and Excluded needs one for the reason it was kept out. Queued
+		says all it has to say in the pill, so an icon there would promise a
+		detail that does not exist - and so would one on an excluded row whose
+		reason was never recorded, which is why the text is checked before the
+		icon is built."""
 		cell_fn = self._sync_status_cell_fn()
 		self.assertIn('frappe.utils.icon("info", "sm")', cell_fn)
 		self.assertIn('__("Last synced: {0}"', cell_fn)
 		self.assertNotIn('__("Queued for sync")', cell_fn)
-		self.assertIn('if (status !== "Failed") return pill;', cell_fn)
+		self.assertIn('if (!info_text) return pill;', cell_fn)
+		self.assertIn(
+			"info_text = taxjar_integration.exclusion_reason_text(", cell_fn
+		)
 		# Info icon must be a separate element, not nested inside the badge.
 		self.assertIn("const pill = frappe.ui.badge.html({ label, theme: color });", cell_fn)
 		self.assertNotIn("indicator-pill", cell_fn)
@@ -9862,22 +10372,46 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 	def test_empty_addresses_hide_their_section(self):
 		"""Emptying the HTML field left the "Addresses" heading announcing a
-		section with nothing under it - permanently so for a non-US company,
-		which never gets a ship-from or ship-to."""
+		section with nothing under it - permanently so for a non-US company or
+		one with calculation switched off, neither of which ever gets a
+		ship-from or ship-to.
+
+		The section's own depends_on carries this, not a hide() from
+		render_addresses: frappe recomputes section visibility from the field
+		definition on every refresh, and refresh_sections() then counts the
+		section as visible anyway because the HTML control inside it is still
+		there, merely emptied. A hand-rolled hide is undone before anyone sees
+		it.
+		"""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+
+		section = next(
+			f for f in get_custom_fields()["Sales Invoice"]
+			if f.get("fieldname") == "taxjar_addresses_section"
+		)
+		self.assertEqual(
+			section["depends_on"], "eval: doc.taxjar_ship_from || doc.taxjar_ship_to"
+		)
+
+		# Nothing left hiding it by hand, which would only look like it worked.
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("taxjar_integration.render_addresses = function (frm) {")[1].split("\n};")[0]
+		self.assertNotIn("_toggle_section", js)
 
-		self.assertIn(
-			'taxjar_integration._toggle_section(frm, "taxjar_addresses_section", false);', fn
-		)
-		self.assertIn(
-			'taxjar_integration._toggle_section(frm, "taxjar_addresses_section", true);', fn
+	def test_the_matrix_section_stays_and_explains_itself(self):
+		"""The opposite call to the one above, deliberately: an empty matrix has
+		an answer worth reading (which switch is off, and where to go), so its
+		section stays put and says so."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
 		)
 
-		# Sections are not in fields_dict with the controls.
-		toggle = js.split("taxjar_integration._toggle_section = function (frm, fieldname, show) {")[1].split("\n};")[0]
-		self.assertIn("frm.layout.sections_dict[fieldname]", toggle)
-		self.assertIn("section.show() : section.hide()", toggle)
+		section = next(
+			f for f in get_custom_fields()["Sales Invoice"]
+			if f.get("fieldname") == "taxjar_status_section"
+		)
+		self.assertNotIn("depends_on", section)
 
 	def test_status_cards_use_skipped_instead_of_na(self):
 		js = self._read_js("taxjar_utils.js")
@@ -10289,17 +10823,72 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn("content: () => info_text", card)
 		self.assertNotIn("$(", card)
 
-	def test_every_state_but_excluded_has_a_hover_detail(self):
-		"""Draft, Queued, Synced/Cancelled and Failed/Failed to Cancel each say
-		something on hover - only the catch-all Excluded branch, which has no
-		sync attempt to report, leaves the badge bare."""
+	def test_every_state_has_a_hover_detail(self):
+		"""Draft, Queued, Synced/Cancelled, Failed/Failed to Cancel and now
+		Excluded each say something on hover. Excluded was the last branch with
+		nothing to add beyond the word itself; it carries the recorded reason
+		the document was kept out."""
 		fn = self._render_fn()
-		self.assertEqual(fn.count("info_text = "), 4)
-		fallback = fn.split("hasn't reached _set_sync_status")[1].split("\n\t}")[0]
-		self.assertNotIn("info_text", fallback)
-		# ...and a bare badge gets no card and no clickable-looking cursor.
+		self.assertEqual(fn.count("info_text = "), 5)
+		self.assertIn(
+			"info_text = taxjar_integration.exclusion_reason_text(frm.doc.taxjar_exclusion_reason)", fn
+		)
+
+	def test_a_badge_with_nothing_to_say_stays_bare(self):
+		"""An excluded document written before the reason was recorded has none
+		to show, so the card and the clickable-looking cursor are still both
+		conditional - an icon promising a detail that does not exist is worse
+		than no icon."""
+		fn = self._render_fn()
 		self.assertIn("if (info_text) $badge.css(\"cursor\", \"pointer\");", fn)
 		self.assertIn("if (info_text) {", fn)
+
+	def test_the_exclusion_sentence_is_written_once_for_both_screens(self):
+		"""The invoice form's pill and the Transaction Sync page's info icon
+		explain the same state, so they render through one helper rather than
+		each keeping its own wording to drift."""
+		utils = self._read_js("taxjar_utils.js")
+		self.assertIn("taxjar_integration.exclusion_reason_text = function (reason, is_current)", utils)
+
+		import os
+		page_path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_transactions",
+			"taxjar_transactions.js",
+		)
+		with open(os.path.normpath(page_path)) as f:
+			page_js = f.read()
+
+		self.assertIn("taxjar_integration.exclusion_reason_text(", page_js)
+		self.assertIn("taxjar_integration.exclusion_reason_text(", utils)
+
+	def test_a_reason_read_off_todays_settings_is_worded_in_the_present(self):
+		"""A row written before the reason was recorded can only be answered
+		from the configuration as it stands now. Saying that in the past tense
+		would claim to know what was true at submit time, which was never
+		written down."""
+		fn = self._read_js("taxjar_utils.js").split(
+			"taxjar_integration.exclusion_reason_text = function (reason, is_current) {"
+		)[1].split("\n};")[0]
+
+		for reason in ("TaxJar Disabled", "Transaction Sync not enabled for company"):
+			with self.subTest(reason=reason):
+				branch = fn.split(f'reason === "{reason}"')[1].split("\n\t}")[0]
+				self.assertIn("is_current", branch)
+				self.assertIn("when this document was submitted", branch)
+
+		# Removal is only ever a recorded fact - nothing in the current
+		# configuration can infer it, so it has one reading, not two.
+		removed = fn.split('reason === "Removed from TaxJar"')[1].split("\n\t}")[0]
+		self.assertNotIn("is_current", removed)
+
+	def test_an_unrecorded_reason_says_nothing(self):
+		"""Not every excluded row has an answer - a blank must fall through to
+		an empty string, which is what both callers check before offering a
+		hover card or an info icon."""
+		fn = self._read_js("taxjar_utils.js").split(
+			"taxjar_integration.exclusion_reason_text = function (reason, is_current) {"
+		)[1].split("\n};")[0]
+		self.assertIn('return "";', fn)
 
 	def test_wired_into_sales_invoice_refresh(self):
 		js = self._read_js("sales_invoice.js")

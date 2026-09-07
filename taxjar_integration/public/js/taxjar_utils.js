@@ -993,26 +993,22 @@ taxjar_integration._inject_status_card_styles = function () {
 // section that then says nothing - the state a non-US company's TaxJar tab was
 // permanently in. Sections live in layout.sections_dict, not in fields_dict
 // alongside the controls, and carry their own show/hide.
-taxjar_integration._toggle_section = function (frm, fieldname, show) {
-	const section = frm.layout && frm.layout.sections_dict && frm.layout.sections_dict[fieldname];
-	if (!section) return;
-	show ? section.show() : section.hide();
-};
-
 taxjar_integration.render_addresses = function (frm) {
 	if (!frm.fields_dict.taxjar_addresses_html) return;
 	const wrapper = frm.fields_dict.taxjar_addresses_html.$wrapper;
 
 	// Nothing to show: neither address is stored until set_sales_tax has run,
-	// and for a company outside the United States it never does. Hidden
-	// outright rather than emptied, so the heading goes with it.
+	// and it never does for a company outside the United States or one with
+	// calculation switched off. Only the content is cleared here - the heading
+	// goes with it via the section's own depends_on (see _make_status_fields),
+	// because a section hidden from here is re-shown by the next
+	// Section.refresh(), which recomputes visibility from the field definition
+	// and knows nothing of a hide() called in between.
 	if (!frm.doc.taxjar_ship_from && !frm.doc.taxjar_ship_to) {
 		wrapper.html("");
-		taxjar_integration._toggle_section(frm, "taxjar_addresses_section", false);
 		return;
 	}
 
-	taxjar_integration._toggle_section(frm, "taxjar_addresses_section", true);
 	taxjar_integration._inject_status_card_styles();
 
 	const from_text = frm.doc.taxjar_ship_from || __("Not set");
@@ -1236,6 +1232,40 @@ taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
 	});
 };
 
+// Why a submitted document was kept out of TaxJar, as the sentence it deserves.
+// Shared by the invoice form's sidebar pill and the Transaction Sync page's info
+// icon, so one state is not explained two ways on two screens.
+//
+// Every configuration reason has two readings, and which one is being given is
+// not a detail to gloss over: `is_current` says this was read off the settings
+// as they stand now, because the row predates the reason being recorded and its
+// real reason is not recoverable - the configuration has moved on since. Saying
+// that in the past tense would claim to know something that was never written
+// down. "Removed from TaxJar" is only ever a recorded fact; nothing in the
+// current configuration can infer it.
+taxjar_integration.exclusion_reason_text = function (reason, is_current) {
+	if (reason === "TaxJar Disabled") {
+		return is_current
+			? __("TaxJar is switched off for this site.")
+			: __("TaxJar was switched off for this site when this document was submitted.");
+	}
+
+	if (reason === "Transaction Sync not enabled for company") {
+		// Same words as the stored value the reader can see on the invoice's own
+		// Exclusion Reason field, expanded into a sentence rather than restated in
+		// a second vocabulary.
+		return is_current
+			? __("Transaction sync is not enabled for this company.")
+			: __("Transaction sync was not enabled for this company when this document was submitted.");
+	}
+
+	if (reason === "Removed from TaxJar") {
+		return __("This transaction was removed from TaxJar.");
+	}
+
+	return "";
+};
+
 taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	// "Synced"/"Failed" are written by both the on_submit sync path and the
 	// on_cancel delete path (see _set_sync_status), so docstatus === 2 is
@@ -1269,11 +1299,16 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 		info_text = frm.doc.taxjar_sync_error || __("Unknown error");
 	} else {
-		// TaxJar is enabled for the company but enqueue_taxjar_sync/
-		// enqueue_taxjar_delete hasn't reached _set_sync_status for this doc
-		// yet (e.g. no API credential even though "create transactions" is on).
+		// Excluded: submitted, and deliberately not sent. The pill used to stop
+		// at the word and leave the reader to go and compare the settings
+		// themselves; enqueue_taxjar_sync now records which switch was off, and
+		// this says it. A document excluded before that was recorded has nothing
+		// stored and gets no hover card - the page can fall back on the current
+		// configuration because it says so in the present tense, whereas a bare
+		// sentence on the form could not carry that distinction.
 		label = __(status);
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
+		info_text = taxjar_integration.exclusion_reason_text(frm.doc.taxjar_exclusion_reason);
 	}
 
 	const $badge = frappe.ui.badge({ label, theme: color });

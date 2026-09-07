@@ -20,6 +20,7 @@ import taxjar
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
+	TRANSACTION_EXCLUSION_REASONS,
 	_is_taxjar_enabled,
 	get_client,
 	log_taxjar_call,
@@ -372,6 +373,24 @@ def _make_status_fields(insert_after_tab, allow_on_submit=False):
 			d["default"] = default
 		if fieldtype == "Select" and fieldname == "taxjar_product_taxable":
 			d["options"] = "\nYes\nNo\nPartially"
+		if fieldname == "taxjar_addresses_section":
+			# Neither address is stored until set_sales_tax has run, and it never
+			# does for a company outside the United States or one with sales tax
+			# calculation switched off. An "Addresses" heading announcing nothing
+			# is worse than no section at all.
+			#
+			# Declared here rather than hidden from render_addresses: a section
+			# hidden by hand is re-shown by the next Section.refresh(), which
+			# recomputes visibility from df.hidden and hidden_due_to_dependency
+			# alone and knows nothing of a hide() called in between - and
+			# refresh_sections() then marks the section visible because the HTML
+			# control inside it is still there, merely emptied. Expressed as a
+			# dependency, frappe owns the answer and keeps it across every refresh.
+			#
+			# Deliberately not the treatment the Tax Applicability Matrix gets: that
+			# one stays and says why it is empty (see _render_empty_status), because
+			# it has an answer worth reading. An absent address pair does not.
+			d["depends_on"] = "eval: doc.taxjar_ship_from || doc.taxjar_ship_to"
 		if allow_on_submit:
 			d["allow_on_submit"] = 1
 		prev = fieldname
@@ -596,9 +615,24 @@ def get_custom_fields():
 				depends_on="eval: doc.docstatus === 1 && doc.taxjar_sync_status == 'Failed'",
 			),
 			dict(
+				# Why a submitted document was kept out of TaxJar. Only ever set
+				# alongside the Excluded status, and cleared by every other status
+				# (see _sync_status_fields), so it cannot outlive the state it
+				# explains. The leading "" yields a blank first option, which is what
+				# a row written before the reason was recorded holds.
+				fieldname="taxjar_exclusion_reason",
+				fieldtype="Select",
+				insert_after="taxjar_sync_error",
+				label="Exclusion Reason",
+				options="\n" + "\n".join(TRANSACTION_EXCLUSION_REASONS),
+				read_only=1,
+				allow_on_submit=1,
+				depends_on="eval: doc.docstatus === 1 && doc.taxjar_sync_status == 'Excluded'",
+			),
+			dict(
 				fieldname="taxjar_last_synced",
 				fieldtype="Datetime",
-				insert_after="taxjar_sync_error",
+				insert_after="taxjar_exclusion_reason",
 				label="Last Synced",
 				read_only=1,
 				allow_on_submit=1,

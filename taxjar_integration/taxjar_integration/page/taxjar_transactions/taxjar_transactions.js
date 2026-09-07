@@ -30,9 +30,7 @@ const STATUS_COLORS = {
 	Excluded: "gray",
 };
 
-// Submitted is the normal resting state, so it stays quiet; Cancelled is the
-// one worth noticing in a list that mixes the two.
-const DOC_STATUS_COLORS = { Submitted: "blue", Cancelled: "red" };
+const DOC_STATUS_COLORS = { Draft: "gray", Submitted: "blue", Cancelled: "red" };
 
 const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
 
@@ -55,9 +53,8 @@ const TABS = [
 	{ name: SYNCED_TAB, label: __("Synced") },
 ];
 
-// The tabs holding rows TaxJar actually received. Only these have a sync
-// status worth a column, and only these can be retried.
-const SENT_TABS = [FAILED_TAB, QUEUED_TAB, SYNCED_TAB];
+// Submitted is the normal resting state and Draft the one before it, so both
+// stay quiet; Cancelled is the one worth noticing in a list that mixes them.
 
 class TaxJarTransactionSync {
 	constructor(page) {
@@ -399,30 +396,26 @@ class TaxJarTransactionSync {
 			},
 		];
 
-		// Submitted or Cancelled. Not on the Draft tab, where every row would
-		// read "Draft" - the tab already says so.
-		if (this.active_tab !== DRAFT_TAB) {
-			columns.push({
-				label: __("Transaction Status"),
-				fieldname: "doc_status",
-				_html: (value) =>
-					value
-						? frappe.ui.badge.html({ label: __(value), theme: DOC_STATUS_COLORS[value] || "gray" })
-						: "",
-			});
-		}
+		// Both of these used to be dropped from the tabs where every row would
+		// give the same answer - Transaction Status off Draft, Sync Status off
+		// Draft and Excluded. It saved a repetitive column and cost more than it
+		// saved: the columns moved under you as you crossed the tabs, so the
+		// same reading sat in a different place on each one and the table stopped
+		// being one table. A uniform row is worth a repeated word.
+		columns.push({
+			label: __("Transaction Status"),
+			fieldname: "doc_status",
+			_html: (value) =>
+				value
+					? frappe.ui.badge.html({ label: __(value), theme: DOC_STATUS_COLORS[value] || "gray" })
+					: "",
+		});
 
-		// Every row on a sent tab carries the status the tab is named after, so
-		// the column is not there to say which - it is there for the detail
-		// hanging off the pill: the failure reason, or when it last synced.
-		// Nothing on the other two tabs has a sync status at all.
-		if (SENT_TABS.includes(this.active_tab)) {
-			columns.push({
-				label: __("Sync Status"),
-				fieldname: "taxjar_sync_status",
-				_html: (value, row) => this.render_sync_status_cell(row),
-			});
-		}
+		columns.push({
+			label: __("Sync Status"),
+			fieldname: "taxjar_sync_status",
+			_html: (value, row) => this.render_sync_status_cell(row),
+		});
 
 		return columns;
 	}
@@ -473,16 +466,40 @@ class TaxJarTransactionSync {
 
 	// Synced rows carry their detail (last-synced time) as a hover/click
 	// popover on the pill itself - no separate info icon needed since the
-	// pill's own text already says everything else. Failed pairs the pill with
-	// a separate info icon (never nested inside the pill) for its popover,
-	// since the pill text alone doesn't carry the error. Queued and Excluded
-	// say all they have to say in the pill.
+	// pill's own text already says everything else. Failed and Excluded each
+	// pair the pill with a separate info icon (never nested inside the pill)
+	// for its popover, since neither pill text carries what the reader wants:
+	// the error, or why the document was kept out. Queued says all it has to
+	// say in the pill.
 	render_sync_status_cell(row) {
+		// Nothing syncs before submit (see enqueue_taxjar_sync's on_submit
+		// hook), so whatever the field happens to hold for a draft - "Excluded",
+		// by its own default - is not a report about the document, and printing
+		// it would say the one thing that is false. The invoice form names this
+		// state "Submit to Sync" (see _render_taxjar_sync_status_pill); so does
+		// this. No hover: unlike every other state here, the pill is an
+		// instruction and complete in itself, and the form's matching sentence
+		// repeated down a whole tab of drafts would be noise.
+		if (row.docstatus === 0) {
+			return frappe.ui.badge.html({ label: __("Submit to Sync"), theme: "amber" });
+		}
+
 		const status = row.taxjar_sync_status;
 		if (!status) return "";
 
 		const color = STATUS_COLORS[status] || "gray";
-		const label = __(status);
+
+		// On a cancelled row, Failed means the cancellation never reached TaxJar -
+		// the order is still filed there. That is the opposite of what a reader
+		// takes "Failed" beside a Cancelled transaction status to mean, which is
+		// that the invoice never got there in the first place. The Transaction
+		// Status column says the document was cancelled; only this pill can say
+		// which of the two operations was the one that failed.
+		//
+		// Worded exactly as the invoice form words it (_render_taxjar_sync_status_pill
+		// in taxjar_utils.js), so one state is not called two things on two screens.
+		const cancelled = row.docstatus === 2;
+		const label = cancelled && status === "Failed" ? __("Failed to Cancel") : __(status);
 
 		if (status === "Synced") {
 			if (!row.taxjar_last_synced) {
@@ -497,9 +514,21 @@ class TaxJarTransactionSync {
 
 		const pill = frappe.ui.badge.html({ label, theme: color });
 
-		if (status !== "Failed") return pill;
+		// Excluded may still have nothing to say - a row written before the
+		// reason was recorded, for a company whose configuration no longer
+		// explains it - and an icon promising a detail that does not exist is
+		// worse than no icon, so the pill goes out on its own.
+		let info_text = "";
+		if (status === "Failed") {
+			info_text = row.taxjar_sync_error || __("Unknown error");
+		} else if (status === "Excluded") {
+			info_text = taxjar_integration.exclusion_reason_text(
+				row.taxjar_exclusion_reason,
+				row.taxjar_exclusion_reason_is_current
+			);
+		}
+		if (!info_text) return pill;
 
-		const info_text = row.taxjar_sync_error || __("Unknown error");
 		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
 			info_text
 		)}">${frappe.utils.icon("info", "sm")}</button>`;

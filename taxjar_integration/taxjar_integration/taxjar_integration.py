@@ -229,11 +229,88 @@ def get_client(company=None):
 		return client
 
 
+# One condition, one sentence: a company with transaction filing switched on but
+# no usable API credential for the current Sandbox/Live mode. Named rather than
+# repeated so the on_submit hook and the two workers cannot drift apart on the
+# wording, having already drifted apart on the verdict.
+_NOT_CONFIGURED_ERROR = "TaxJar is not configured for this company."
+
+
+# Why a submitted transaction was deliberately kept out of TaxJar, stored on the
+# invoice as taxjar_exclusion_reason. Short readable phrases rather than codes,
+# for the same reason taxjar_sync_status holds words: the field reads correctly
+# on the form itself, and stays translatable through __() at render time. The
+# sentence each one becomes lives in taxjar_integration.exclusion_reason_text
+# (taxjar_utils.js), which both the invoice form and the Transaction Sync page
+# render through.
+EXCLUSION_TAXJAR_DISABLED = "TaxJar Disabled"
+EXCLUSION_SYNC_NOT_ENABLED = "Transaction Sync not enabled for company"
+EXCLUSION_REMOVED_FROM_TAXJAR = "Removed from TaxJar"
+
+# Drives the Select's options - see make_custom_fields, which re-runs on every
+# migrate, so the field and this list cannot drift apart.
+TRANSACTION_EXCLUSION_REASONS = (
+	EXCLUSION_TAXJAR_DISABLED,
+	EXCLUSION_SYNC_NOT_ENABLED,
+	EXCLUSION_REMOVED_FROM_TAXJAR,
+)
+
+
 def enqueue_taxjar_sync(doc, method):
 	"""on_submit hook: enqueue background TaxJar transaction sync."""
 	if not company_creates_transactions(doc.company):
+		# Recorded rather than returned silently. "Excluded" is the field's own
+		# default, so a deliberate exclusion used to be indistinguishable from a
+		# row nothing had ever looked at - and even once read as deliberate, it
+		# never said which of the two switches was the one that was off, leaving
+		# the reader to go and compare the settings for themselves.
+		#
+		# Worth a write even on a site with TaxJar switched off entirely, where it
+		# costs one UPDATE per submit and appears to say nothing: the day that
+		# switch is turned on, these are the rows that can still say they predate
+		# it, rather than falling back on a configuration that has since moved on.
+		#
+		# Same doc.db_set reasoning as the branch below.
+		#
+		# transaction_exclusion_reason() is the same question the line above asks,
+		# answered with which switch rather than just "one of them" - so it always
+		# has an answer by the time it is reached here.
+		doc.db_set(
+			_sync_status_fields(
+				"Excluded",
+				exclusion_reason=transaction_exclusion_reason(doc.company),
+			),
+			update_modified=False,
+		)
+		_publish_transaction_update(doc.name, "Excluded")
 		return
+
 	if not get_client(doc.company):
+		# Same condition, same verdict as sync_transaction_to_taxjar below: a
+		# company that has filing switched on but no token for the current API
+		# mode is misconfigured, not exempt. Returning silently used to leave the
+		# invoice on the "Excluded" default, which reads as a deliberate exclusion
+		# and is the one state nothing ever retries - so filing stopped for that
+		# company without anything saying so.
+		#
+		# Written through doc.db_set rather than _set_sync_status because this runs
+		# inside the submit itself: the in-memory document is what the client gets
+		# back, and frappe.db.set_value would leave it claiming Excluded until
+		# something reloaded the form.
+		doc.db_set(
+			_sync_status_fields(
+				"Failed",
+				error=_NOT_CONFIGURED_ERROR,
+				# retry_failed_taxjar_syncs() picks these up once the token is
+				# entered. It re-checks company_creates_transactions per invoice and
+				# gives up after TAXJAR_MAX_SYNC_RETRIES, so a company that is never
+				# configured is not re-tried forever.
+				retryable=True,
+				prior_retry_count=cint(getattr(doc, "taxjar_sync_retry_count", 0)),
+			),
+			update_modified=False,
+		)
+		_publish_transaction_update(doc.name, "Failed")
 		return
 
 	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
@@ -254,7 +331,31 @@ def enqueue_taxjar_delete(doc, method):
 	"""on_cancel hook: enqueue background TaxJar transaction deletion."""
 	if not company_creates_transactions(doc.company):
 		return
+
 	if not get_client(doc.company):
+		# Same treatment as enqueue_taxjar_sync above, for a sharper reason: this
+		# document is quite likely already filed in TaxJar. Returning silently
+		# left it reading "Synced" with the order still sitting there and the
+		# cancellation never sent - and since retry_failed_taxjar_syncs() only
+		# looks at Failed rows, nothing would ever pick it up again. The
+		# transaction stayed stranded in TaxJar for good, with nothing in ERPNext
+		# hinting at it.
+		#
+		# Failed on a cancelled document reads as "Failed to Cancel" on the
+		# invoice form and on the Transaction Sync page, and the cron's filter
+		# includes docstatus 2, so once a token is entered the delete is made for
+		# real. taxjar_last_synced survives this (see _sync_status_fields), so
+		# when the document did reach TaxJar is not lost along the way.
+		doc.db_set(
+			_sync_status_fields(
+				"Failed",
+				error=_NOT_CONFIGURED_ERROR,
+				retryable=True,
+				prior_retry_count=cint(getattr(doc, "taxjar_sync_retry_count", 0)),
+			),
+			update_modified=False,
+		)
+		_publish_transaction_update(doc.name, "Failed")
 		return
 
 	doc.db_set("taxjar_sync_status", "Queued", update_modified=False)
@@ -297,8 +398,25 @@ def resync_transaction(invoice_name: str):
 	frappe.enqueue resolves a dotted path without it, so the on_submit hook, the
 	retry cron and the bulk actions all keep working unchanged, while HTTP has
 	exactly one way in and it checks permission first.
+
+	It is also the one entry point that has to re-check the company's filing
+	flag. Everything else checks it before it enqueues anything - the on_submit
+	hook above, and retry_failed_taxjar_syncs() per invoice - but the worker
+	itself only needs a client, so without this a button click would file a
+	transaction for a company whose filing is deliberately switched off. The
+	button is hidden in that case too (see _add_taxjar_buttons in
+	sales_invoice.js); this is what makes it true rather than merely unoffered.
 	"""
 	frappe.has_permission("Sales Invoice", "write", doc=invoice_name, throw=True)
+
+	company = frappe.db.get_value("Sales Invoice", invoice_name, "company")
+	if not company_creates_transactions(company):
+		frappe.throw(
+			_("TaxJar transaction filing is turned off for {0}. Turn it on in TaxJar Settings "
+			  "to sync this document.").format(company),
+			title=_("Filing Is Off"),
+		)
+
 	return sync_transaction_to_taxjar(invoice_name)
 
 
@@ -313,7 +431,7 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	client = get_client(doc.company)
 	if not client:
-		_set_sync_status(invoice_name, "Failed", error="TaxJar is not configured for this company.", retryable=True)
+		_set_sync_status(invoice_name, "Failed", error=_NOT_CONFIGURED_ERROR, retryable=True)
 		return
 
 	# Matched by account_head, not description - the row's description is
@@ -384,7 +502,7 @@ def delete_transaction_from_taxjar(invoice_name):
 
 	client = get_client(doc.company)
 	if not client:
-		_set_sync_status(invoice_name, "Failed", error="TaxJar is not configured for this company.", retryable=True)
+		_set_sync_status(invoice_name, "Failed", error=_NOT_CONFIGURED_ERROR, retryable=True)
 		return
 
 	is_refund = doc.is_return
@@ -437,7 +555,45 @@ def _publish_transaction_update(invoice_name, status):
 	)
 
 
-def _set_sync_status(invoice_name, status, error=None, retryable=False):
+def _sync_status_fields(status, error=None, retryable=False, prior_retry_count=0, exclusion_reason=None):
+	"""The complete set of sync fields one status change writes.
+
+	Shared by _set_sync_status below, which writes straight to the database from
+	the async paths, and by the two enqueue hooks, which write through the
+	document because they run inside the submit or cancel itself. One definition,
+	so a Failed row looks the same however it was reached.
+	"""
+	if error and retryable:
+		error = f"{error} Automatic retry is scheduled."
+
+	fields = {
+		"taxjar_sync_status": status,
+		"taxjar_sync_error": error or "",
+		"taxjar_sync_retryable": 1 if status == "Failed" and retryable else 0,
+		# Any other outcome resets the count: retry_failed_taxjar_syncs() stops
+		# re-enqueueing at TAXJAR_MAX_SYNC_RETRIES, so a document that recovers
+		# starts its next run of failures from zero rather than from where the
+		# last one left off.
+		"taxjar_sync_retry_count": prior_retry_count + 1 if status == "Failed" else 0,
+		# Cleared unless this write is itself an exclusion: a document kept out in
+		# March and synced in April must not go on explaining why it once was not.
+		"taxjar_exclusion_reason": exclusion_reason or "",
+	}
+
+	# Written on a successful sync and never cleared. "Last synced" is a
+	# historical fact - a later failure does not unmake it, and it is the only
+	# record that the document ever reached TaxJar at all. Nulling it on every
+	# other status used to erase exactly that: a document that filed correctly
+	# and later failed its cancel-delete lost the timestamp of the sync that did
+	# work, which is why bulk_retry writes its own status rather than come
+	# through here.
+	if status == "Synced":
+		fields["taxjar_last_synced"] = frappe.utils.now()
+
+	return fields
+
+
+def _set_sync_status(invoice_name, status, error=None, retryable=False, exclusion_reason=None):
 	"""Update TaxJar sync status fields on a Sales Invoice via db_set, then
 	notify any open form and the Transaction Sync page via realtime so neither
 	sits showing a stale status until manually reloaded. This is reached only
@@ -455,20 +611,19 @@ def _set_sync_status(invoice_name, status, error=None, retryable=False):
 	count reaches TAXJAR_MAX_SYNC_RETRIES, so a document TaxJar keeps rejecting
 	doesn't get auto-retried forever.
 	"""
-	if error and retryable:
-		error = f"{error} Automatic retry is scheduled."
-
-	fields = {
-		"taxjar_sync_status": status,
-		"taxjar_sync_error": error or "",
-		"taxjar_sync_retryable": 1 if status == "Failed" and retryable else 0,
-		"taxjar_last_synced": frappe.utils.now() if status == "Synced" else None,
-	}
-	if status == "Failed":
-		prior_count = cint(frappe.db.get_value("Sales Invoice", invoice_name, "taxjar_sync_retry_count"))
-		fields["taxjar_sync_retry_count"] = prior_count + 1
-	else:
-		fields["taxjar_sync_retry_count"] = 0
+	# Only read when it is about to be incremented - every other status resets it.
+	prior_count = (
+		cint(frappe.db.get_value("Sales Invoice", invoice_name, "taxjar_sync_retry_count"))
+		if status == "Failed"
+		else 0
+	)
+	fields = _sync_status_fields(
+		status,
+		error=error,
+		retryable=retryable,
+		prior_retry_count=prior_count,
+		exclusion_reason=exclusion_reason,
+	)
 
 	frappe.db.set_value("Sales Invoice", invoice_name, fields, update_modified=False)
 	frappe.publish_realtime(
@@ -562,7 +717,7 @@ def delete_transaction_manual(invoice_name: str):
 		else:
 			response = client.delete_order(doc.name, params=provider_params)
 		log_taxjar_call(action=action, status="success", response=response, context=ctx)
-		_set_sync_status(invoice_name, "Excluded")
+		_set_sync_status(invoice_name, "Excluded", exclusion_reason=EXCLUSION_REMOVED_FROM_TAXJAR)
 		return {"success": True}
 	except Exception as e:
 		log_taxjar_call(action=action, status="error", error=str(e), context=ctx)
@@ -1870,14 +2025,31 @@ def company_calculates_tax(company, config=None):
 	return bool(config and config.taxjar_calculate_tax)
 
 
+def transaction_exclusion_reason(company, config=None):
+	"""Which switch keeps this company's transactions out of TaxJar, or None if
+	none of them does.
+
+	The same question company_creates_transactions() asks, answered with the
+	specific reason instead of a bare no. enqueue_taxjar_sync records the answer
+	on the invoice; the Transaction Sync page asks it live for rows written
+	before it was recorded.
+	"""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+		return EXCLUSION_TAXJAR_DISABLED
+	if config is None:
+		config = get_company_config(company)
+	if not (config and config.taxjar_create_transactions):
+		# One reason for both "this company has no TaxJar config row" and "it has
+		# one with filing switched off": the reader fixes either in the same
+		# place, so splitting them would name two routes to one screen.
+		return EXCLUSION_SYNC_NOT_ENABLED
+	return None
+
+
 def company_creates_transactions(company, config=None):
 	"""Whether transaction filing is on for a company (master switch AND the
 	company's own File Transactions flag)."""
-	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
-		return False
-	if config is None:
-		config = get_company_config(company)
-	return bool(config and config.taxjar_create_transactions)
+	return not transaction_exclusion_reason(company, config)
 
 
 @frappe.whitelist()
@@ -2072,7 +2244,7 @@ _FIXED_STATUS_MESSAGES = {
 _DETAIL_OVERRIDES = (
 	(
 		("already imported", "already exists"),
-		"Transaction ID already exists in TaxJar, please create a new transaction.",
+		"Transaction ID already exists in TaxJar, please cancel & create a new transaction.",
 	),
 	(
 		("exemption_type must be",),

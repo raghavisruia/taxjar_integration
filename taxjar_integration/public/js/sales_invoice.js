@@ -45,11 +45,33 @@ frappe.ui.form.on("Sales Invoice", {
 });
 
 function _add_taxjar_buttons(frm) {
-	if (!frm.doc.docstatus || !frm.fields_dict.taxjar_sync_status) return;
+	if (!frm.doc.docstatus || !frm.fields_dict.taxjar_sync_status || !frm.doc.company) return;
 
 	const status = frm.doc.taxjar_sync_status;
 	if (status !== "Failed" && status !== "Excluded") return;
 
+	// resync_transaction refuses to file for a company whose "create
+	// transactions" flag is off, so the button is not offered there either -
+	// it would otherwise sit directly beneath a sidebar pill saying this company
+	// does not file, offering to do the one thing it cannot.
+	//
+	// Asked live for the same reason the sidebar pill asks live (see
+	// render_sync_status_sidebar_pill): the flag can change after the document
+	// was last written, and a cancelled document is never written again. The
+	// answer lands after refresh() has finished, which is fine - add_inner_button
+	// dedupes by label, so a late callback cannot stack a second button.
+	const docname = frm.doc.name;
+	frappe.call({
+		method: "taxjar_integration.taxjar_integration.taxjar_integration.is_taxjar_enabled_for_company",
+		args: { company: frm.doc.company },
+		callback: (r) => {
+			if (!r.message || frm.doc.name !== docname) return;
+			_add_sync_button(frm);
+		},
+	});
+}
+
+function _add_sync_button(frm) {
 	frm.add_custom_button(__("Sync to TaxJar"), function () {
 		frappe.call({
 			method: "taxjar_integration.taxjar_integration.taxjar_integration.resync_transaction",
