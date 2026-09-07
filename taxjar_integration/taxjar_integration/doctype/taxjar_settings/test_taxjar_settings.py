@@ -5211,6 +5211,21 @@ class TestDeskPageChromeJS(UnitTestCase):
 			rule = f.read().split(".dt-scrollable {")[1].split("}")[0]
 		self.assertNotIn("height: auto", rule)
 
+	def test_cells_do_not_raise_the_browsers_native_tooltip(self):
+		"""frappe-datatable stamps every cell with a title attribute holding
+		that cell's own text (cellmanager.js:939). Columns here are sized to
+		their widest cell, so nothing is truncated and the tooltip only ever
+		repeats what is already on screen - and over a status cell it lands on
+		top of the popover the reader hovered for. The attribute is stripped on
+		the way in, before the browser's hover delay elapses."""
+		data_table = self._read_component("data_table_manager")
+		self.assertIn("this.suppress_native_tooltips();", data_table)
+		fn = data_table.split("suppress_native_tooltips() {")[1].split("\n\t}")[0]
+		# mouseover bubbles, so one delegated handler survives every re-render
+		# HyperList does on scroll; mouseenter would not.
+		self.assertIn('"mouseover", ".dt-cell__content[title]"', fn)
+		self.assertIn('removeAttr("title")', fn)
+
 	def test_column_filters_are_resolved_server_side(self):
 		"""The library filters the rows it holds, which is one page - a search
 		for a record on page 3 would report nothing found. The override hands

@@ -23,6 +23,7 @@ taxjar_integration.DataTableManager = class DataTableManager {
 		this.$wrapper.addClass("taxjar-datatable");
 		this.render_datatable();
 		this.setup_server_filters();
+		this.suppress_native_tooltips();
 		this.fit_height();
 
 		this.columns_dict = {};
@@ -94,6 +95,25 @@ taxjar_integration.DataTableManager = class DataTableManager {
 		};
 
 		this.datatable = new frappe.DataTable(this.$wrapper.get(0), datatable_options);
+	}
+
+	// The library stamps every cell with a title attribute holding that cell's
+	// own text (cellmanager.js:939), so the browser raises its native tooltip
+	// over content that is already fully readable - columns here are sized to
+	// their widest cell, so nothing is truncated and the tooltip only ever
+	// repeats what is on screen. Worse, on a status cell it lands on top of the
+	// popover carrying the detail the reader actually hovered for.
+	//
+	// Stripped as the pointer arrives rather than after each render: the
+	// browser reads the attribute only once its hover delay elapses, so
+	// removing it on the way in is enough, and it keeps working through the
+	// re-renders HyperList does on every scroll. Delegated on the wrapper, so
+	// mouseover (which bubbles) rather than mouseenter (which does not). The
+	// filter row's own title lives on the input, not the cell, and stays.
+	suppress_native_tooltips() {
+		this.$wrapper.on("mouseover", ".dt-cell__content[title]", (e) =>
+			$(e.currentTarget).removeAttr("title")
+		);
 	}
 
 	// The inline filter row looks like it filters the result set, so it has to
