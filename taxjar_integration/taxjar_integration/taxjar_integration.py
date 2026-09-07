@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import traceback
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import frappe
@@ -207,8 +208,18 @@ def log_taxjar_call(action, status, payload=None, response=None, error=None, con
 		logger.error(traceback.format_exc())
 
 
+@request_cache
 def get_company_config(company):
-	"""Return the TaxJar Company Config row for the given company, or None."""
+	"""Return the TaxJar Company Config row for the given company, or None.
+
+	Request-cached because frappe.get_single() rebuilds the whole settings
+	document - child tables included - on every call, and a single save asks
+	this three or four times over (set_sales_tax, get_tax_data, check_for_nexus,
+	and the feature predicates below). The cache is frappe's own request-scoped
+	one, so it lasts exactly as long as the request or the background job that
+	opened it, and TaxJarSettings.on_update clears it for the save that changes
+	the answer.
+	"""
 	taxjar_settings = frappe.get_single("TaxJar Settings")
 	for config in taxjar_settings.company_config or []:
 		if config.company == company:
@@ -2047,9 +2058,109 @@ def _is_taxjar_enabled(settings=None):
 	)
 
 
+def clear_company_config_cache():
+	"""Drop the request-scoped memo behind get_company_config().
+
+	Called from TaxJarSettings.on_update so the save that changes a company's
+	configuration does not go on reading the answer from before it. Clears the
+	whole request cache rather than one entry - frappe's request_cache exposes
+	no per-function handle, and everything in there is a memo that costs one
+	recomputation to rebuild.
+	"""
+	cache = getattr(frappe.local, "request_cache", None)
+	if cache is not None:
+		cache.clear()
+
+
+# Why a company is outside TaxJar's remit, when it is. Three distinct answers
+# because they send the reader to three different places: a master switch on the
+# settings form, a missing configuration row, and a Company whose country no
+# setting in this app can change.
+SCOPE_SITE_OFF = "site_off"
+SCOPE_NOT_CONFIGURED = "not_configured"
+SCOPE_NOT_US = "not_us"
+
+
+@dataclass(frozen=True)
+class CompanyScope:
+	"""What TaxJar may do for one company, answered once and in full.
+
+	The app has asked this question three different ways in three different
+	places - a master switch here, a per-company flag there, a country check in
+	set_sales_tax and nowhere else - which is how a company outside the United
+	States ended up being asked for a shipping address, and how one company's
+	nexus ended up answering for another's sale.
+
+	The distinction that matters, and that the old predicates could not express:
+
+	* ``calculate_enabled`` / ``file_enabled`` are the switches, as set.
+	* ``in_scope`` is whether TaxJar applies to this company at all - it has a
+	  configuration row and it is registered in the United States.
+	* ``calculates`` / ``files`` are the effective answers, which is what a
+	  caller almost always wants. A switch that is on for a company TaxJar
+	  cannot serve is not an instruction to act.
+	"""
+
+	company: str
+	in_scope: bool
+	calculate_enabled: bool
+	file_enabled: bool
+	config: object | None
+	reason: str | None
+
+	@property
+	def calculates(self) -> bool:
+		return self.in_scope and self.calculate_enabled
+
+	@property
+	def files(self) -> bool:
+		return self.in_scope and self.file_enabled
+
+	@property
+	def uses_taxjar(self) -> bool:
+		"""Whether either feature applies - the gate for anything that feeds a
+		TaxJar payload. Both features send the same ship-from, ship-to and line
+		items, so a rule about the payload belongs to both or to neither."""
+		return self.calculates or self.files
+
+
+def company_scope(company, config=None) -> CompanyScope:
+	"""Resolve one company's TaxJar scope.
+
+	Conditions are ordered cheapest-first so the common negative - TaxJar off
+	for the whole site - costs a single cached read, and the Company lookup
+	happens only for a company that got past the other two.
+	"""
+	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
+		return CompanyScope(company, False, False, False, None, SCOPE_SITE_OFF)
+
+	if config is None:
+		config = get_company_config(company)
+	if not config:
+		return CompanyScope(company, False, False, False, None, SCOPE_NOT_CONFIGURED)
+
+	calculate_enabled = bool(config.taxjar_calculate_tax)
+	file_enabled = bool(config.taxjar_create_transactions)
+
+	if get_region(company) != "United States":
+		# TaxJar computes United States sales tax. A company registered anywhere
+		# else is not a company with the feature switched off - it is a company
+		# the feature cannot serve, and no setting on the setup page changes that.
+		return CompanyScope(company, False, calculate_enabled, file_enabled, config, SCOPE_NOT_US)
+
+	return CompanyScope(company, True, calculate_enabled, file_enabled, config, None)
+
+
 def company_calculates_tax(company, config=None):
 	"""Whether sales-tax calculation is on for a company (master switch AND the
-	company's own Calculate Sales Tax flag)."""
+	company's own Calculate Sales Tax flag).
+
+	Superseded by company_scope(company).calculates, which also accounts for
+	whether TaxJar applies to the company at all. Kept, unchanged, until every
+	caller has been moved across - this one answers "is the switch on", which is
+	a different question from "should this run", and callers currently rely on
+	the former.
+	"""
 	if not cint(frappe.db.get_single_value("TaxJar Settings", "taxjar_enabled")):
 		return False
 	if config is None:

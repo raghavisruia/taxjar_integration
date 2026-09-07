@@ -22,6 +22,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
 	TRANSACTION_EXCLUSION_REASONS,
 	_is_taxjar_enabled,
+	clear_company_config_cache,
 	get_client,
 	log_taxjar_call,
 	sanitize_error_response,
@@ -56,6 +57,10 @@ class TaxJarSettings(Document):
 	# end: auto-generated types
 
 	def on_update(self):
+		# This save is what changes the answer, so nothing later in the request
+		# should still be reading the memo from before it.
+		clear_company_config_cache()
+
 		features_enabled = _is_taxjar_enabled(self)
 
 		# Custom fields, the Product Tax Category master and permissions are all set up

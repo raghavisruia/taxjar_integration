@@ -14131,7 +14131,12 @@ US_FILE = TaxJarCompanyProfile("US File Co", calculate=0, file=1)
 US_OFF = TaxJarCompanyProfile("US Off Co", calculate=0, file=0)
 IN_CO = TaxJarCompanyProfile("India Co", country="India", configured=False)
 
-TAXJAR_COMPANIES = (US_CALC, US_FILE, US_OFF, IN_CO)
+# The dangerous one: an India company somebody added to the setup wizard and
+# switched both features on for. Nothing in the app stops that today, so the
+# scope predicate has to be the thing that refuses to act on it.
+IN_FLAGGED = TaxJarCompanyProfile("India Flagged Co", country="India", calculate=1, file=1)
+
+TAXJAR_COMPANIES = (US_CALC, US_FILE, US_OFF, IN_CO, IN_FLAGGED)
 _BY_NAME = {profile.name: profile for profile in TAXJAR_COMPANIES}
 
 
@@ -14388,3 +14393,175 @@ class TestInternationalDestinationsDegrade(TaxJarTestCase):
 			module.get_state_code(address, "Shipping")
 		except frappe.ValidationError:
 			self.fail("an international destination should degrade, not block the save")
+
+
+# ── Step 2: the scope predicate ───────────────────────────────────────────────
+
+
+class TestCompanyScope(TaxJarTestCase):
+	"""company_scope() answers, in one object, the question the app has been
+	asking three different ways in three different places."""
+
+	def _scope(self, profile, taxjar_enabled=1):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(taxjar_enabled=taxjar_enabled):
+			return module.company_scope(profile.name)
+
+	# — the rungs —
+
+	def test_site_switched_off_puts_every_company_out_of_scope(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		scope = self._scope(US_CALC, taxjar_enabled=0)
+		self.assertFalse(scope.in_scope)
+		self.assertFalse(scope.calculates)
+		self.assertFalse(scope.files)
+		self.assertEqual(scope.reason, module.SCOPE_SITE_OFF)
+
+	def test_company_without_a_config_row_is_not_configured(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		scope = self._scope(IN_CO)
+		self.assertFalse(scope.in_scope)
+		self.assertEqual(scope.reason, module.SCOPE_NOT_CONFIGURED)
+		self.assertIsNone(scope.config)
+
+	def test_non_us_company_is_out_of_scope_however_its_switches_are_set(self):
+		"""The finding this whole predicate exists for. Both features are on for
+		this company, and both effective answers are still no: TaxJar computes
+		United States sales tax, and no setting on the setup page changes where
+		a Company is registered."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		scope = self._scope(IN_FLAGGED)
+		self.assertTrue(scope.calculate_enabled, "the switch is on")
+		self.assertTrue(scope.file_enabled, "the switch is on")
+		self.assertFalse(scope.calculates, "but it must not calculate")
+		self.assertFalse(scope.files, "and it must not file")
+		self.assertFalse(scope.uses_taxjar)
+		self.assertEqual(scope.reason, module.SCOPE_NOT_US)
+
+	def test_us_company_with_calculation_on(self):
+		scope = self._scope(US_CALC)
+		self.assertTrue(scope.in_scope)
+		self.assertTrue(scope.calculates)
+		self.assertFalse(scope.files)
+		self.assertTrue(scope.uses_taxjar)
+		self.assertIsNone(scope.reason)
+
+	def test_us_company_with_filing_on(self):
+		scope = self._scope(US_FILE)
+		self.assertTrue(scope.in_scope)
+		self.assertFalse(scope.calculates)
+		self.assertTrue(scope.files)
+		self.assertTrue(scope.uses_taxjar)
+
+	def test_us_company_with_both_off_is_in_scope_but_inert(self):
+		"""Worth its own case: "in scope, both switches off" and "out of scope"
+		look identical from the outside and need different messages - one is a
+		setting the reader can go and turn on, the other is not."""
+		scope = self._scope(US_OFF)
+		self.assertTrue(scope.in_scope)
+		self.assertFalse(scope.uses_taxjar)
+		self.assertIsNone(scope.reason, "in scope, so there is no reason to give")
+
+	# — the distinction the old predicates could not express —
+
+	def test_switch_state_and_effective_answer_are_separate(self):
+		for profile in (US_CALC, US_FILE, US_OFF):
+			scope = self._scope(profile)
+			self.assertEqual(scope.calculates, scope.calculate_enabled, profile.name)
+			self.assertEqual(scope.files, scope.file_enabled, profile.name)
+
+		out = self._scope(IN_FLAGGED)
+		self.assertNotEqual(out.calculates, out.calculate_enabled)
+		self.assertNotEqual(out.files, out.file_enabled)
+
+	def test_uses_taxjar_is_true_for_either_feature(self):
+		"""Both features send the same payload, so a rule about the payload
+		belongs to both or to neither."""
+		self.assertTrue(self._scope(US_CALC).uses_taxjar)
+		self.assertTrue(self._scope(US_FILE).uses_taxjar)
+		self.assertFalse(self._scope(US_OFF).uses_taxjar)
+		self.assertFalse(self._scope(IN_CO).uses_taxjar)
+
+	# — cost —
+
+	def test_company_lookup_is_skipped_when_the_site_switch_is_off(self):
+		"""Cheapest condition first: the common negative should not pay for a
+		Company read."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(taxjar_enabled=0):
+			with patch.object(module, "get_region") as mock_region:
+				module.company_scope(US_CALC.name)
+			mock_region.assert_not_called()
+
+	def test_company_lookup_is_skipped_for_an_unconfigured_company(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			with patch.object(module, "get_region") as mock_region:
+				module.company_scope(IN_CO.name)
+			mock_region.assert_not_called()
+
+	def test_a_caller_holding_the_config_row_is_not_made_to_look_it_up_again(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			with patch.object(module, "get_company_config") as mock_config:
+				scope = module.company_scope(US_CALC.name, config=US_CALC.config)
+			mock_config.assert_not_called()
+		self.assertTrue(scope.calculates)
+
+
+class TestCompanyConfigIsRequestCached(TaxJarTestCase):
+	"""frappe.get_single() rebuilds the settings document, child tables and all,
+	and a single save asks for it three or four times over."""
+
+	def test_settings_are_rebuilt_once_per_request(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		settings = MagicMock()
+		settings.company_config = [US_CALC.config]
+
+		with patch.object(module.frappe, "get_single", return_value=settings) as mock_single:
+			module.get_company_config(US_CALC.name)
+			module.get_company_config(US_CALC.name)
+			module.get_company_config(US_CALC.name)
+
+		self.assertEqual(mock_single.call_count, 1)
+
+	def test_each_company_is_cached_separately(self):
+		"""A cache keyed on nothing would hand one company another's row, which
+		is the exact class of bug this work is about."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		settings = MagicMock()
+		settings.company_config = [US_CALC.config, US_FILE.config]
+
+		with patch.object(module.frappe, "get_single", return_value=settings):
+			first = module.get_company_config(US_CALC.name)
+			second = module.get_company_config(US_FILE.name)
+
+		self.assertEqual(first.company, US_CALC.name)
+		self.assertEqual(second.company, US_FILE.name)
+
+	def test_saving_settings_drops_the_memo(self):
+		"""The save that changes the answer must not leave the request reading
+		the one from before it."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		before = MagicMock()
+		before.company_config = [US_CALC.config]
+		after = MagicMock()
+		after.company_config = []
+
+		with patch.object(module.frappe, "get_single", return_value=before):
+			self.assertIsNotNone(module.get_company_config(US_CALC.name))
+
+		module.clear_company_config_cache()
+
+		with patch.object(module.frappe, "get_single", return_value=after):
+			self.assertIsNone(module.get_company_config(US_CALC.name))
