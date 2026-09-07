@@ -1145,10 +1145,9 @@ taxjar_integration.render_tax_breakdown = function (frm) {
 // its own border-bottom draws the line separating it from Assign below,
 // same as .sidebar-meta-details already does above it.
 // Same color mapping as the Sync Status column on the TaxJar Transaction
-// Sync page (taxjar_transactions.js) - its hover/click detail now goes
-// through frappe.ui.popover, the same native component that page and the
-// Customers page use for their own Sync Status columns, rather than a
-// fourth hand-rolled copy of the same fixed-position popover.
+// Sync page (taxjar_transactions.js) - its detail now goes through
+// frappe.ui.hover_card, a native component, rather than a fourth
+// hand-rolled copy of the same fixed-position popover.
 
 taxjar_integration.SYNC_STATUS_COLORS = {
 	Synced: "green",
@@ -1248,6 +1247,10 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	if (frm.doc.docstatus === 0) {
 		label = __("Submit to Sync");
 		color = "amber";
+		// The one state whose detail is an instruction rather than a report:
+		// nothing has gone wrong, there is simply nothing to sync until the
+		// document is submitted.
+		info_text = __("Submit this document to sync it with TaxJar.");
 	} else if (status === "Queued") {
 		label = __("Queued");
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
@@ -1255,9 +1258,12 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	} else if (status === "Synced") {
 		label = cancelled ? __("Cancelled") : __("Synced");
 		color = cancelled ? "gray" : taxjar_integration.SYNC_STATUS_COLORS[status];
-		if (frm.doc.taxjar_last_synced) {
-			info_text = __("Last synced: {0}", [frappe.datetime.prettyDate(frm.doc.taxjar_last_synced)]);
-		}
+		// Cancelled is this same "Synced" status value written by the
+		// on_cancel delete path (see _set_sync_status), so both read the same
+		// way: when TaxJar last heard about this document.
+		info_text = frm.doc.taxjar_last_synced
+			? taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced)
+			: __("Synced with TaxJar");
 	} else if (status === "Failed") {
 		label = cancelled ? __("Failed to Cancel") : __("Failed");
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
@@ -1294,12 +1300,38 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 
 	taxjar_integration._mount_sidebar_section($pill);
 
-	// frappe.ui.popover, not the hand-rolled hover/click popover this used to
-	// carry - the same native component the Customers/Transactions pages'
-	// own Sync Status columns already use for their Failed-reason detail.
+	// frappe.ui.hover_card, not popover: every state now carries a detail
+	// worth glancing at - why it failed, how long ago it synced, what to do
+	// about a Draft - and a preview that answers a passing glance shouldn't
+	// ask to be clicked open and clicked shut again. Delays are the component
+	// explorer's "quick preview" pair; the 700ms default is tuned to keep
+	// cards from popping as the pointer skims a list of links, and there is
+	// exactly one trigger in this sidebar. Aligned to the badge's own right
+	// edge, which is the edge it sits against in the column.
+	//
+	// A string content (never an element) so the card renders it as text -
+	// taxjar_sync_error is whatever TaxJar's API said, and must not be able
+	// to smuggle markup into the sidebar.
 	if (info_text) {
-		frappe.ui.popover({ trigger: $badge, content: () => info_text, side: "bottom" });
+		frappe.ui.hover_card($badge, {
+			content: () => info_text,
+			side: "bottom",
+			align: "end",
+			open_delay: 200,
+			close_delay: 150,
+		});
 	}
+};
+
+// "Synced 5 minutes ago" - the question a status pill raises is how fresh
+// this is, not what the clock read. prettyDate blanks out for a timestamp it
+// reads as being in the future (pretty_date.js's `day_diff < 0` guard), which
+// a site whose System Settings timezone runs ahead of the browser's own
+// produces for a sync that has only just happened, so fall back to the
+// absolute user-tz time rather than to a bare "Synced".
+taxjar_integration._synced_ago_text = function (timestamp) {
+	const ago = frappe.datetime.prettyDate(timestamp);
+	return ago ? __("Synced {0}", [ago]) : __("Synced on {0}", [frappe.datetime.str_to_user(timestamp)]);
 };
 
 // ── "TaxJar not set up" panel ──

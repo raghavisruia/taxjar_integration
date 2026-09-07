@@ -10090,11 +10090,45 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn('__("Submit to Sync")', fn)
 		self.assertIn('color = "amber"', fn)
 
-	def test_synced_info_text_shows_last_synced(self):
+	def test_draft_hover_says_what_to_do_about_it(self):
+		"""The one state whose detail is an instruction rather than a report -
+		nothing has gone wrong, there is just nothing to sync yet. Reading as
+		a sentence, not as a "Please..." plea: the pill already said what the
+		state is, this says what turns it into a sync."""
+		draft_branch = self._render_fn().split("docstatus === 0")[1].split("} else if")[0]
+		self.assertIn('info_text = __("Submit this document to sync it with TaxJar.")', draft_branch)
+
+	def test_synced_info_text_is_how_long_ago_not_a_timestamp(self):
+		"""The question a status pill raises is how fresh this is, not what
+		the clock read - so "Synced 5 minutes ago", off prettyDate."""
 		fn = self._render_fn()
 		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
-		self.assertIn("Last synced:", synced_branch)
+		self.assertIn("taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced)", synced_branch)
 		self.assertIn("taxjar_last_synced", synced_branch)
+		self.assertNotIn("Last synced:", synced_branch)
+
+	def test_synced_ago_text_reads_as_ago_and_falls_back_to_absolute(self):
+		"""prettyDate blanks out for a timestamp it reads as being in the
+		future (pretty_date.js's `day_diff < 0` guard), which a site whose
+		System Settings timezone runs ahead of the browser's own produces for
+		a sync that has only just happened. Falling through to str_to_user
+		keeps that case saying something rather than a bare "Synced"."""
+		js = self._read_js("taxjar_utils.js")
+		fn = js.split("taxjar_integration._synced_ago_text = function (timestamp) {")[1].split("\n};")[0]
+		self.assertIn("frappe.datetime.prettyDate(timestamp)", fn)
+		self.assertIn('__("Synced {0}", [ago])', fn)
+		self.assertIn("frappe.datetime.str_to_user(timestamp)", fn)
+
+	def test_cancelled_hover_also_says_when_it_synced(self):
+		"""Cancelled is the same "Synced" status value written by the
+		on_cancel delete path, so the two states report the same thing: when
+		TaxJar last heard about this document."""
+		fn = self._render_fn()
+		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
+		self.assertIn('cancelled ? __("Cancelled") : __("Synced")', synced_branch)
+		# One info_text for both, not a cancelled-only branch that skips it.
+		self.assertNotIn("if (cancelled)", synced_branch)
+		self.assertIn('__("Synced with TaxJar")', synced_branch)
 
 	def test_synced_label_depends_on_cancelled(self):
 		fn = self._render_fn()
@@ -10227,16 +10261,45 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn("frappe.ui.badge({ label, theme: color });", fn)
 		self.assertNotIn("indicator-pill", fn)
 
-	def test_hover_and_click_wired_not_native_title(self):
-		"""frappe.ui.popover, not a hand-rolled hover/click popover and not
-		the native title attribute (which enforces its own delay and never
-		responds to a click). Popover is click-toggle only - trading the old
-		hover preview for the same native component the Customers/
-		Transactions pages' own Sync Status columns already use."""
+	def test_detail_opens_on_hover_not_on_a_click(self):
+		"""frappe.ui.hover_card, not popover: every state carries a detail
+		worth glancing at, and a preview that answers a passing glance
+		shouldn't ask to be clicked open and clicked shut again. Native
+		component either way - not a hand-rolled hover/click popover, and not
+		the native title attribute, which enforces its own delay."""
 		fn = self._render_fn()
-		self.assertIn('frappe.ui.popover({ trigger: $badge, content: () => info_text, side: "bottom" });', fn)
+		self.assertIn("frappe.ui.hover_card($badge, {", fn)
+		self.assertNotIn("frappe.ui.popover(", fn)
 		self.assertNotIn('.on("mouseenter"', fn)
 		self.assertNotIn("title=", fn)
+
+	def test_hover_card_uses_the_quick_preview_delays(self):
+		"""The component's 700ms default is tuned to stop cards popping as the
+		pointer skims a list of links; there is exactly one trigger in this
+		sidebar, so it gets the component explorer's "quick preview" pair."""
+		card = self._render_fn().split("frappe.ui.hover_card($badge, {")[1].split("});")[0]
+		self.assertIn("open_delay: 200", card)
+		self.assertIn("close_delay: 150", card)
+
+	def test_hover_card_content_is_a_string_so_it_renders_as_text(self):
+		"""taxjar_sync_error is whatever TaxJar's API said. HoverCard renders
+		a string as a text node and an element as markup, so the reason must
+		go through as the former."""
+		card = self._render_fn().split("frappe.ui.hover_card($badge, {")[1].split("});")[0]
+		self.assertIn("content: () => info_text", card)
+		self.assertNotIn("$(", card)
+
+	def test_every_state_but_excluded_has_a_hover_detail(self):
+		"""Draft, Queued, Synced/Cancelled and Failed/Failed to Cancel each say
+		something on hover - only the catch-all Excluded branch, which has no
+		sync attempt to report, leaves the badge bare."""
+		fn = self._render_fn()
+		self.assertEqual(fn.count("info_text = "), 4)
+		fallback = fn.split("hasn't reached _set_sync_status")[1].split("\n\t}")[0]
+		self.assertNotIn("info_text", fallback)
+		# ...and a bare badge gets no card and no clickable-looking cursor.
+		self.assertIn("if (info_text) $badge.css(\"cursor\", \"pointer\");", fn)
+		self.assertIn("if (info_text) {", fn)
 
 	def test_wired_into_sales_invoice_refresh(self):
 		js = self._read_js("sales_invoice.js")
