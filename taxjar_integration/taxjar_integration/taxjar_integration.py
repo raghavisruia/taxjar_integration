@@ -2045,6 +2045,26 @@ def validate_tax_request(tax_dict, company=None, address_context=None):
 		return tax_data
 
 
+def company_address_names(company):
+	"""Every non-disabled Address linked to this company.
+
+	The same filter get_default_address() applies, minus its ordering and limit:
+	this is the candidate set, not the pick. One definition, because the guided
+	setup page and the deletion guard below must agree exactly on what counts -
+	a guard that used a wider filter than the lookup would block a delete that
+	breaks nothing, and a narrower one would let the breaking delete through.
+	"""
+	return frappe.get_all(
+		"Address",
+		filters=[
+			["Dynamic Link", "link_doctype", "=", "Company"],
+			["Dynamic Link", "link_name", "=", company],
+			["disabled", "=", 0],
+		],
+		pluck="name",
+	)
+
+
 def get_company_address_details(doc):
 	"""Return company address details for the invoice's company."""
 	from erpnext import get_default_company
@@ -2249,6 +2269,79 @@ def validate_address(doc, method):
 		frappe.throw(
 			_("Postal Code is required for United States addresses, and decides the tax rate."),
 			title=_("Postal Code Required"),
+		)
+
+
+def _companies_stranded_without(doc):
+	"""Companies this Address is the last usable one for.
+
+	Narrow on purpose, three times over:
+
+	* only Addresses actually linked to a Company. An Address has no company of
+	  its own, and this must never reach a customer's or supplier's address.
+	* only while company_scope(company).uses_taxjar. An address belonging to a
+	  company TaxJar does not serve is none of this app's business - the same
+	  over-reach validate_address() was cut back for.
+	* only when it is the company's LAST usable address. Deleting one of several
+	  leaves get_default_address() something to return, so nothing breaks and
+	  nothing should be blocked.
+	"""
+	stranded = []
+	for link in doc.get("links") or []:
+		if link.link_doctype != "Company":
+			continue
+		if not company_scope(link.link_name).uses_taxjar:
+			continue
+		if any(name != doc.name for name in company_address_names(link.link_name)):
+			continue
+		stranded.append(link.link_name)
+	return stranded
+
+
+def prevent_company_address_deletion(doc, method):
+	"""Refuse to delete the last address of a company TaxJar prices from.
+
+	TaxJar calculates from the company's own address, and set_sales_tax() runs in
+	*validate* - so a company left with no address at all does not degrade
+	quietly. get_tax_data() reaches get_company_address_details(), which throws,
+	and every save of every Quotation, Sales Order and Sales Invoice that company
+	owns fails until someone puts an address back.
+
+	Refusing the delete is the smaller surprise: it states the problem at the
+	moment it is caused, to the person causing it, instead of to whoever next
+	opens an invoice and is told to go fix a company record they may not even be
+	able to see.
+	"""
+	for company in _companies_stranded_without(doc):
+		frappe.throw(
+			_("{0} is the only address {1} has, and TaxJar calculates its sales tax from it. "
+			  "Add another address for {1} before deleting this one.").format(doc.name, company),
+			title=_("Company Address Required"),
+		)
+
+
+def prevent_company_address_disable(doc, method):
+	"""Same guard, for the checkbox that has the same effect as deleting.
+
+	get_default_address() filters on disabled = 0, so disabling a company's last
+	address strands it exactly as deleting it would - and would otherwise walk
+	straight around the on_trash guard above, which is what makes this part of
+	the same rule rather than a separate nicety.
+
+	Only on the save that actually turns the flag on: re-saving an
+	already-disabled address must not throw, since by then the company is in
+	whatever state it is in and this edit is not what put it there.
+	"""
+	if doc.is_new() or not cint(doc.get("disabled")):
+		return
+	if not doc.has_value_changed("disabled"):
+		return
+
+	for company in _companies_stranded_without(doc):
+		frappe.throw(
+			_("{0} is the only address {1} has, and TaxJar calculates its sales tax from it. "
+			  "Add another address for {1} before disabling this one.").format(doc.name, company),
+			title=_("Company Address Required"),
 		)
 
 

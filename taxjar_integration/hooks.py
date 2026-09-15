@@ -148,7 +148,13 @@ doc_events = {
 		"before_print": "taxjar_integration.taxjar_integration.taxjar_integration.set_taxjar_breakdown_html",
 	},
 	"Address": {
-		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_address"
+		"validate": [
+			"taxjar_integration.taxjar_integration.taxjar_integration.validate_address",
+			# Disabling a company's last address strands it exactly as deleting
+			# it would, so the same rule has to cover both.
+			"taxjar_integration.taxjar_integration.taxjar_integration.prevent_company_address_disable",
+		],
+		"on_trash": "taxjar_integration.taxjar_integration.taxjar_integration.prevent_company_address_deletion",
 	},
 	"Customer": {
 		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_validate",

@@ -11909,6 +11909,147 @@ class TestGuidedSetupSaveCompanyAccounts(UnitTestCase):
 			self.assertRaises(frappe.PermissionError, save_company_accounts, rows=[])
 
 
+
+
+# ── Company address: deletion / disable guard ────────────────────────────────
+#
+# set_sales_tax() runs in *validate*, and reaches get_company_address_details(),
+# which throws when the company has no address. So a company stranded without
+# one does not degrade quietly - every save of every Quotation, Sales Order and
+# Sales Invoice it owns fails. These guards stop it being caused.
+
+
+class TestCompanyAddressRemovalGuard(UnitTestCase):
+	MODULE = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _address(self, name="ADDR-1", links=(("Company", "Frappe Tech"),), disabled=0):
+		doc = frappe._dict(
+			name=name,
+			disabled=disabled,
+			links=[frappe._dict(link_doctype=dt, link_name=ln) for dt, ln in links],
+		)
+		return doc
+
+	def _scope(self, uses_taxjar=True):
+		return frappe._dict(uses_taxjar=uses_taxjar)
+
+	def test_blocks_deleting_a_company_s_last_address(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_deletion,
+		)
+
+		with patch(self.MODULE + ".company_scope", return_value=self._scope()), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]):
+			self.assertRaises(
+				frappe.ValidationError,
+				prevent_company_address_deletion, self._address(), "on_trash",
+			)
+
+	def test_allows_deleting_one_of_several(self):
+		"""get_default_address() still has something to return, so nothing
+		breaks and nothing should be blocked."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_deletion,
+		)
+
+		with patch(self.MODULE + ".company_scope", return_value=self._scope()), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1", "ADDR-2"]):
+			prevent_company_address_deletion(self._address(), "on_trash")
+
+	def test_ignores_a_company_taxjar_does_not_serve(self):
+		"""The same over-reach validate_address() was cut back for: an address
+		belonging to a company TaxJar does not price is none of this app's
+		business."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_deletion,
+		)
+
+		with patch(self.MODULE + ".company_scope", return_value=self._scope(uses_taxjar=False)), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]) as names:
+			prevent_company_address_deletion(self._address(), "on_trash")
+
+		names.assert_not_called()
+
+	def test_ignores_addresses_with_no_company_link(self):
+		"""An Address has no company of its own - this must never reach a
+		customer's or supplier's address."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_deletion,
+		)
+
+		doc = self._address(links=(("Customer", "Jane Doe"),))
+		with patch(self.MODULE + ".company_scope") as scope:
+			prevent_company_address_deletion(doc, "on_trash")
+
+		scope.assert_not_called()
+
+	def test_blocks_disabling_the_last_address_too(self):
+		"""get_default_address() filters disabled = 0, so disabling strands the
+		company exactly as deleting does - and would otherwise walk straight
+		around the on_trash guard."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_disable,
+		)
+
+		doc = self._address(disabled=1)
+		doc.is_new = lambda: False
+		doc.has_value_changed = lambda field: True
+		with patch(self.MODULE + ".company_scope", return_value=self._scope()), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]):
+			self.assertRaises(
+				frappe.ValidationError, prevent_company_address_disable, doc, "validate"
+			)
+
+	def test_resaving_an_already_disabled_address_does_not_throw(self):
+		"""By then the company is in whatever state it is in, and this edit is
+		not what put it there."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_disable,
+		)
+
+		doc = self._address(disabled=1)
+		doc.is_new = lambda: False
+		doc.has_value_changed = lambda field: False
+		with patch(self.MODULE + ".company_scope") as scope:
+			prevent_company_address_disable(doc, "validate")
+
+		scope.assert_not_called()
+
+	def test_enabled_address_is_never_blocked_on_save(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			prevent_company_address_disable,
+		)
+
+		doc = self._address(disabled=0)
+		doc.is_new = lambda: False
+		doc.has_value_changed = lambda field: True
+		with patch(self.MODULE + ".company_scope") as scope:
+			prevent_company_address_disable(doc, "validate")
+
+		scope.assert_not_called()
+
+
+class TestCompanyAddressGuardIsWired(UnitTestCase):
+	def test_address_hooks_cover_both_delete_and_disable(self):
+		"""A deletion guard that a checkbox walks around is not a guard."""
+		from taxjar_integration import hooks
+
+		address = hooks.doc_events["Address"]
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.prevent_company_address_deletion",
+			address["on_trash"],
+		)
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.prevent_company_address_disable",
+			address["validate"],
+		)
+		# validate_address must survive the change from a bare string to a list.
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.validate_address",
+			address["validate"],
+		)
+
+
 # ── Phase 2: save_features ──────────────────────────────────────────────────
 
 
