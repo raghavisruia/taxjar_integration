@@ -13,6 +13,7 @@ from frappe.realtime import get_doctype_room
 from frappe.utils import cint, flt, get_link_to_form
 from frappe.utils.caching import request_cache
 from frappe.utils.password import get_decrypted_password
+from taxjar.response import TaxJarResponse
 
 from erpnext import get_region
 from erpnext.setup.utils import get_exchange_rate
@@ -194,6 +195,42 @@ def get_company_config(company):
 	return None
 
 
+def _taxjar_responder(response):
+	"""The SDK's responder, with TaxJar's 200-under-an-error-body normalised.
+
+	Seen live on GET /v2/nexus/regions with a token the account will not serve:
+	the status line says 200 while the body is the error envelope
+
+		{"status": 403, "error": "Forbidden", "detail": "Not authorized for resource"}
+
+	The SDK decides success on the status code alone, so it takes the success
+	path and then dies on `(type_name, values), = response.items()` with a bare
+	ValueError - which is neither TaxJarResponseError nor TaxJarConnectionError.
+	Every caller's error handling is written around those two, so the ValueError
+	sails past all of it: the nightly nexus sync logs an unrecognised failure and
+	the "Update Nexus List" button answers a bad credential with a raw traceback
+	rather than the message written for exactly that case.
+
+	Normalising here, where every client is built, means all thirteen endpoints
+	raise the TaxJarResponseError that TaxJar would have caused had it sent the
+	status code it put in the body.
+	"""
+	if 200 <= response.status_code < 400:
+		try:
+			body = response.json()
+		except ValueError:
+			# Unreadable body - classify_taxjar_error()'s "unreadable" branch owns
+			# this, and reaches it through the SDK's own call to request.json().
+			body = None
+
+		# A success body is {<type name>: values}, a single key. Demanding all
+		# three error keys means this cannot misfire on a genuine response.
+		if isinstance(body, dict) and {"status", "error", "detail"} <= set(body):
+			TaxJarResponse.raise_response_error(body)
+
+	return TaxJarResponse.from_request(response)
+
+
 def _build_client(cred, token_field, api_url):
 	if not cred or not api_url:
 		return None
@@ -204,7 +241,7 @@ def _build_client(cred, token_field, api_url):
 	if not api_key:
 		return None
 
-	client = taxjar.Client(api_key=api_key, api_url=api_url)
+	client = taxjar.Client(api_key=api_key, api_url=api_url, responder=_taxjar_responder)
 	client.set_api_config("headers", {"x-api-version": "2022-01-24"})
 	return client
 

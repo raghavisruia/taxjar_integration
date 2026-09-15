@@ -41,6 +41,10 @@ PRODUCT_TAX_CATEGORY_DATA_FILE = (BASE_DIR / "product_tax_category_data.json").r
 # Held per site, so a web worker and an RQ worker contend for the same lock.
 NEXUS_SYNC_LOCK = "taxjar_nexus_sync"
 
+# Statuses that mean "this credential will not work", as opposed to a request
+# TaxJar disliked. Both send the reader to the same place: the Connect step.
+_CREDENTIAL_REJECTED_STATUSES = frozenset({401, 403})
+
 
 class TaxJarSettings(Document):
 	# begin: auto-generated types
@@ -302,13 +306,18 @@ class TaxJarSettings(Document):
 				# needs its own clear message rather than relying on that gate).
 				full = getattr(e, "full_response", None) or {}
 				status = full.get("status_code") if isinstance(full, dict) else None
-				if status == 401:
+				# 401 and 403 are one problem to the person reading this: the
+				# credential on file does not work. TaxJar sends 403 ("Not
+				# authorized for resource") for a token its account will not
+				# serve, and used to reach here as a ValueError rather than as
+				# this error at all - see _taxjar_responder().
+				if status in _CREDENTIAL_REJECTED_STATUSES:
 					frappe.throw(
 						frappe._(
-							"TaxJar rejected the API credential for {0} (401 Unauthorized). "
+							"TaxJar rejected the API credential for {0} (HTTP {1}). "
 							"Enter a correct API Token for {0} on the Connect step, or remove {0} "
 							"from API Credentials, to continue."
-						).format(config.company),
+						).format(config.company, status),
 						title=frappe._("TaxJar Rejected the API Token"),
 					)
 				raise

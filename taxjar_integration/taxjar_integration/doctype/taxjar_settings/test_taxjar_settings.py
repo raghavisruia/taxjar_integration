@@ -520,6 +520,117 @@ class TestGetClient(UnitTestCase):
 		self.assertEqual(calls[0][1], "live_token")
 
 
+# ── _taxjar_responder(): TaxJar answers some calls with an error body under an
+# HTTP 200. Found against the live API on GET /v2/nexus/regions with a token the
+# account would not serve. ───────────────────────────────────────────────────
+
+class TestTaxJarResponderErrorEnvelope(UnitTestCase):
+	"""The SDK trusts the status line, so a 200 carrying an error body used to
+	surface as `ValueError: too many values to unpack (expected 1)` - past every
+	`except TaxJarResponseError` in this app."""
+
+	ENVELOPE = {"status": 403, "error": "Forbidden", "detail": "Not authorized for resource"}
+
+	def _response(self, status_code, body, raises=None):
+		response = MagicMock()
+		response.status_code = status_code
+		if raises is not None:
+			response.json.side_effect = raises
+		else:
+			response.json.return_value = body
+		return response
+
+	def test_error_body_under_http_200_raises_a_taxjar_response_error(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _taxjar_responder
+		import taxjar.exceptions
+
+		with self.assertRaises(taxjar.exceptions.TaxJarResponseError) as cm:
+			_taxjar_responder(self._response(200, self.ENVELOPE))
+
+		# The status TaxJar put in the body, not the one it put on the status line.
+		self.assertEqual(cm.exception.full_response["status_code"], 403)
+		self.assertEqual(cm.exception.full_response["detail"], "Not authorized for resource")
+
+	def test_the_app_can_now_classify_it(self):
+		"""The point of the fix: classify_taxjar_error() reaches its "response"
+		branch instead of the "unknown" catch-all it landed in as a ValueError."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_taxjar_responder, classify_taxjar_error,
+		)
+		import taxjar.exceptions
+
+		try:
+			_taxjar_responder(self._response(200, self.ENVELOPE))
+			self.fail("expected TaxJarResponseError")
+		except taxjar.exceptions.TaxJarResponseError as err:
+			verdict = classify_taxjar_error(err)
+
+		self.assertEqual(verdict["kind"], "response")
+		self.assertEqual(verdict["status"], 403)
+		self.assertFalse(verdict["retryable"], "a bad credential cannot fix itself by retrying")
+
+	def test_a_genuine_success_body_is_untouched(self):
+		"""A real 200 still parses into the SDK's own type."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _taxjar_responder
+
+		body = {"regions": [{"country_code": "US", "country": "United States",
+		                     "region_code": "FL", "region": "Florida"}]}
+		result = _taxjar_responder(self._response(200, body))
+
+		self.assertEqual(len(result.data), 1)
+		self.assertEqual(result.data[0].region_code, "FL")
+
+	def test_a_real_error_status_still_raises_as_before(self):
+		"""The fix must not disturb the ordinary path, where TaxJar sends the
+		error status on the status line."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _taxjar_responder
+		import taxjar.exceptions
+
+		with self.assertRaises(taxjar.exceptions.TaxJarResponseError) as cm:
+			_taxjar_responder(self._response(401, {
+				"status": 401, "error": "Unauthorized", "detail": "Not authorized.",
+			}))
+
+		self.assertEqual(cm.exception.full_response["status_code"], 401)
+
+	def test_an_unreadable_200_body_still_reaches_the_unreadable_branch(self):
+		"""A gateway HTML page under a 200 must keep classifying as "unreadable"
+		and retryable, not be swallowed here."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_taxjar_responder, classify_taxjar_error,
+		)
+
+		decode_error = json.JSONDecodeError("Expecting value", "<html>", 0)
+		with self.assertRaises(json.JSONDecodeError) as cm:
+			_taxjar_responder(self._response(200, None, raises=decode_error))
+
+		verdict = classify_taxjar_error(cm.exception)
+		self.assertEqual(verdict["kind"], "unreadable")
+		self.assertTrue(verdict["retryable"])
+
+	def test_a_success_body_that_merely_mentions_status_is_not_mistaken_for_an_error(self):
+		"""Guard on the guard: only all three error keys together trip it."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _taxjar_responder
+
+		body = {"order": {"status": "completed", "transaction_id": "SI-0001"}}
+		result = _taxjar_responder(self._response(200, body))
+
+		self.assertEqual(result.transaction_id, "SI-0001")
+
+	def test_build_client_installs_the_responder(self):
+		"""Defining it is not enough - every client the app builds must use it."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		cred = MagicMock()
+		cred.name = "CRED-1"
+		cred.live_token = "tok"
+		with patch.object(module, "get_decrypted_password", return_value="tok"), \
+		     patch.object(module.taxjar, "Client") as mock_client:
+			module._build_client(cred, "live_token", "https://api.taxjar.com")
+
+		self.assertIs(mock_client.call_args[1]["responder"], module._taxjar_responder)
+
+
 # ── Phase 2: get_company_config ───────────────────────────────────────────────
 
 class TestGetCompanyConfig(UnitTestCase):
@@ -2695,6 +2806,54 @@ class TestUpdateNexusListAuthError(UnitTestCase):
 		# company").
 		self.assertIn("API Token", message)
 		self.assertIn("remove", message)
+
+	def test_403_gets_the_same_credential_message_as_401(self):
+		"""TaxJar answers a token its account will not serve with 403 "Not
+		authorized for resource". That is a broken credential, not a bad
+		request, so it belongs on the same path as a 401 - and before
+		_taxjar_responder() it never even arrived as a TaxJarResponseError."""
+		mock_client = MagicMock()
+		mock_client.nexus_regions.side_effect = self._taxjar_error(403, "403 Forbidden")
+		with patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=mock_client,
+		), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.log_taxjar_call"
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.update_nexus_list()
+
+		message = str(cm.exception)
+		self.assertIn("_Test Company", message)
+		self.assertIn("403", message)
+		self.assertIn("API Token", message)
+		self.assertIn("remove", message)
+
+	def test_an_error_body_under_http_200_reaches_that_message(self):
+		"""End to end over the seam the bug actually crossed: a real SDK client
+		whose transport returns TaxJar's 200-with-error-envelope must produce
+		the credential message, not `ValueError: too many values to unpack`."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _taxjar_responder
+
+		response = MagicMock()
+		response.status_code = 200
+		response.json.return_value = {
+			"status": 403, "error": "Forbidden", "detail": "Not authorized for resource",
+		}
+
+		client = taxjar.Client(api_key="k", api_url="https://api.taxjar.com",
+		                       responder=_taxjar_responder)
+		with patch.object(client, "_get", return_value=response), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.get_client",
+			return_value=client,
+		), patch(
+			"taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings.log_taxjar_call"
+		):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.update_nexus_list()
+
+		self.assertIn("_Test Company", str(cm.exception))
+		self.assertIn("API Token", str(cm.exception))
 
 	def test_non_auth_taxjar_error_still_propagates_unchanged(self):
 		"""Only a 401 gets the special message - any other TaxJar error (500,
