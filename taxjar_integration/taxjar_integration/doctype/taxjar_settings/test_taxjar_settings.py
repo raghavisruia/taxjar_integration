@@ -2722,15 +2722,116 @@ class TestUpdateNexusListAuthError(UnitTestCase):
 		mock_client.nexus_regions.assert_called_once()
 
 
+# ── update_nexus_list(): one sync at a time ─────────────────────────────────
+# Bug report: "Deadlock Occurred - Server failed to process this request because
+# of a concurrent conflicting request", raised by pressing Fetch on the guided
+# setup's Nexus step while a background sync of the same table was in flight.
+
+class TestUpdateNexusListSerialisation(UnitTestCase):
+	MODULE = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def setUp(self):
+		self.settings = frappe.get_single("TaxJar Settings")
+		self.settings.set("company_config", [{
+			"company": "_Test Company",
+			"tax_account_head": "Sales Tax - _TC",
+			"shipping_account_head": "Freight - _TC",
+		}])
+
+	def test_fetch_runs_under_the_nexus_lock(self):
+		"""The TaxJar calls and the save that follows them must both happen
+		inside the lock - taking it around the save alone would still let two
+		syncs interleave their reads and write each other's results."""
+		calls = []
+		mock_client = MagicMock()
+		mock_client.nexus_regions.side_effect = lambda: calls.append("fetch") or []
+
+		lock = MagicMock()
+		lock.return_value.__enter__.side_effect = lambda: calls.append("lock")
+		lock.return_value.__exit__.side_effect = lambda *a: calls.append("unlock")
+
+		with patch(f"{self.MODULE}.filelock", lock), \
+		     patch(f"{self.MODULE}.get_client", return_value=mock_client), \
+		     patch(f"{self.MODULE}.log_taxjar_call"), \
+		     patch.object(self.settings, "save", side_effect=lambda: calls.append("save")):
+			self.settings.update_nexus_list()
+
+		self.assertEqual(calls, ["lock", "fetch", "save", "unlock"])
+		self.assertEqual(lock.call_args[0][0], "taxjar_nexus_sync")
+
+	def test_lock_held_elsewhere_is_a_message_not_a_traceback(self):
+		"""LockTimeoutError is a plain Exception - left to escape it reaches the
+		browser as a 500 with a traceback, which is no better than the deadlock
+		it replaced."""
+		from frappe.utils.file_lock import LockTimeoutError
+
+		with patch(f"{self.MODULE}.filelock", side_effect=LockTimeoutError("held")):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				self.settings.update_nexus_list()
+
+		self.assertIn("already running", str(cm.exception))
+
+	def test_save_is_flagged_as_a_nexus_sync(self):
+		"""on_update reads this flag to skip its enqueues - without it, every
+		nexus refresh sends three more jobs at the doc it is mid-save on."""
+		seen = {}
+		mock_client = MagicMock()
+		mock_client.nexus_regions.return_value = []
+
+		with patch(f"{self.MODULE}.get_client", return_value=mock_client), \
+		     patch(f"{self.MODULE}.log_taxjar_call"), \
+		     patch.object(
+			     self.settings, "save",
+			     side_effect=lambda: seen.update(nexus_sync=self.settings.flags.nexus_sync),
+		     ):
+			self.settings.update_nexus_list()
+
+		self.assertTrue(seen.get("nexus_sync"))
+
+	def test_stale_copy_is_reloaded_before_it_is_rewritten(self):
+		"""Waiting for the lock means the sync that held it may have saved in the
+		meantime. Saving on top of that copy fails on the modified timestamp -
+		"Document has been modified after you have opened it" - which tells the
+		user nothing they can act on."""
+		mock_client = MagicMock()
+		mock_client.nexus_regions.return_value = []
+
+		with patch(f"{self.MODULE}.get_client", return_value=mock_client), \
+		     patch(f"{self.MODULE}.log_taxjar_call"), \
+		     patch.object(self.settings, "save"), \
+		     patch.object(self.settings, "reload") as mock_reload, \
+		     patch(f"{self.MODULE}.frappe.db.get_single_value", return_value=frappe.utils.get_datetime("2030-01-01 00:00:00")):
+			self.settings.update_nexus_list()
+
+		mock_reload.assert_called_once()
+
+	def test_current_copy_is_left_alone(self):
+		"""Callers hand this method a settings doc they may have changed in
+		memory (the guided setup's own fetch_nexus does), so a reload that is
+		not needed would throw those changes away."""
+		mock_client = MagicMock()
+		mock_client.nexus_regions.return_value = []
+
+		with patch(f"{self.MODULE}.get_client", return_value=mock_client), \
+		     patch(f"{self.MODULE}.log_taxjar_call"), \
+		     patch.object(self.settings, "save"), \
+		     patch.object(self.settings, "reload") as mock_reload:
+			self.settings.update_nexus_list()
+
+		mock_reload.assert_not_called()
+
+
 # ── Phase 2: auto-enqueue nexus sync on first configuration ──────────────────
 
 class TestAutoNexusEnqueue(UnitTestCase):
 	"""
 	Tests for the on_update auto-enqueue: nexus is fetched in the background
-	the first time settings are saved with features + company config + empty nexus.
+	the first time settings are saved with features + company config and no
+	sync having happened yet.
 	"""
 
-	def _settings(self, calculate_tax=1, create_transactions=0, has_company_config=True, has_nexus=False):
+	def _settings(self, calculate_tax=1, create_transactions=0, has_company_config=True,
+			has_nexus=False, last_synced=None):
 		"""Return a live TaxJar Settings single doc wired up for the test scenario."""
 		doc = frappe.get_single("TaxJar Settings")
 		doc.taxjar_enabled = 1 if (calculate_tax or create_transactions) else 0
@@ -2748,6 +2849,9 @@ class TestAutoNexusEnqueue(UnitTestCase):
 			doc.set("nexus", [{"company": "_Test Company", "region": "California", "region_code": "CA", "country": "United States", "country_code": "US"}])
 		else:
 			doc.set("nexus", [])
+		# Set explicitly either way: this is the field the gate reads, so a site
+		# that happens to carry a stale timestamp must not decide these tests.
+		doc.nexus_last_synced = last_synced
 		# No credentials → the background token check is not enqueued, so the only
 		# enqueue under test is the nexus fetch.
 		doc.set("table_hvjw", [])
@@ -2781,15 +2885,43 @@ class TestAutoNexusEnqueue(UnitTestCase):
 		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
 		self.assertEqual(len(nexus_calls), 1)
 
-	# Guard: nexus already populated
+	# Guard: nexus already synced
 
-	def test_does_not_enqueue_when_nexus_already_populated(self):
-		"""If nexus rows exist the fetch must not fire — avoids redundant API call on every save."""
-		doc = self._settings(calculate_tax=1, has_company_config=True, has_nexus=True)
+	def test_does_not_enqueue_when_nexus_already_synced(self):
+		"""If a sync has already run the fetch must not fire — avoids a redundant API call on every save."""
+		doc = self._settings(
+			calculate_tax=1, has_company_config=True, has_nexus=True, last_synced="2026-09-15 00:00:00"
+		)
 		mock_enqueue = self._call_on_update(doc)
 		# enqueue may be called for the product_tax_categories background job — filter to nexus call only
 		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
 		self.assertEqual(len(nexus_calls), 0)
+
+	def test_does_not_enqueue_when_a_sync_returned_no_nexus(self):
+		"""The regression this gate exists for.
+
+		A TaxJar account with no nexus registered syncs to zero rows. Gated on an
+		empty `nexus` table, the save that sync_nexus_list itself makes would
+		match the trigger again and enqueue another one — a sync that never
+		stops, hammering TaxJar and rewriting this Single until it collided with
+		a user pressing Fetch and MariaDB deadlocked one of them.
+		"""
+		doc = self._settings(
+			calculate_tax=1, has_company_config=True, has_nexus=False, last_synced="2026-09-15 00:00:00"
+		)
+		mock_enqueue = self._call_on_update(doc)
+		nexus_calls = [c for c in mock_enqueue.call_args_list if "sync_nexus_list" in str(c)]
+		self.assertEqual(len(nexus_calls), 0)
+
+	def test_nexus_sync_flag_skips_every_enqueue(self):
+		"""A nexus refresh's own save changes no credential and no company
+		config, so none of on_update's jobs have anything to react to — and
+		enqueuing them would aim more writers at this Single while the refresh's
+		transaction is still open."""
+		doc = self._settings(calculate_tax=1, has_company_config=True, has_nexus=False)
+		doc.flags.nexus_sync = True
+		mock_enqueue = self._call_on_update(doc)
+		self.assertEqual(mock_enqueue.call_args_list, [])
 
 	# Guard: features disabled
 

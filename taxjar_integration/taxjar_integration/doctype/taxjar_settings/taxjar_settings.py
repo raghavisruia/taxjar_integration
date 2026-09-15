@@ -15,6 +15,8 @@ from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 from frappe.model.document import Document
 from frappe.permissions import add_permission, update_permission_property
+from frappe.utils.file_lock import LockTimeoutError
+from frappe.utils.synchronization import filelock
 
 import taxjar
 
@@ -32,6 +34,12 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 
 BASE_DIR = Path(__file__).resolve().parent
 PRODUCT_TAX_CATEGORY_DATA_FILE = (BASE_DIR / "product_tax_category_data.json").resolve()
+
+# Three callers rewrite the same `nexus` table on the same Single: the nightly
+# sync_nexus_list job, the auto-fetch enqueued when a company is first
+# configured, and the manual Fetch button on the guided setup / settings form.
+# Held per site, so a web worker and an RQ worker contend for the same lock.
+NEXUS_SYNC_LOCK = "taxjar_nexus_sync"
 
 
 class TaxJarSettings(Document):
@@ -62,6 +70,16 @@ class TaxJarSettings(Document):
 		# should still be reading the memo from before it.
 		clear_company_config_cache()
 
+		# A nexus refresh replaces the `nexus` table and stamps nexus_last_synced.
+		# It changes no credential and no company config, so none of the three
+		# jobs below have anything to react to - and enqueuing them would send
+		# more writers at this same Single and its child tables while the
+		# refresh's own transaction is still open. That is what surfaced in the
+		# browser as "Deadlock Occurred" when a manual Fetch landed on top of
+		# the background sync.
+		if self.flags.nexus_sync:
+			return
+
 		features_enabled = _is_taxjar_enabled(self)
 
 		# Custom fields, the Product Tax Category master and permissions are all set up
@@ -76,8 +94,13 @@ class TaxJarSettings(Document):
 				now=frappe.flags.in_test,
 			)
 
-		# Auto-fetch nexus when first configured: features on, company config present, nexus empty.
-		if features_enabled and self.company_config and not self.nexus:
+		# Auto-fetch nexus when first configured: features on, company config
+		# present, and nexus never synced. Gated on the timestamp, not on an
+		# empty `nexus` table: a TaxJar account with no nexus registered
+		# legitimately syncs to zero rows, and "empty" would then re-enqueue the
+		# job on the very save the job itself makes - a sync that never stops,
+		# hammering TaxJar and rewriting this Single until someone notices.
+		if features_enabled and self.company_config and not self.nexus_last_synced:
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.tasks.sync_nexus_list",
 				queue="short",
@@ -222,6 +245,36 @@ class TaxJarSettings(Document):
 				title=frappe._("Company Configuration Required"),
 			)
 
+		# One sync at a time. Two of them clear and re-insert the same child rows
+		# under the same parent, in whatever order each transaction happens to
+		# reach them, which is a deadlock waiting for the timing to line up - and
+		# it did, for anyone who pressed Fetch while the background sync was
+		# still running.
+		try:
+			with filelock(NEXUS_SYNC_LOCK, timeout=60):
+				self._sync_nexus_from_taxjar()
+		except LockTimeoutError:
+			frappe.throw(
+				frappe._("A nexus sync is already running. Please try again in a moment."),
+				title=frappe._("Nexus Sync In Progress"),
+			)
+
+	def _sync_nexus_from_taxjar(self):
+		"""Replace `nexus` with what TaxJar reports for every configured company.
+
+		Call only while holding NEXUS_SYNC_LOCK - update_nexus_list() is the
+		entry point that takes it.
+		"""
+		# Whoever held the lock before this one may have saved while this one
+		# waited for it, leaving this copy behind the database - save() would
+		# then fail on the modified timestamp rather than on anything the user
+		# did. Only reload when that actually happened: callers hand this method
+		# a settings doc they may have changed in memory, and an unconditional
+		# reload would throw those changes away.
+		db_modified = frappe.db.get_single_value(self.doctype, "modified", cache=False)
+		if db_modified != (frappe.utils.get_datetime(self.modified) if self.modified else None):
+			self.reload()
+
 		self.set("nexus", [])
 
 		# Clears `nexus`; iterates `company_config`. Different tables.
@@ -277,6 +330,9 @@ class TaxJarSettings(Document):
 				})
 
 		self.nexus_last_synced = frappe.utils.now()
+		# Read by on_update: this save carries nexus, and nothing the credential
+		# check or the tax template sync would need to run again for.
+		self.flags.nexus_sync = True
 		self.save()
 
 	@frappe.whitelist()
