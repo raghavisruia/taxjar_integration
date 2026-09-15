@@ -14,7 +14,7 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 
 dependencies = [
-    "taxjar~=1.9.2",
+    "taxjar~=2.0.1",
 ]
 
 [project.urls]
