@@ -16,6 +16,8 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_ROW_DESCRIPTION,
 	_apply_item_discounts,
 	_build_synthetic_line_item,
+	_address_fault_note,
+	_address_side_at_fault,
 	_classify_foreign_tax_rows,
 	_clear_breakdown_data,
 	_distribute_negative_total,
@@ -24,6 +26,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_extract_breakdown_data,
 	_extract_breakdown_from_obj,
 	_format_address_short,
+	_get_address_context,
 	_get_customer_exemption_type,
 	_get_customer_name,
 	_get_effective_exemption,
@@ -33,6 +36,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_is_taxjar_enabled,
 	_linkify_guided_setup,
 	_make_safe_customer_id,
+	_record_address_context,
 	_remove_taxjar_rows,
 	_set_customer_sync_status,
 	_set_sync_status,
@@ -6143,6 +6147,109 @@ class TestValidateTaxRequestOutage(UnitTestCase):
 		self.assertIsNone(result)
 		mock_msg.assert_called_once()
 		self.assertIn("unreachable", mock_msg.call_args[0][0].lower())
+
+
+class TestAddressAtFaultAttribution(UnitTestCase):
+	"""TaxJar rejects a field, not a document. "Origin Zipcode 34589 is not used
+	within Origin State AK" told the user a zipcode was wrong and nothing about
+	which of the two addresses on the order to go and fix - company or customer,
+	no link, no name."""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _context(self):
+		return {
+			"company": "Test Co", "customer": "Alan Houk",
+			"origin": "Test Co-Billing", "destination": "Alan Houk-Shipping",
+		}
+
+	def _throws_with(self, detail, address_context):
+		mock_client = MagicMock()
+		mock_client.tax_for_order.side_effect = _response_error(400, detail)
+
+		with patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.log_taxjar_call"):
+			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+				validate_tax_request({"dummy": True}, address_context=address_context)
+
+		return str(cm.exception)
+
+	def test_origin_rejection_names_the_company_address(self):
+		message = self._throws_with(
+			"from_zip 34589 is not used within from_state AK", self._context()
+		)
+
+		self.assertIn("Origin Zipcode 34589", message)  # the original sentence survives
+		self.assertIn("Please verify the address for <strong>Test Co</strong>", message)
+		self.assertIn("Test Co-Billing", message)
+		self.assertIn("/address/", message)
+		self.assertNotIn("Alan Houk-Shipping", message)
+
+	def test_destination_rejection_names_the_transaction_address(self):
+		message = self._throws_with("to_zip is not used within to_state", self._context())
+
+		self.assertIn("Alan Houk-Shipping", message)
+		self.assertIn("Please verify the address for", message)
+		self.assertIn("Alan Houk", message)
+		self.assertNotIn("Test Co-Billing", message)
+
+	def test_detail_naming_both_ends_points_at_neither(self):
+		"""A wrong pointer sends someone to edit an address that was never the
+		problem, which is worse than no pointer at all."""
+		message = self._throws_with("from_zip and to_zip are both invalid", self._context())
+
+		self.assertNotIn("/address/", message)
+
+	def test_detail_naming_no_field_points_at_neither(self):
+		message = self._throws_with("amount must be equal to the sum of line items", self._context())
+
+		self.assertNotIn("/address/", message)
+
+	def test_message_is_unchanged_without_context(self):
+		"""Every caller that cannot supply context keeps exactly the old wording."""
+		message = self._throws_with("from_zip 34589 is not used within from_state AK", None)
+
+		self.assertIn("Origin Zipcode 34589", message)
+		self.assertNotIn("/address/", message)
+
+	def test_side_is_read_from_the_raw_detail(self):
+		self.assertEqual(_address_side_at_fault(_response_error(400, "from_state AK")), "origin")
+		self.assertEqual(_address_side_at_fault(_response_error(400, "to_city is required")), "destination")
+		self.assertIsNone(_address_side_at_fault(_response_error(400, "from_zip and to_zip")))
+		self.assertIsNone(_address_side_at_fault(_response_error(400, "rate limit reached")))
+		self.assertIsNone(_address_side_at_fault(_response_error(400, None)))
+
+	def test_note_is_empty_when_the_named_side_has_no_address(self):
+		"""Half a sentence - "Please verify the address for Test Co:" with no link -
+		would be worse than the plain message."""
+		context = {"company": "Test Co", "customer": "Alan Houk", "origin": None, "destination": "Alan Houk-Shipping"}
+
+		self.assertEqual(_address_fault_note(_response_error(400, "from_zip bad"), context), "")
+
+	def test_context_records_both_address_names(self):
+		doc = _make_doc()
+		doc.flags = frappe._dict()
+
+		_record_address_context(
+			doc, frappe._dict(name="Test Co-Billing"), frappe._dict(name="Alan Houk-Shipping")
+		)
+
+		self.assertEqual(
+			_get_address_context(doc),
+			{
+				"company": "Test Co", "customer": "_Test Customer",
+				"origin": "Test Co-Billing", "destination": "Alan Houk-Shipping",
+			},
+		)
+
+	def test_a_document_without_flags_is_skipped_rather_than_failing(self):
+		"""_FakeDoc and other plain stubs have no flags container; recording is a
+		convenience, never a precondition for pricing an order."""
+		doc = _make_doc()
+
+		_record_address_context(doc, frappe._dict(name="A"), frappe._dict(name="B"))
+
+		self.assertIsNone(_get_address_context(doc))
 
 
 class TestSyncTransactionOutage(UnitTestCase):

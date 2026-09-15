@@ -10,7 +10,7 @@ import taxjar
 from frappe import _
 from frappe.contacts.doctype.address.address import get_company_address
 from frappe.realtime import get_doctype_room
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, get_link_to_form
 from frappe.utils.caching import request_cache
 from frappe.utils.password import get_decrypted_password
 
@@ -853,6 +853,39 @@ def _get_usd_exchange_rate(doc):
 	return rate
 
 
+def _record_address_context(doc, from_address, to_address):
+	"""Remember which Address each end of the TaxJar payload was built from.
+
+	TaxJar names the field it rejected ("from_zip"), never the document that
+	field came from - and by the time validate_tax_request() sees the rejection,
+	the payload is a flat dict of five strings per end with no way back to either
+	Address. Both are in hand here and nowhere else, so this is where they get
+	recorded.
+
+	On doc.flags rather than in the payload itself: tax_dict is posted to TaxJar
+	verbatim, and _get_usd_exchange_rate() already treats flags as this module's
+	per-document scratch space. Documents without a flags container (plain test
+	stubs) simply skip it, and a rejection falls back to its unattributed wording
+	rather than failing.
+	"""
+	flags = getattr(doc, "flags", None)
+	if flags is None:
+		return
+
+	flags.taxjar_address_context = {
+		"company": getattr(doc, "company", None),
+		"customer": _get_customer_name(doc),
+		"origin": from_address.get("name"),
+		"destination": to_address.get("name"),
+	}
+
+
+def _get_address_context(doc):
+	"""What _record_address_context() stored, or None if it never ran."""
+	flags = getattr(doc, "flags", None)
+	return flags.get("taxjar_address_context") if flags is not None else None
+
+
 def get_tax_data(doc):
 	company_config = get_company_config(doc.company)
 	if not company_config:
@@ -867,6 +900,8 @@ def get_tax_data(doc):
 	to_shipping_state = to_address.get("state")
 	to_country_code = frappe.db.get_value("Country", to_address.country, "code", cache=True)
 	to_country_code = to_country_code.upper()
+
+	_record_address_context(doc, from_address, to_address)
 
 	shipping = sum(
 		tax.tax_amount for tax in doc.taxes
@@ -1275,7 +1310,9 @@ def set_sales_tax(doc, method):
 	if cached is not None:
 		tax_data = cached
 	else:
-		tax_data = validate_tax_request(tax_dict, company=doc.company)
+		tax_data = validate_tax_request(
+			tax_dict, company=doc.company, address_context=_get_address_context(doc)
+		)
 		if tax_data is not None:
 			frappe.cache().set_value(cache_key, tax_data, expires_in_sec=300)
 	if tax_data is not None and tax_data.amount_to_collect is not None:
@@ -1953,8 +1990,13 @@ def _get_effective_exemption(doc):
 	return None, None
 
 
-def validate_tax_request(tax_dict, company=None):
-	"""Return the sales tax that should be collected for a given order."""
+def validate_tax_request(tax_dict, company=None, address_context=None):
+	"""Return the sales tax that should be collected for a given order.
+
+	address_context is what _record_address_context() stored on the document, and
+	is optional throughout: without it a rejection reads exactly as it did
+	before, naming the field but not the Address.
+	"""
 
 	client = get_client(company)
 
@@ -1985,10 +2027,11 @@ def validate_tax_request(tax_dict, company=None):
 			payload=tax_dict,
 			error=getattr(err, "full_response", str(err)),
 		)
-		frappe.throw(
-			_linkify_guided_setup(_(sanitize_error_response(err))),
-			title=_("TaxJar Tax Calculation Failed"),
-		)
+		message = _linkify_guided_setup(_(sanitize_error_response(err)))
+		note = _address_fault_note(err, address_context)
+		if note:
+			message = f"{message}<br><br>{note}"
+		frappe.throw(message, title=_("TaxJar Tax Calculation Failed"))
 	except Exception:
 		log_taxjar_call(
 			action="tax_for_order",
@@ -2563,6 +2606,70 @@ _API_FIELD_LABELS = {
 _API_FIELD_PATTERN = re.compile(
 	r"\b(" + "|".join(sorted(_API_FIELD_LABELS, key=len, reverse=True)) + r")\b"
 )
+
+# The payload fields belonging to each end of the order. TaxJar names the field
+# it rejected and nothing else, so the field is the only evidence of which
+# Address is at fault: "from_zip 34589 is not used within from_state AK" is about
+# the company's own address, and a user reading the relabelled sentence has no
+# way to tell that from a customer address problem.
+_ORIGIN_API_FIELDS = ("from_country", "from_zip", "from_state", "from_city", "from_street")
+_DESTINATION_API_FIELDS = ("to_country", "to_zip", "to_state", "to_city", "to_street")
+
+
+def _address_side_at_fault(err):
+	"""Which end of the order a TaxJar rejection names: "origin", "destination",
+	or None when it names both ends or neither.
+
+	Matched against the raw detail, before _describe_response_error() relabels
+	"from_zip" into "Origin Zipcode" - the labels exist for people to read, the
+	field names are what can be matched without guessing.
+
+	None on an ambiguous detail on purpose. An unattributed message is worse than
+	an attributed one, but a confident pointer at the wrong document is worse
+	than both - it sends someone to edit an address that was never the problem.
+	"""
+	full = getattr(err, "full_response", None)
+	detail = (full.get("detail") if isinstance(full, dict) else None) or ""
+
+	names_origin = any(field in detail for field in _ORIGIN_API_FIELDS)
+	names_destination = any(field in detail for field in _DESTINATION_API_FIELDS)
+
+	if names_origin == names_destination:
+		return None
+
+	return "origin" if names_origin else "destination"
+
+
+def _address_fault_note(err, address_context):
+	"""One sentence naming the Address a rejection is about, linked to its form.
+
+	Empty whenever anything is missing - no context recorded, an ambiguous
+	detail, or a side whose Address name never made it through. The caller keeps
+	its original message in that case rather than showing half a sentence.
+	"""
+	if not address_context:
+		return ""
+
+	side = _address_side_at_fault(err)
+	if not side:
+		return ""
+
+	address_name = address_context.get(side)
+	if not address_name:
+		return ""
+
+	link = get_link_to_form("Address", address_name)
+
+	# Whose address it is, in the words the user already thinks of it by: a
+	# company for the origin, the customer being sold to for the destination.
+	party = address_context.get("company" if side == "origin" else "customer")
+	if party:
+		return _("Please verify the address for {0}: {1}").format(frappe.bold(party), link)
+
+	if side == "origin":
+		return _("Please verify the company's own address: {0}").format(link)
+
+	return _("Please verify the address on this transaction: {0}").format(link)
 
 
 def classify_taxjar_error(err):
