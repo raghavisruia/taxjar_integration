@@ -173,8 +173,9 @@
 .taxjar-setup .ts-kv-company > span:first-child { color: var(--text-color); font-weight: 600; }
 .taxjar-setup .ts-kv-company > span:last-child { color: var(--text-muted); font-weight: 400; }
 
-/* Review's Accounts card — company name and its account heads stack instead
-   of sitting side by side, so long values never fight the row's alignment. */
+/* Review's Ledgers & Address card — company name and its account heads stack
+   instead of sitting side by side, so long values never fight the row's
+   alignment. */
 .taxjar-setup .ts-accrow { padding: 10px 0; font-size: var(--text-sm); border-bottom: 1px solid var(--border-color); }
 .taxjar-setup .ts-accrow:last-child { border-bottom: 0; }
 .taxjar-setup .ts-acc-company { font-weight: 600; color: var(--text-color); }
@@ -394,3 +395,145 @@
 	padding: 4px 11px; display: inline-flex; gap: 7px;
 }
 .taxjar-setup .ts-pillcode { font-family: var(--font-family-monospace, monospace); color: var(--text-muted); }
+/* A company TaxJar returned no regions for, in a grid alongside companies that
+   did have some — so it stays a card, with the way out stated inside it. */
+.taxjar-setup .ts-nonexus { font-size: var(--text-sm); color: var(--text-muted); }
+.taxjar-setup .ts-nonexus a { color: var(--text-color); text-decoration: underline; white-space: nowrap; }
+/* No company has any: one message for the whole step. .ts-nexusresult is a
+   grid, so the empty state has to be told to span it rather than sit in the
+   first 280px column with the rest of the row blank beside it. */
+.taxjar-setup .ts-nexusempty { grid-column: 1 / -1; }
+
+/* Address step. The card is the Map Ledgers card (.ts-cardgrid > .ts-card) with
+   a picker row, a preview block and up to two note lines under it; only that
+   inner layout lives here. */
+.taxjar-setup .ts-addr-none { margin: 0; font-size: var(--text-md); }
+/* .ts-card-b's default align-items: stretch would blow the sole call-to-action
+   button out to the card's full width - same fix .ts-cred-add-row needs. */
+.taxjar-setup .ts-addr-add { align-items: flex-start; display: flex; }
+
+/* Link field and "New address" side by side while there is room, stacking
+   below ~340px of card. auto-fit on a min of 150px does that without a media
+   query tied to the grid's own breakpoint. */
+.taxjar-setup .ts-addr-pickrow {
+	display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+	align-items: flex-end; gap: 12px;
+}
+/* The button is the shorter of the two children and align-items: flex-end pins
+   it to the input's baseline; once the row wraps, that same rule is what stops
+   it stretching. */
+.taxjar-setup .ts-addr-pickrow .ts-addr-new { display: flex; justify-content: flex-start; }
+
+.taxjar-setup .ts-addr-preview {
+	border: 1px solid var(--border-color); border-radius: var(--border-radius-md, 6px);
+	padding: 12px; display: flex; flex-direction: column; gap: 8px;
+	font-size: var(--text-sm);
+}
+/* Address lines take the space; the action slot and edit button ride the top
+   right, top-aligned rather than centred - the lines block grows with the
+   address and centring would drift the badge down with it. */
+.taxjar-setup .ts-addr-top { display: flex; align-items: flex-start; gap: 12px; }
+.taxjar-setup .ts-addr-lines { flex: 1; min-width: 0; line-height: 1.6; }
+.taxjar-setup .ts-addr-tail { display: flex; align-items: center; gap: 6px; flex: none; }
+/* Reserved width, for the same reason the credential row reserves one: the slot
+   holds a "Verify" button, a spinner, a badge or a retry icon at different
+   moments, and a content-sized slot would resize the address lines beside it
+   mid-request. */
+.taxjar-setup .ts-addr-action { flex: 0 0 74px; display: flex; justify-content: flex-end; }
+
+.taxjar-setup .ts-addr-flags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.taxjar-setup .ts-addr-flags:empty { display: none; }
+
+/* Two note slots, not one: the address's own state (missing fields, an
+   unpinned pick, an ambiguous origin) and TaxJar's verdict on it are different
+   subjects, and a Verify failure must not hide a missing postal code. :empty
+   rather than a toggled class - an empty flex item still contributes gap. */
+.taxjar-setup .ts-addr-note:empty,
+.taxjar-setup .ts-addr-verifynote:empty { display: none; }
+/* --ink-red-6, not --error-color: espresso defines no --error-color, so the
+   rule resolved to nothing and every one of these warnings rendered in the
+   inherited body colour. --ink-red-6 is the foreground red espresso itself
+   uses for destructive text, and it inverts with the theme. */
+.taxjar-setup .ts-addr-warn { color: var(--ink-red-6); font-size: var(--text-sm); }
+.taxjar-setup .ts-addr-muted { color: var(--text-muted); font-size: var(--text-sm); }
+
+/* ── Activated: the screen after Activate ────────────────────────────────
+   The wizard's chrome (rail, step captions, footer buttons) is hidden here —
+   setup is finished, so a Back/Next pair would only invite the user back into
+   a flow they just completed. Nothing on this screen is a button except the
+   video, and it plays inline; where the user goes next is the desk's job.
+   Green is espresso's --ink-green-* role (the Component Explorer palette), not
+   the raw --green-* scale: ink-* is the foreground role and inverts with the
+   theme, where --green-600 stays dark and all but vanishes on a dark ground.
+   The literal hexes below are the two colours that are not the desk's to pick
+   — YouTube's red, and the ground behind a video frame. */
+.taxjar-setup .ts-done {
+	display: flex; flex-direction: column; align-items: center;
+	gap: 20px; text-align: center; padding: 64px 0 32px;
+}
+
+/* Stock frappe.utils.icon("circle-check"), sized up and tinted. .icon already
+   reads --icon-stroke / --icon-fill, so overriding those two is the whole
+   theme: no override of `stroke:` itself, which would fight the framework's
+   own rule the next time it changes. Left at .icon's 1.5px stroke — at 44px
+   that reads as a hairline, which is the point. */
+.taxjar-setup .ts-done-seal {
+	flex: none;
+	--icon-stroke: var(--ink-green-7);
+	--icon-fill: none;
+}
+
+.taxjar-setup .ts-done-title { margin: 0; font-size: 24px; font-weight: 700; }
+
+/* Facade and caption side by side, stacking under ~560px. Once the video is
+   playing the row goes single-column regardless — see .is-playing below. */
+.taxjar-setup .ts-done-media {
+	display: flex; align-items: center; justify-content: center;
+	gap: 28px; flex-wrap: wrap; margin-top: 12px; width: 100%;
+}
+/* Thumbnail with the play mark centred over it. 16:9 with the image cropped to
+   fill, so hqdefault's baked-in letterbox bars fall outside the frame when
+   maxresdefault is missing and the fallback loads. The dark ground shows only
+   while the image is in flight, or if i.ytimg.com is unreachable — the play
+   mark still reads against it, so an offline desk gets a working button rather
+   than a blank box. Fixed dark, not a theme surface: it stands in for a video
+   frame, and a light-theme desk showing a white gap there reads as broken. */
+.taxjar-setup .ts-done-play {
+	flex: none; position: relative; overflow: hidden;
+	width: 280px; aspect-ratio: 16 / 9; padding: 0; cursor: pointer;
+	display: flex; align-items: center; justify-content: center;
+	background: #0f0f0f; border: 1px solid var(--border-color);
+	border-radius: var(--radius-lg, 12px);
+}
+.taxjar-setup .ts-done-thumb {
+	position: absolute; inset: 0;
+	width: 100%; height: 100%; object-fit: cover;
+}
+/* Above the thumbnail, and dimmed a touch until the box is hovered — the mark
+   is the affordance, so it brightens as the pointer arrives rather than
+   sitting at full saturation over someone's video frame. */
+.taxjar-setup .ts-done-play .ts-yt {
+	position: relative; width: 62px; height: 44px; opacity: 0.88;
+	filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.4));
+}
+.taxjar-setup .ts-done-play:hover .ts-yt { opacity: 1; }
+.taxjar-setup .ts-yt-body { fill: #f61c0d; }
+.taxjar-setup .ts-yt-arrow { fill: #fff; }
+
+.taxjar-setup .ts-done-caption {
+	margin: 0; max-width: 330px; text-align: left;
+	font-size: var(--text-md); line-height: 1.6;
+}
+
+/* Playing: the frame takes the column and the caption drops under it, centred.
+   A 16:9 frame wide enough to watch leaves nothing usable beside it. */
+.taxjar-setup .ts-done-media.is-playing { flex-direction: column; gap: 14px; }
+.taxjar-setup .ts-done-frame {
+	width: 100%; max-width: 720px; aspect-ratio: 16 / 9;
+	border: 1px solid var(--border-color); border-radius: var(--radius-lg, 12px);
+	overflow: hidden;
+}
+.taxjar-setup .ts-done-frame iframe { display: block; width: 100%; height: 100%; border: 0; }
+.taxjar-setup .ts-done-media.is-playing .ts-done-caption {
+	max-width: 720px; text-align: center; color: var(--text-muted);
+}

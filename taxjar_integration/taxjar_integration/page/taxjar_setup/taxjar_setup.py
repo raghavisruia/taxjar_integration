@@ -17,6 +17,12 @@ Two child tables, two different lifecycles:
 get_setup_state() therefore exposes ``credentials`` (from table_hvjw, drives the
 Connect step) and ``companies`` (from company_config, drives Accounts/Features/
 Review) as two separate lists rather than one merged shape.
+
+``addresses`` is a third list with no child table behind it at all. The company
+address TaxJar prices from is an ordinary ERPNext Address linked to the Company,
+so it is read live per company - through the very same get_default_address()
+the tax call itself uses - rather than mirrored into this doctype, where it
+could disagree with what get_tax_data() will actually read.
 """
 
 import taxjar
@@ -24,6 +30,8 @@ import frappe
 from frappe import _
 from frappe.utils import cint
 from frappe.utils.password import get_decrypted_password
+
+from taxjar_integration.taxjar_integration.taxjar_integration import company_address_names
 
 SETTINGS = "TaxJar Settings"
 
@@ -100,6 +108,7 @@ def get_setup_state():
 		"setup_complete": bool(settings.setup_complete),
 		"credentials": credentials,
 		"companies": companies,
+		"addresses": [_company_address(cred["company"]) for cred in credentials],
 		"nexus_by_company": _nexus_by_company(settings),
 		"nexus_last_synced": settings.nexus_last_synced,
 	}
@@ -229,6 +238,267 @@ def save_company_accounts(rows: list | str):
 
 	settings.save()
 	return {"ok": True}
+
+
+# ── Company address ──────────────────────────────────────────────────────────
+#
+# TaxJar prices a sale from the company's own address, which
+# get_company_address_details() resolves through get_default_address("Company",
+# company) - whose sort key is is_primary_address, the field the Address doctype
+# labels "Preferred Billing Address". So the BILLING flag, not the shipping one,
+# decides which address becomes from_street/from_city/from_state/from_zip.
+#
+# That is ERPNext's rule and this step does not get to invent a different one:
+# a wizard that treated Preferred Shipping as the origin would disagree with
+# what get_tax_data() reads at invoice time, which is worse than either rule on
+# its own. The endpoints below surface it instead - _set_preferred_billing() is
+# what makes a pick stick, and get_setup_state() reports the address the same
+# lookup resolves rather than a second opinion about it.
+
+# What TaxJar needs from an address before it can price anything against it.
+# Checked here rather than left to validate_address(): that hook only applies
+# while taxjar_serves_any_company() holds, which is still false at this point in
+# the wizard (the Features step has not run), so it is inert on exactly the
+# addresses this step creates.
+_REQUIRED_ADDRESS_FIELDS = ("address_line1", "city", "taxjar_state_code", "pincode")
+
+# Client-settable Address fields. An allowlist, not a passthrough - these
+# endpoints write a doctype this app does not own, on behalf of a page that has
+# no business setting `disabled`, `links` or anything else it does not show.
+# `state` is absent deliberately; see _address_values().
+_WRITABLE_ADDRESS_FIELDS = (
+	"address_title", "address_line1", "address_line2", "city", "pincode",
+	"taxjar_state_code", "is_primary_address", "is_shipping_address",
+)
+
+_ADDRESS_READ_FIELDS = (
+	"address_title", "address_line1", "address_line2", "city", "state",
+	"taxjar_state_code", "pincode", "country",
+	"is_primary_address", "is_shipping_address",
+)
+
+
+def _company_address(company, address=None):
+	"""One card's worth of address state: what TaxJar will use, and what is wrong with it.
+
+	``address`` overrides the lookup, for previewing a selection the user has
+	made but not yet saved - the card still has to render it before Continue
+	pins it.
+
+	``linked_count`` is what lets the client tell "nothing to pick" from "several
+	candidates, none of them pinned" - with no address flagged Preferred Billing,
+	``is_primary_address DESC`` sorts a column that is 0 for every row and
+	``limit 1`` returns whichever one the database hands back. Harmless with a
+	single address, silently arbitrary with several.
+
+	``company_has_preferred_billing`` is that second half, and it is deliberately
+	about the COMPANY rather than about the address being shown. Whether this
+	address is pinned (``is_primary_address``, below) is a different question:
+	looking at a company's non-pinned address is perfectly ordinary and means
+	nothing is wrong, while no address anywhere being pinned is the arbitrary
+	case. Answering the first question and reporting it as the second told a
+	user whose company was properly pinned that nothing was.
+	"""
+	from frappe.contacts.doctype.address.address import get_default_address
+
+	linked = company_address_names(company)
+	address = address or get_default_address("Company", company)
+
+	if not address:
+		return {"company": company, "address": None, "linked_count": len(linked), "missing": []}
+
+	row = frappe.db.get_value("Address", address, _ADDRESS_READ_FIELDS, as_dict=True) or {}
+	return {
+		"company": company,
+		"address": address,
+		**{field: row.get(field) for field in _ADDRESS_READ_FIELDS},
+		"linked_count": len(linked),
+		"company_has_preferred_billing": bool(
+			frappe.db.exists("Address", {"name": ["in", linked], "is_primary_address": 1})
+		),
+		"missing": [f for f in _REQUIRED_ADDRESS_FIELDS if not (row.get(f) or "").strip()],
+	}
+
+
+@frappe.whitelist()
+def get_company_address_state(company: str, address: str | None = None):
+	"""Re-read one company's address card, optionally for a not-yet-saved pick.
+
+	The Link field can point at an address before save_company_address() has
+	pinned it, and the card still has to preview it - including whether it is
+	complete, which is _REQUIRED_ADDRESS_FIELDS' business and not the client's to
+	re-derive.
+	"""
+	frappe.has_permission(SETTINGS, "read", throw=True)
+
+	if address:
+		frappe.has_permission("Address", "read", doc=address, throw=True)
+		if address not in company_address_names(company):
+			frappe.throw(
+				_("{0} is not an address of {1}.").format(address, company),
+				title=_("Address Not Linked"),
+			)
+
+	return _company_address(company, address)
+
+
+def _address_values(values):
+	"""Allowlisted Address fields from the client, with ``state`` derived.
+
+	The dialog asks for the two-letter code only, and ``state`` is filled in from
+	it here - the same pairing public/js/address.js keeps in lockstep on the
+	Address form itself. Accepting both from the client would let them disagree,
+	and get_state_code() reads one while a human reads the other.
+	"""
+	from taxjar_integration.taxjar_integration.taxjar_integration import US_STATE_NAMES
+
+	values = frappe.parse_json(values) if isinstance(values, str) else (values or {})
+
+	out = {field: values.get(field) for field in _WRITABLE_ADDRESS_FIELDS if field in values}
+	for flag in ("is_primary_address", "is_shipping_address"):
+		if flag in out:
+			out[flag] = cint(out[flag])
+
+	code = (out.get("taxjar_state_code") or "").strip().upper()
+	if code:
+		out["taxjar_state_code"] = code
+		out["state"] = US_STATE_NAMES.get(code, code)
+
+	return out
+
+
+def _set_preferred_billing(company, address):
+	"""Pin ``address`` as the company's Preferred Billing Address, clearing its siblings.
+
+	Only rows whose flag actually changes are written. An untouched address
+	should not be re-saved - its own validate() would run for nothing, and the
+	user would need write permission on an address this call never meant to
+	change.
+	"""
+	linked = company_address_names(company)
+	if address not in linked:
+		frappe.throw(
+			_("{0} is not an address of {1}.").format(address, company),
+			title=_("Address Not Linked"),
+		)
+
+	for name in linked:
+		wanted = 1 if name == address else 0
+		if cint(frappe.db.get_value("Address", name, "is_primary_address")) == wanted:
+			continue
+		frappe.has_permission("Address", "write", doc=name, throw=True)
+		doc = frappe.get_doc("Address", name)
+		doc.is_primary_address = wanted
+		doc.save()
+
+
+@frappe.whitelist(methods=["POST"])
+def save_company_address(rows: list | str):
+	"""Pin each company's chosen address as its Preferred Billing Address.
+
+	is_shipping_address is deliberately untouched. It is the user's, set in the
+	dialog, read by other parts of ERPNext, and nothing in the TaxJar path
+	depends on it - rewriting it from here would be a side effect nobody asked
+	for.
+	"""
+	frappe.has_permission(SETTINGS, "write", throw=True)
+
+	rows = frappe.parse_json(rows) if isinstance(rows, str) else (rows or [])
+
+	for row in rows:
+		company, address = row.get("company"), row.get("address")
+		if company and address:
+			_set_preferred_billing(company, address)
+
+	return {"ok": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def create_company_address(company: str, values: dict | str):
+	"""Create an Address already linked to ``company``.
+
+	Country is fixed to United States rather than taken from the client: every
+	company that reaches this step is a US company - company_scope() refuses any
+	other and the Connect step's link filter never offers one - so it is the only
+	value that can be correct here.
+	"""
+	frappe.has_permission(SETTINGS, "write", throw=True)
+	frappe.has_permission("Company", "read", doc=company, throw=True)
+	frappe.has_permission("Address", "create", throw=True)
+
+	doc = frappe.new_doc("Address")
+	doc.update(_address_values(values))
+	# address_type is mandatory on the doctype and this dialog does not ask for
+	# it - there is one address per company here and its type is not a thing the
+	# wizard has an opinion about. "Billing" matches the flag that actually
+	# decides the tax origin (see the section comment above).
+	doc.address_type = "Billing"
+	doc.country = "United States"
+	doc.append("links", {"link_doctype": "Company", "link_name": company})
+	doc.insert()
+
+	if cint(doc.is_primary_address):
+		_set_preferred_billing(company, doc.name)
+
+	return {"ok": True, "address": doc.name}
+
+
+@frappe.whitelist(methods=["POST"])
+def update_company_address(company: str, address: str, values: dict | str):
+	"""Edit one of ``company``'s own addresses.
+
+	Scoped to the company's linked addresses so this cannot be used as a general
+	"write any Address" endpoint on the strength of a TaxJar Settings permission.
+	"""
+	frappe.has_permission(SETTINGS, "write", throw=True)
+	frappe.has_permission("Address", "write", doc=address, throw=True)
+
+	if address not in company_address_names(company):
+		frappe.throw(
+			_("{0} is not an address of {1}.").format(address, company),
+			title=_("Address Not Linked"),
+		)
+
+	doc = frappe.get_doc("Address", address)
+	doc.update(_address_values(values))
+	doc.save()
+
+	if cint(doc.is_primary_address):
+		_set_preferred_billing(company, address)
+
+	return {"ok": True, "address": address}
+
+
+@frappe.whitelist(methods=["POST"])
+def verify_company_address(company: str, address: str):
+	"""Ask TaxJar whether it can find this address, during setup.
+
+	Deliberately NOT the public verify_address_with_taxjar(), which gates on
+	company_scope(company).uses_taxjar - a condition that is false by definition
+	while this step runs, since the Features step that turns a feature on comes
+	after it. Wired to that endpoint, the button would answer "out_of_scope" on
+	every first run, which is the setup wizard reporting that setup is not
+	finished.
+
+	The gate here is the one that actually matters for the call: a credential for
+	this company, which the Connect step has already proven works. Both go
+	through the same _validate_address_with_taxjar(), so the verdict, the
+	logging and the country guard are identical.
+	"""
+	frappe.has_permission(SETTINGS, "write", throw=True)
+	frappe.has_permission("Address", "read", doc=address, throw=True)
+
+	from taxjar_integration.taxjar_integration.taxjar_integration import (
+		_validate_address_with_taxjar,
+	)
+
+	doc = frappe.get_doc("Address", address)
+	# Returns None when the company has no usable credential for the current API
+	# mode; say which of the two it is rather than passing None to the client.
+	return _validate_address_with_taxjar(doc, company) or {
+		"checked": False,
+		"reason": "no_credential",
+	}
 
 
 @frappe.whitelist(methods=["POST"])

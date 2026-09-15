@@ -2,6 +2,7 @@
 # See license.txt
 
 import json
+import re
 import unittest
 from datetime import datetime
 
@@ -11909,6 +11910,379 @@ class TestGuidedSetupSaveCompanyAccounts(UnitTestCase):
 			self.assertRaises(frappe.PermissionError, save_company_accounts, rows=[])
 
 
+# ── Phase 2: company address (Address step) ──────────────────────────────────
+#
+# The address TaxJar prices from is resolved by get_default_address("Company",
+# company), which sorts on is_primary_address - the field the Address doctype
+# labels "Preferred Billing Address". These tests pin that down in both
+# directions: what the wizard reports, and what it writes.
+
+
+class TestGuidedSetupCompanyAddress(UnitTestCase):
+	MODULE = _SETUP_MODULE
+
+	def _address_row(self, **overrides):
+		row = frappe._dict(
+			address_title="Frappe Tech",
+			address_line1="88 Market Street",
+			address_line2=None,
+			city="Tampa",
+			state="Florida",
+			taxjar_state_code="FL",
+			pincode="33602",
+			country="United States",
+			is_primary_address=1,
+			is_shipping_address=0,
+		)
+		row.update(overrides)
+		return row
+
+	def test_reports_the_address_the_tax_call_will_read(self):
+		"""Resolved through the same get_default_address() get_company_address_
+		details() uses, so the wizard cannot show one address while TaxJar
+		prices from another."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import _company_address
+
+		with patch(self.MODULE + ".company_address_names", return_value=["ADDR-1", "ADDR-2"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=self._address_row()), \
+		     patch("frappe.contacts.doctype.address.address.get_default_address", return_value="ADDR-1"):
+			info = _company_address("Frappe Tech")
+
+		self.assertEqual(info["address"], "ADDR-1")
+		self.assertEqual(info["city"], "Tampa")
+		self.assertEqual(info["linked_count"], 2)
+		self.assertEqual(info["missing"], [])
+
+	def test_missing_lists_only_what_taxjar_needs(self):
+		"""State code and postal code decide the rate; address_line2 does not."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import _company_address
+
+		row = self._address_row(taxjar_state_code="", pincode=None, address_line2=None)
+		with patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=row), \
+		     patch("frappe.contacts.doctype.address.address.get_default_address", return_value="ADDR-1"):
+			info = _company_address("Frappe Tech")
+
+		self.assertEqual(info["missing"], ["taxjar_state_code", "pincode"])
+
+	def test_no_address_reports_none_rather_than_throwing(self):
+		"""The step's whole job is the company that has no address yet - it must
+		render, not raise."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import _company_address
+
+		with patch(self.MODULE + ".company_address_names", return_value=[]), \
+		     patch("frappe.contacts.doctype.address.address.get_default_address", return_value=None):
+			info = _company_address("Frappe Tech")
+
+		self.assertIsNone(info["address"])
+		self.assertEqual(info["linked_count"], 0)
+
+	def test_pinned_flag_is_about_the_company_not_the_address_on_screen(self):
+		"""Regression. Two addresses, one of them pinned; the user selects the
+		OTHER one. That address's own is_primary_address is 0, but the company
+		is pinned perfectly well - and answering the first question while
+		reporting it as the second told that user "none marked Preferred
+		Billing" about a company that had one."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import _company_address
+
+		shown = self._address_row(is_primary_address=0, is_shipping_address=0)
+		with patch(self.MODULE + ".company_address_names", return_value=["ADDR-1", "ADDR-2"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=shown), \
+		     patch(self.MODULE + ".frappe.db.exists", return_value="ADDR-1"), \
+		     patch("frappe.contacts.doctype.address.address.get_default_address", return_value="ADDR-1"):
+			info = _company_address("Frappe Tech", address="ADDR-2")
+
+		self.assertEqual(info["is_primary_address"], 0)
+		self.assertTrue(info["company_has_preferred_billing"])
+
+	def test_no_address_pinned_anywhere_is_the_ambiguous_case(self):
+		"""The warning this drives is real: with nothing pinned,
+		`is_primary_address DESC` sorts a column that is 0 for every candidate
+		and `limit 1` returns whichever row the database hands back."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import _company_address
+
+		shown = self._address_row(is_primary_address=0)
+		with patch(self.MODULE + ".company_address_names", return_value=["ADDR-1", "ADDR-2"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=shown), \
+		     patch(self.MODULE + ".frappe.db.exists", return_value=None), \
+		     patch("frappe.contacts.doctype.address.address.get_default_address", return_value="ADDR-1"):
+			info = _company_address("Frappe Tech")
+
+		self.assertFalse(info["company_has_preferred_billing"])
+
+	def test_explicit_address_overrides_the_default_lookup(self):
+		"""A pick the user has made but not saved still has to render - the card
+		previews it before Continue pins it."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import _company_address
+
+		with patch(self.MODULE + ".company_address_names", return_value=["ADDR-1", "ADDR-2"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=self._address_row()), \
+		     patch("frappe.contacts.doctype.address.address.get_default_address", return_value="ADDR-1"):
+			info = _company_address("Frappe Tech", address="ADDR-2")
+
+		self.assertEqual(info["address"], "ADDR-2")
+
+
+class TestGuidedSetupSaveCompanyAddress(UnitTestCase):
+	MODULE = _SETUP_MODULE
+
+	def test_pins_chosen_address_and_clears_its_siblings(self):
+		"""is_primary_address is what get_default_address sorts on, so setting it
+		is the only thing that makes a pick stick - and leaving it set on a
+		sibling would leave the choice to row order."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_address
+
+		docs = {
+			"ADDR-1": MagicMock(is_primary_address=0),
+			"ADDR-2": MagicMock(is_primary_address=1),
+		}
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1", "ADDR-2"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", side_effect=lambda dt, n, f: docs[n].is_primary_address), \
+		     patch(self.MODULE + ".frappe.get_doc", side_effect=lambda dt, n: docs[n]):
+			res = save_company_address(rows=[{"company": "Frappe Tech", "address": "ADDR-1"}])
+
+		self.assertTrue(res["ok"])
+		self.assertEqual(docs["ADDR-1"].is_primary_address, 1)
+		self.assertEqual(docs["ADDR-2"].is_primary_address, 0)
+		docs["ADDR-1"].save.assert_called_once()
+		docs["ADDR-2"].save.assert_called_once()
+
+	def test_skips_rows_whose_flag_already_matches(self):
+		"""An untouched address should not be re-saved: its own validate() would
+		run for nothing, and the user would need write permission on an address
+		this call never meant to change."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_address
+
+		get_doc = MagicMock()
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=1), \
+		     patch(self.MODULE + ".frappe.get_doc", get_doc):
+			save_company_address(rows=[{"company": "Frappe Tech", "address": "ADDR-1"}])
+
+		get_doc.assert_not_called()
+
+	def test_never_writes_is_shipping_address(self):
+		"""Preferred Shipping is the user's, set in the dialog and read by other
+		parts of ERPNext; nothing in the TaxJar path depends on it, so rewriting
+		it here would be a side effect nobody asked for."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_address
+
+		doc = MagicMock(is_primary_address=0, is_shipping_address=1)
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]), \
+		     patch(self.MODULE + ".frappe.db.get_value", return_value=0), \
+		     patch(self.MODULE + ".frappe.get_doc", return_value=doc):
+			save_company_address(rows=[{"company": "Frappe Tech", "address": "ADDR-1"}])
+
+		self.assertEqual(doc.is_shipping_address, 1)
+
+	def test_refuses_an_address_that_is_not_the_company_s(self):
+		"""Scoped to the company's own linked addresses - a TaxJar Settings
+		permission is not a licence to flip flags on any Address on the site."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_address
+
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]):
+			self.assertRaises(
+				frappe.ValidationError,
+				save_company_address,
+				rows=[{"company": "Frappe Tech", "address": "SOMEONE-ELSES"}],
+			)
+
+	def test_requires_write_permission(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_company_address
+
+		with patch(self.MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
+			self.assertRaises(frappe.PermissionError, save_company_address, rows=[])
+
+
+class TestGuidedSetupCreateCompanyAddress(UnitTestCase):
+	MODULE = _SETUP_MODULE
+
+	def _new_doc(self):
+		doc = MagicMock()
+		doc.name = "ADDR-NEW"
+		doc.is_primary_address = 0
+		doc.update = MagicMock(side_effect=lambda values: doc.__dict__.update(values))
+		return doc
+
+	def test_links_to_company_and_locks_country(self):
+		"""Every company that reaches this step is a US company, so the country
+		is not the client's to send."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import create_company_address
+
+		doc = self._new_doc()
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".frappe.new_doc", return_value=doc):
+			res = create_company_address(
+				company="Frappe Tech",
+				values={"address_title": "HQ", "address_line1": "88 Market St", "city": "Tampa",
+				        "taxjar_state_code": "fl", "pincode": "33602", "country": "India"},
+			)
+
+		self.assertTrue(res["ok"])
+		self.assertEqual(doc.country, "United States")
+		self.assertEqual(doc.address_type, "Billing")
+		doc.append.assert_called_once_with("links", {"link_doctype": "Company", "link_name": "Frappe Tech"})
+		doc.insert.assert_called_once()
+
+	def test_derives_state_from_the_code_the_dialog_asked_for(self):
+		"""The dialog asks for the two-letter code only; `state` is filled in
+		from it server-side, the same pairing address.js keeps on the form."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import create_company_address
+
+		doc = self._new_doc()
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".frappe.new_doc", return_value=doc):
+			create_company_address(
+				company="Frappe Tech",
+				values={"address_line1": "88 Market St", "city": "Tampa", "taxjar_state_code": "fl"},
+			)
+
+		self.assertEqual(doc.taxjar_state_code, "FL")
+		self.assertEqual(doc.state, "Florida")
+
+	def test_ignores_fields_outside_the_allowlist(self):
+		"""These endpoints write a doctype this app does not own, on behalf of a
+		page that has no business setting `disabled`."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import create_company_address
+
+		doc = self._new_doc()
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".frappe.new_doc", return_value=doc):
+			create_company_address(
+				company="Frappe Tech",
+				values={"address_line1": "88 Market St", "city": "Tampa", "disabled": 1},
+			)
+
+		self.assertNotIn("disabled", doc.update.call_args[0][0])
+
+
+class TestGuidedSetupVerifyCompanyAddress(UnitTestCase):
+	MODULE = _SETUP_MODULE
+
+	def test_does_not_gate_on_uses_taxjar(self):
+		"""The public verify_address_with_taxjar() gates on
+		company_scope().uses_taxjar - false by definition while this step runs,
+		since the Features step that turns a feature on comes after it. Wired to
+		that endpoint the button would answer "out_of_scope" on every first run,
+		so the wizard calls the shared implementation directly."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup import taxjar_setup
+
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".frappe.get_doc", return_value=MagicMock()), \
+		     patch(
+			     "taxjar_integration.taxjar_integration.taxjar_integration._validate_address_with_taxjar",
+			     return_value={"checked": True, "valid": True},
+		     ) as validate:
+			res = taxjar_setup.verify_company_address(company="Frappe Tech", address="ADDR-1")
+
+		self.assertEqual(res, {"checked": True, "valid": True})
+		validate.assert_called_once()
+
+	def test_no_client_reports_no_credential_rather_than_none(self):
+		"""_validate_address_with_taxjar returns None when the company has no
+		usable token for the current API mode - the client needs a reason, not a
+		null."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup import taxjar_setup
+
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".frappe.get_doc", return_value=MagicMock()), \
+		     patch(
+			     "taxjar_integration.taxjar_integration.taxjar_integration._validate_address_with_taxjar",
+			     return_value=None,
+		     ):
+			res = taxjar_setup.verify_company_address(company="Frappe Tech", address="ADDR-1")
+
+		self.assertEqual(res, {"checked": False, "reason": "no_credential"})
+
+
+class TestAddressVerificationCountryGuard(UnitTestCase):
+	"""TaxJar's address validation is a US service and the payload says "US"
+	outright, whatever the address's own country is. Anything else has to come
+	back not-checked rather than be matched against nothing and reported as
+	"this address does not exist" - the exact failure this call was pulled out
+	of Address.validate to stop."""
+
+	def test_non_us_address_is_not_checked(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_validate_address_with_taxjar,
+		)
+
+		doc = frappe._dict(name="ADDR-CA", country="Canada", pincode="M5H 2N2", city="Toronto")
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="CA"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client") as get_client:
+			res = _validate_address_with_taxjar(doc, "Frappe Tech")
+
+		self.assertEqual(res, {"checked": False, "reason": "unsupported_country"})
+		get_client.assert_not_called()
+
+	def test_us_address_still_reaches_taxjar(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_validate_address_with_taxjar,
+		)
+
+		doc = frappe._dict(
+			name="ADDR-US", country="United States", pincode="33602", city="Tampa",
+			address_line1="88 Market St", taxjar_state_code="FL",
+		)
+		client = MagicMock()
+		client.validate_address.return_value = [{"zip": "33602"}]
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", return_value="US"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=client), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			res = _validate_address_with_taxjar(doc, "Frappe Tech")
+
+		self.assertEqual(res, {"checked": True, "valid": True})
+
+
+class TestGuidedSetupAddressStepJS(UnitTestCase):
+	"""The step's position is load-bearing: it must sit after Map Ledgers (which
+	creates the company_config rows) and before Features (which switches
+	calculation on), so everything TaxJar needs is on file before anything is
+	turned on."""
+
+	def _setup_js(self):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def test_address_step_sits_between_map_ledgers_and_features(self):
+		js = self._setup_js()
+		steps = re.findall(r'\{ key: "(\w+)"', js.split("const SETUP_STEPS = [")[1].split("];")[0])
+		self.assertEqual(
+			steps,
+			["welcome", "connect", "accounts", "address", "features", "nexus", "review"],
+		)
+
+	def test_ambiguity_warning_asks_about_the_company_not_the_shown_address(self):
+		"""Selecting a company's other address is ordinary and Continue pins it;
+		it must not be reported as "none marked Preferred Billing"."""
+		js = self._setup_js()
+		fn = js.split("\t_address_is_ambiguous(info) {")[1].split("\n\t}")[0]
+		self.assertIn("info.company_has_preferred_billing", fn)
+		self.assertNotIn("info.is_primary_address", fn)
+
+	def test_address_cards_verify_on_sight(self):
+		"""Same as the Connect step re-testing every saved token when it opens
+		and the Nexus step re-fetching on open - the answer is wanted the moment
+		the step is looked at, not one click later."""
+		js = self._setup_js()
+		fn = js.split("\t_render_address_card(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn("this._verify_address(entry)", fn)
+
+	def test_verification_never_gates_continue(self):
+		"""Only completeness gates. TaxJar fails to match addresses users have
+		entered correctly, which is why the call left Address.validate."""
+		js = self._setup_js()
+		gate = js.split("\t_sync_address_gate() {")[1].split("\n\t}")[0]
+		self.assertNotIn("verified", gate)
+		self.assertNotIn("verifyError", gate)
 
 
 # ── Company address: deletion / disable guard ────────────────────────────────
@@ -12906,10 +13280,13 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 			self.assertIn(branch, fn)
 		# Failed and idle wire the handler inline; the verified badge is
 		# non-interactive markup on its own, so _build_status_badge does the
-		# click/keyboard wiring for that one.
+		# click/keyboard wiring for that one - via a callback handed to it at
+		# the call site, since the Address step reuses the same badge for its
+		# own check (see _render_address_action).
 		self.assertEqual(fn.count("onclick: () => this._test_connection(entry)"), 2)
-		badge = js.split("_build_status_badge(entry, {")[1].split("\n\t}\n")[0]
-		self.assertIn("this._test_connection(entry)", badge)
+		self.assertEqual(fn.count("this._test_connection(entry)"), 3)
+		badge = js.split("_build_status_badge(opts, onactivate) {")[1].split("\n\t}\n")[0]
+		self.assertIn("onactivate()", badge)
 
 	def test_connect_edits_fall_back_through_reset_cred_status_to_idle_button(self):
 		"""Editing company or token after a test must clear lastError too, not
@@ -12959,6 +13336,43 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("frappe.ui.alert({", mount)
 		self.assertIn('theme: "blue"', mount)
 		self.assertNotIn("ts-banner", js)
+
+	def test_nexus_note_is_hidden_when_there_is_no_list_to_explain(self):
+		"""The banner explains a list of regions. With no list it is one more
+		thing to read past on the way to the only message that matters - and its
+		own "Manage TaxJar Nexus" link duplicates that message's button."""
+		js = self._js()
+		self.assertIn("_toggle_nexus_note(!!total)", js)
+		toggle = js.split("_toggle_nexus_note(show) {")[1].split("\n\t}")[0]
+		self.assertIn('.find(".ts-nexusnote-mount").toggleClass("hide", !show)', toggle)
+
+	def test_empty_nexus_state_sends_the_user_to_taxjar_and_nowhere_else(self):
+		"""Nexus is declared in TaxJar, so that trip is the whole message. The
+		retry is the refresh button already beside the title - a second one
+		inside the empty state is two controls for one job."""
+		js = self._js()
+		empty = js.split("_nexus_empty_state() {")[1].split("\n\t}")[0]
+		self.assertIn("TAXJAR_NEXUS_URL", empty)
+		self.assertEqual(empty.count("label:"), 1)
+		self.assertNotIn("_fetch_nexus", empty)
+
+	def test_sync_state_transforms_the_last_synced_line_rather_than_sitting_beside_it(self):
+		""""Syncing with TaxJar" becomes "Synced just now" in the same place. An
+		in-progress pill beside that line said the same thing twice, in two
+		shapes, with the settled answer arriving in neither of them. The badge
+		slot that remains is only ever a failure."""
+		js = self._js()
+		self.assertIn("this._render_syncing();", js)
+		syncing = js.split("_render_syncing() {")[1].split("\n\t}")[0]
+		self.assertIn('.find(".ts-lastsync").text(__("Syncing with TaxJar"))', syncing)
+
+		fetch = js.split("_fetch_nexus() {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("Fetching", fetch)
+		# The only badge left on this step is the failure one.
+		self.assertEqual(fetch.count("frappe.ui.badge("), 1)
+		self.assertIn('theme: "red"', fetch)
+		# A failed attempt must not leave "Syncing with TaxJar" standing.
+		self.assertIn("this._render_last_sync(this.state.nexus_last_synced);", fetch)
 
 	def test_token_label_reads_tracked_mode_not_control_mid_flight(self):
 		"""_modeIsLive is a plain instance flag set directly from state, read
@@ -13040,18 +13454,28 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 	def test_save_methods_reload_state_before_advancing(self):
 		"""Every save-then-advance step re-fetches state so the wizard stays
 		resumable/consistent instead of trusting a locally-guessed delta — once
-		on initial load, once each from the three save steps, and once after
-		removing an already-saved company."""
+		on initial load, once each from the four save steps, and once after
+		removing an already-saved company.
+
+		The Address step's own per-card refresh is deliberately NOT one of these:
+		_reload_address_card re-reads a single company through
+		get_company_address_state so that editing one address does not discard
+		the Verify results already paid for on every other card."""
 		js = self._js()
 		self.assertIn("_save_connect", js)
 		self.assertIn("_save_accounts", js)
+		self.assertIn("_save_address", js)
 		self.assertIn("_save_features", js)
-		self.assertEqual(js.count("this._reload_state()"), 5)
+		self.assertEqual(js.count("this._reload_state()"), 6)
 
-	def test_review_summarises_connection_accounts_features_nexus(self):
+	def test_review_summarises_connection_ledgers_features_nexus(self):
+		"""Review's four cards. "Accounts" and a separate company-addresses card
+		were merged into one "Ledgers & Address": whether a company has an
+		address is a yes/no per company, not a card's worth of content, and the
+		street itself was already shown and verified on the Address step."""
 		js = self._js()
 		self.assertIn("_render_review", js)
-		for label in ('__("Connection")', '__("Accounts")', '__("Features")', '__("Nexus")'):
+		for label in ('__("Connection")', '__("Ledgers & Address")', '__("Features")', '__("Nexus")'):
 			self.assertIn(label, js)
 
 	def test_connect_card_has_remove_action_wired_to_server_api(self):
@@ -13128,12 +13552,20 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 	def test_review_accounts_label_tax_and_shipping_ledgers_on_separate_lines(self):
 		"""Two bare account names side by side ("X · Y") gave no indication of
 		which was the tax ledger and which was the shipping ledger; each now
-		gets its own labelled line rather than sharing one."""
+		gets its own labelled line rather than sharing one. The Address line
+		joined them later and is held to the same rule."""
 		js = self._js()
 		account_rows = js.split("const accountRows = companies.map((c) => `")[1].split("`).join")[0]
-		self.assertEqual(account_rows.count('<div class="ts-acc-detail">'), 2)
 		self.assertIn('__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head', account_rows)
 		self.assertIn('__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head', account_rows)
+		self.assertIn('__("Address")}: ${addressed.has(c.company)', account_rows)
+		# Every detail line opens with its own label. Counting them against a
+		# hardcoded total only has to be bumped again the next time Review grows
+		# a row - which is exactly how this assertion came to be wrong.
+		self.assertEqual(
+			account_rows.count('<div class="ts-acc-detail">'),
+			account_rows.count('<div class="ts-acc-detail">${__("'),
+		)
 
 	def test_welcome_step_button_says_continue_not_save(self):
 		"""Nothing is saved on the Welcome step (no form fields) — its button

@@ -2538,7 +2538,20 @@ def _validate_address_with_taxjar(doc, company):
 	that isn't documented publicly and either is plausible. Any other error
 	(401/422/5xx, connection issues) is not this address's fault, so it
 	doesn't block the save - same tolerant handling as before.
+
+	United States only. TaxJar's address validation is a US service and the
+	payload below says so outright, hardcoding "US" whatever the address's own
+	country is. That never mattered while nothing called this; it does now. An
+	address from anywhere else must come back not-checked rather than be sent
+	under a country it is not in, matched against nothing, and reported as
+	{"checked": True, "valid": False} - a confident "this address does not
+	exist" about a perfectly good address, which is the exact failure this
+	function was pulled out of Address.validate to stop.
 	"""
+	country_code = (frappe.db.get_value("Country", doc.country, "code", cache=True) or "").upper()
+	if country_code != "US":
+		return {"checked": False, "reason": "unsupported_country"}
+
 	client = get_client(company)
 	if not client:
 		return

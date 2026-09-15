@@ -41,10 +41,38 @@ frappe.pages["taxjar-setup"].on_page_show = function (wrapper) {
 };
 
 const AUTOFILE_DOC_URL = "https://support.taxjar.com/article/908-how-does-autofile-work";
+
+// The walkthrough the success screen offers once setup is activated. Held as a
+// bare video id, not a watch URL, because the screen embeds it rather than
+// linking out - the id is the only part of a YouTube URL an embed needs, and
+// swapping the video is then a one-token edit. Temporary link; replace the id
+// when the final walkthrough is published. Empty string drops the whole player
+// row rather than shipping a play button that opens nothing.
+const SETUP_VIDEO_ID = "qSP820YuqX4";
 // Same URL as taxjar_integration.TAXJAR_NEXUS_URL in the app bundle. Kept as
 // its own literal rather than read from there: this runs at module scope, and
 // a page script that throws on load takes the whole page with it.
 const TAXJAR_NEXUS_URL = "https://app.taxjar.com/account#states";
+
+// verify_company_address's {"checked": false} outcomes. The call did not happen,
+// so none of these is a verdict about the address - each reads as a muted note
+// beside an idle Verify button, never as a rejection and never as a gate.
+const ADDRESS_NOT_CHECKED_REASONS = {
+	unreachable: __("Could not reach TaxJar."),
+	unsupported_country: __("TaxJar only verifies United States addresses."),
+	no_credential: __("No TaxJar token for this company yet."),
+	out_of_scope: __("TaxJar is not enabled for this company yet."),
+	error: __("Could not check this address right now."),
+};
+
+// Named for the reader, not for the fieldname - "Missing taxjar_state_code" is
+// not a sentence anyone can act on. Keyed by _REQUIRED_ADDRESS_FIELDS.
+const ADDRESS_FIELD_LABELS = {
+	address_line1: __("Street"),
+	city: __("City"),
+	taxjar_state_code: __("State Code"),
+	pincode: __("Postal Code"),
+};
 
 const SETUP_STEPS = [
 	// Nothing is actually saved on this step (no form fields), so its button
@@ -52,6 +80,7 @@ const SETUP_STEPS = [
 	{ key: "welcome", label: __("Pre-requisites"), title: __("Integrate TaxJar with ERPNext"), nextLabel: __("Continue") },
 	{ key: "connect", label: __("Connect"), title: __("Connect your TaxJar account") },
 	{ key: "accounts", label: __("Map Ledgers"), title: __("Map your accounting ledgers") },
+	{ key: "address", label: __("Address"), title: __("Add your company address") },
 	{ key: "features", label: __("Features"), title: __("Choose features to activate") },
 	{ key: "nexus", label: __("Sync Nexus"), title: __("Sync your nexus regions") },
 	{ key: "review", label: __("Review"), title: __("Review & activate") },
@@ -182,13 +211,14 @@ class TaxJarSetup {
 		this.$root.find(".ts-next").toggleClass("ts-next-gated", blocked);
 	}
 
+	// Activation ends on its own screen rather than routing to TaxJar Settings:
+	// the form is one of several places the user might want to go next, and
+	// picking one for them lands most of them somewhere they did not ask to be.
+	// No toast either - the screen itself is the confirmation.
 	_finish() {
 		const $btn = this.$root.find(".ts-next").prop("disabled", true);
 		this._call("finish_setup", {})
-			.then(() => {
-				frappe.show_alert({ message: __("TaxJar setup complete."), indicator: "green" }, 5);
-				frappe.set_route("Form", "TaxJar Settings");
-			})
+			.then(() => this._render_done())
 			.finally(() => $btn.prop("disabled", false));
 	}
 
@@ -199,6 +229,12 @@ class TaxJarSetup {
 		// Panel shows exactly one step's content, swapped in full on navigate.
 		// Nexus renders its own title inline (beside "Synced ...") instead of
 		// using the shared heading above the body.
+		// The success screen hides the rail and the footer. Any render after it is
+		// a step again — the user left the page and came back, so on_page_show
+		// re-ran _load_state() — so put them back before drawing it. That is also
+		// why the success screen needs no flag of its own to remember it is up:
+		// the only route out of it is a reload, which lands here.
+		this.$root.find(".ts-head, .ts-foot").removeClass("hide");
 		this.$root.find(".ts-title").toggleClass("hide", step.key === "nexus").text(step.title);
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 		const nextLabel = this.cur === SETUP_STEPS.length - 1
@@ -593,9 +629,9 @@ class TaxJarSetup {
 		const $action = entry.$card.find(".ts-cred-action").empty();
 		this._set_token_error(entry, entry.lastError);
 		if (entry.tested) {
-			$action.append(this._build_status_badge(entry, {
+			$action.append(this._build_status_badge({
 				theme: "green", icon: "check", size: "lg", title: __("Verified. Click to test again."),
-			}));
+			}, () => this._test_connection(entry)));
 		} else if (entry.lastError) {
 			$action.append(frappe.ui.button({
 				icon: "refresh-cw", variant: "outline", theme: "red",
@@ -610,21 +646,25 @@ class TaxJarSetup {
 		}
 	}
 
-	// An icon-only status badge doubling as a re-test trigger - frappe.ui.badge
+	// An icon-only status badge doubling as a re-check trigger - frappe.ui.badge
 	// itself is deliberately non-interactive markup, so the click/keyboard
-	// wiring that makes it re-testable lives here instead. No visible label:
+	// wiring that makes it re-checkable lives here instead. No visible label:
 	// the title (and the aria-label badge.js derives from it on an icon-only
 	// badge) carries the meaning instead of a "Verified" word. Only the
-	// success state still uses this - a failure is an actionable Retry
-	// button instead (see _render_cred_action), not a badge.
-	_build_status_badge(entry, opts) {
+	// success state uses this - a failure is an actionable Retry button
+	// instead (see _render_cred_action), not a badge.
+	//
+	// `onactivate` rather than a hardcoded _test_connection: the Address step's
+	// own verify badge (see _render_address_action) is the same primitive
+	// pointed at a different check.
+	_build_status_badge(opts, onactivate) {
 		const $badge = frappe.ui.badge(opts);
 		$badge.attr({ role: "button", tabindex: 0 }).css("cursor", "pointer");
-		$badge.on("click", () => this._test_connection(entry));
+		$badge.on("click", () => onactivate());
 		$badge.on("keydown", (e) => {
 			if (e.key === "Enter" || e.key === " ") {
 				e.preventDefault();
-				this._test_connection(entry);
+				onactivate();
 			}
 		});
 		return $badge;
@@ -890,7 +930,523 @@ class TaxJarSetup {
 			.finally(() => $next.prop("disabled", false));
 	}
 
-	// ── Step 4: Features ────────────────────────────────────────────
+	// ── Step 4: Address ─────────────────────────────────────────────
+	// TaxJar prices a sale from the company's own address, which
+	// get_company_address_details() resolves through
+	// get_default_address("Company", company) - and that sorts on
+	// is_primary_address, the field the Address doctype labels "Preferred
+	// Billing Address". So the BILLING flag decides the tax origin, not the
+	// shipping one.
+	//
+	// This step says so rather than quietly picking on the user's behalf: the
+	// card marks the address TaxJar actually reads, the dialog offers the
+	// doctype's own two checkboxes under its own labels, and Continue is what
+	// moves the flag (save_company_address). A step that treated Preferred
+	// Shipping as the origin would disagree with what get_tax_data() reads at
+	// invoice time, which is worse than either rule on its own.
+	_render_address() {
+		const s = this.state || {};
+		const creds = s.credentials || [];
+
+		this._addressCards = [];
+		if (!creds.length) {
+			this.$body.append(frappe.ui.empty_state({
+				icon: "inbox",
+				title: __("No companies connected yet"),
+				description: __("Add a company on the Connect step first."),
+				actions: [{
+					label: __("Go to Connect"), variant: "outline",
+					onclick: () => this._go(SETUP_STEPS.findIndex((step) => step.key === "connect")),
+				}],
+			}));
+			this._set_next_gated(true, __("Add at least one company before continuing."));
+			return;
+		}
+
+		this.$body.html(`
+			<p class="ts-fieldnote">${__("Configure ship from address for accurate sales tax calculation.")}</p>
+			<div class="ts-cardgrid ts-address-cards"></div>
+		`);
+
+		const byCompany = {};
+		(s.addresses || []).forEach((a) => { byCompany[a.company] = a; });
+
+		// One card per credential, in that list's order - the same list Map
+		// Ledgers iterates, so a company that reached this step always has a
+		// card. Order never changes across re-renders: floating the incomplete
+		// ones to the top would move a card out from under the cursor at the
+		// moment the user finishes with it.
+		creds.forEach((cred) => {
+			const $card = $(`
+				<div class="ts-card">
+					<div class="ts-card-h"><b>${frappe.utils.escape_html(cred.company)}</b></div>
+					<div class="ts-card-b ts-addr-body"></div>
+				</div>
+			`).appendTo(this.$body.find(".ts-address-cards"));
+
+			const entry = {
+				company: cred.company,
+				info: byCompany[cred.company] || { company: cred.company, address: null, missing: [], linked_count: 0 },
+				$card,
+				verified: false,
+				verifyError: null,
+				verifyNote: null,
+			};
+			this._addressCards.push(entry);
+			this._render_address_card(entry);
+		});
+
+		this._sync_address_gate();
+	}
+
+	// Rebuilds one card in place. Cards re-render individually rather than
+	// re-rendering the whole step, so editing one company's address doesn't
+	// discard the Verify result the user has already spent a TaxJar call on for
+	// every other card.
+	_render_address_card(entry) {
+		const info = entry.info || {};
+		const $body = entry.$card.find(".ts-addr-body").empty();
+
+		if (!info.address) {
+			$body.append(`
+				<p class="ts-addr-none">${__("No address on file for this company.")}</p>
+				<p class="ts-fieldnote">${__("TaxJar calculates sales tax from the address your orders ship out of.")}</p>
+				<div class="ts-addr-add"></div>
+			`);
+			// Outline, not solid. It is the only action on the card, but the
+			// filled treatment is reserved for the page's own Continue - the
+			// Connect step's action gave its ink up for exactly this reason, so
+			// that one control reads as "the way forward" and nothing competes
+			// with it. Being the card's only child is what makes this one
+			// obvious; weight is not needed for that.
+			//
+			// And no Link field at all in this state: filtered to this company's
+			// addresses, on a company with none, it opens to an empty dropdown,
+			// a control that looks like a choice and offers nothing. It appears
+			// once there is something to pick.
+			$body.find(".ts-addr-add").append(frappe.ui.button({
+				label: __("Add address"), icon: "plus", variant: "outline",
+				onclick: () => this._open_address_dialog(entry, null),
+			}));
+			return;
+		}
+
+		$body.append(`
+			<div class="ts-addr-pickrow">
+				<div class="ts-field-address"></div>
+				<div class="ts-addr-new"></div>
+			</div>
+			<div class="ts-addr-preview">
+				<div class="ts-addr-top">
+					<div class="ts-addr-lines"></div>
+					<div class="ts-addr-tail">
+						<div class="ts-addr-action"></div>
+						<div class="ts-addr-edit"></div>
+					</div>
+				</div>
+				<div class="ts-addr-verifynote"></div>
+				<div class="ts-addr-flags"></div>
+				<div class="ts-addr-note"></div>
+			</div>
+		`);
+
+		const addressControl = frappe.ui.form.make_control({
+			parent: $body.find(".ts-field-address"),
+			df: {
+				fieldtype: "Link", fieldname: "address", options: "Address",
+				label: __("Company Address"), reqd: 1,
+				// address_query is frappe's own Dynamic Link-aware search; the
+				// leftover `country` filter it doesn't consume becomes a plain
+				// field filter on Address. Same reasoning as the Company link on
+				// Connect: the wizard should not offer a choice it will refuse.
+				get_query: () => ({
+					query: "frappe.contacts.doctype.address.address.address_query",
+					filters: {
+						link_doctype: "Company",
+						link_name: entry.company,
+						country: "United States",
+					},
+				}),
+			},
+			render_input: true,
+		});
+		// set_value() below fires df.onchange itself as part of setting the
+		// value, not just on real user input - the same trap the Connect step's
+		// company control documents. Without this guard, restoring the current
+		// address would immediately look like the user had picked a new one and
+		// fire a reload on every render.
+		let restoringInitialAddress = true;
+		addressControl.df.onchange = () => {
+			if (restoringInitialAddress) {
+				restoringInitialAddress = false;
+				return;
+			}
+			const picked = addressControl.get_value();
+			if (!picked || picked === entry.info.address) return;
+			// Previewed, not pinned - Continue is what writes the Preferred
+			// Billing flag (save_company_address), the same way every other
+			// step in this wizard defers its write to the same button.
+			this._reload_address_card(entry, picked);
+		};
+		addressControl.set_value(info.address);
+		// ControlLink leaves its <input> without autocomplete="off"; same
+		// browser-autofill nuisance the Connect step's company field disables.
+		addressControl.$input.attr("autocomplete", "off");
+
+		$body.find(".ts-addr-new").append(frappe.ui.button({
+			label: __("New address"), icon: "plus", variant: "outline", size: "sm",
+			onclick: () => this._open_address_dialog(entry, null),
+		}));
+
+		const cityLine = [
+			info.city,
+			[info.taxjar_state_code, info.pincode].filter(Boolean).join(" "),
+		].filter(Boolean).join(", ");
+		const $lines = $body.find(".ts-addr-lines");
+		[info.address_line1, info.address_line2, cityLine, info.country]
+			.filter(Boolean)
+			.forEach((line) => $lines.append($("<div></div>").text(line)));
+
+		$body.find(".ts-addr-edit").append(frappe.ui.button({
+			icon: "pencil", variant: "ghost", size: "sm",
+			tooltip: __("Edit"),
+			onclick: () => this._open_address_dialog(entry, info),
+		}));
+
+		this._render_address_flags(entry);
+		this._render_address_note(entry);
+		this._render_address_verify_note(entry);
+		this._render_address_action(entry);
+
+		// Verified on sight, not on click. Same as the Connect step re-testing
+		// every saved token when it opens and the Nexus step re-fetching on
+		// open: the answer is wanted the moment the step is looked at, and a
+		// [ Verify ] button the user has to find first just delays the only
+		// outcome they were ever going to ask for.
+		//
+		// Re-runs on every visit rather than remembering a verdict, and for the
+		// same reason Connect re-tests rather than trusting a stale "tested"
+		// flag: the address may have been edited on the Address form since, so
+		// a remembered answer would be about a document that no longer exists
+		// in that shape. The idle button stays as the way to ask again.
+		if (this._address_is_verifiable(entry)) this._verify_address(entry);
+	}
+
+	// Nothing to verify without a complete address - TaxJar would be answering
+	// about a street with no state or postal code.
+	_address_is_verifiable(entry) {
+		const info = entry.info || {};
+		return !!info.address && !(info.missing || []).length;
+	}
+
+	// A restatement of the address's own two flags, not a second place to edit
+	// them - the checkboxes live in the dialog, which is where they are written.
+	// The Preferred Billing pill is the whole story: the dialog's own checkbox
+	// already says that flag is what TaxJar calculates tax from, so repeating it
+	// here as a caption said the same thing twice on one card.
+	_render_address_flags(entry) {
+		const info = entry.info || {};
+		const $flags = entry.$card.find(".ts-addr-flags").empty();
+
+		if (info.is_primary_address) $flags.append($(`<span class="ts-pill"></span>`).text(__("Billing")));
+		if (info.is_shipping_address) $flags.append($(`<span class="ts-pill"></span>`).text(__("Shipping")));
+	}
+
+	// Several linked addresses and none of them pinned: `is_primary_address DESC`
+	// is then sorting a column that is 0 for every candidate, so `limit 1`
+	// returns whichever row the database hands back.
+	//
+	// Asks about the COMPANY, not about the address on screen. Reading
+	// info.is_primary_address here answered "is the one I am looking at pinned",
+	// which is false any time the user selects a company's other address - an
+	// ordinary thing to do, and Continue pins it anyway - and then reported that
+	// as "none marked Preferred Billing" to someone whose company was pinned
+	// perfectly well.
+	//
+	// Deliberately not raised for a single address either: there is nothing
+	// ambiguous about one candidate, and warning about it would be noise on the
+	// most common setup there is.
+	_address_is_ambiguous(info) {
+		return info.linked_count > 1 && !info.company_has_preferred_billing;
+	}
+
+	// The state of the address itself, and only where something is actually
+	// wrong with it: a missing field, or an origin nothing has pinned. A
+	// correct, pinned address gets no note at all - saying so would be
+	// narrating the happy path. Kept in its own slot from the verification note
+	// above it, so a Verify failure never hides a missing ZIP.
+	_render_address_note(entry) {
+		const info = entry.info || {};
+		const $note = entry.$card.find(".ts-addr-note").empty();
+
+		if ((info.missing || []).length) {
+			$note.append($(`<span class="ts-addr-warn"></span>`).text(this._missing_address_text(info.missing)));
+			return;
+		}
+		if (this._address_is_ambiguous(info)) {
+			$note.append($(`<span class="ts-addr-warn"></span>`).text(__(
+				"{0} addresses, none marked Preferred Billing — TaxJar may not use this one. Continue marks it Preferred Billing.",
+				[info.linked_count]
+			)));
+		}
+	}
+
+	_missing_address_text(missing) {
+		const labels = missing.map((f) => ADDRESS_FIELD_LABELS[f] || f);
+		// Two whole sentences rather than one with the pronoun swapped in: the
+		// languages frappe ships translations for don't all agree a pronoun with
+		// a list the same way, and a translator handed "it"/"them" alone has no
+		// sentence to agree it with. Same reasoning as the log-retention copy on
+		// the Connect step.
+		return labels.length === 1
+			? __("Missing {0} — TaxJar needs it to price this address.", [labels[0]])
+			: __("Missing {0} — TaxJar needs them to price this address.", [frappe.utils.comma_and(labels)]);
+	}
+
+	_render_address_verify_note(entry) {
+		const $note = entry.$card.find(".ts-addr-verifynote").empty();
+		if (entry.verifyError) {
+			$note.append($(`<span class="ts-addr-warn"></span>`).text(entry.verifyError));
+		} else if (entry.verifyNote) {
+			$note.append($(`<span class="ts-addr-muted"></span>`).text(entry.verifyNote));
+		}
+	}
+
+	// Same three-state action slot the Connect step uses (idle button ->
+	// spinner -> green badge or red Retry), pointed at the address check.
+	_render_address_action(entry) {
+		const $action = entry.$card.find(".ts-addr-action").empty();
+		if (!this._address_is_verifiable(entry)) return;
+
+		if (entry.verified) {
+			$action.append(this._build_status_badge({
+				theme: "green", icon: "check", size: "lg", title: __("Found by TaxJar. Click to check again."),
+			}, () => this._verify_address(entry)));
+		} else if (entry.verifyError) {
+			$action.append(frappe.ui.button({
+				icon: "refresh-cw", variant: "outline", theme: "red",
+				tooltip: __("Retry"),
+				onclick: () => this._verify_address(entry),
+			}));
+		} else {
+			$action.append(frappe.ui.button({
+				label: __("Verify"), variant: "outline", size: "sm",
+				onclick: () => this._verify_address(entry),
+			}));
+		}
+	}
+
+	// Advisory, never a gate. verify_address_with_taxjar()'s own docstring is
+	// explicit that TaxJar fails to match addresses a user may have entered
+	// correctly - which is why that call was pulled out of Address.validate in
+	// the first place. Gating Continue on it here would reintroduce the same bug
+	// one step earlier, so only completeness gates (see _sync_address_gate).
+	_verify_address(entry) {
+		entry.$card.find(".ts-addr-action").empty().append(
+			$(`<span class="es-spinner" role="status"></span>`).attr("aria-label", __("Verifying…"))
+		);
+
+		this._call("verify_company_address", { company: entry.company, address: entry.info.address })
+			.then((res) => {
+				res = res || {};
+				if (!res.checked) {
+					// The call did not happen, so this is not a verdict about
+					// the address: idle button plus a muted reason, not a red
+					// badge.
+					entry.verified = false;
+					entry.verifyError = null;
+					entry.verifyNote = ADDRESS_NOT_CHECKED_REASONS[res.reason] || ADDRESS_NOT_CHECKED_REASONS.error;
+				} else {
+					entry.verified = !!res.valid;
+					entry.verifyError = res.valid ? null : __("Address is invalid as per TaxJar.");
+					entry.verifyNote = null;
+				}
+				this._render_address_verify_note(entry);
+				this._render_address_action(entry);
+			})
+			.catch(() => {
+				entry.verified = false;
+				entry.verifyError = null;
+				entry.verifyNote = ADDRESS_NOT_CHECKED_REASONS.error;
+				this._render_address_verify_note(entry);
+				this._render_address_action(entry);
+			});
+	}
+
+	_reload_address_card(entry, address) {
+		return this._call("get_company_address_state", { company: entry.company, address: address || undefined })
+			.then((info) => {
+				entry.info = info;
+				// The address under the badge is not the one TaxJar was asked
+				// about any more, so the previous verdict no longer applies.
+				entry.verified = false;
+				entry.verifyError = null;
+				entry.verifyNote = null;
+				this._render_address_card(entry);
+				this._sync_address_gate();
+			});
+	}
+
+	_open_address_dialog(entry, existing) {
+		const isNew = !existing;
+		const company = entry.company;
+
+		const d = new frappe.ui.Dialog({
+			title: isNew ? __("New address · {0}", [company]) : __("Edit address · {0}", [company]),
+			fields: [
+				{ fieldtype: "Data", fieldname: "address_title", label: __("Address Title"), reqd: 1 },
+				{ fieldtype: "Data", fieldname: "address_line1", label: __("Address Line 1"), reqd: 1 },
+				{ fieldtype: "Data", fieldname: "address_line2", label: __("Address Line 2") },
+				{ fieldtype: "Section Break" },
+				{ fieldtype: "Data", fieldname: "city", label: __("City"), reqd: 1 },
+				{ fieldtype: "Column Break" },
+				// The taxjar_state_code Select's own options, from the same
+				// state map public/js/address.js uses - the server fills `state`
+				// in from the code on save, so the pair cannot disagree.
+				{
+					fieldtype: "Select", fieldname: "taxjar_state_code",
+					label: __("State Code"), options: this._state_code_options(), reqd: 1,
+				},
+				{ fieldtype: "Section Break" },
+				{ fieldtype: "Data", fieldname: "pincode", label: __("Postal Code"), reqd: 1 },
+				{ fieldtype: "Column Break" },
+				// Read-only, not a Link: every company on this step is a US
+				// company (company_scope refuses any other, and Connect's link
+				// filter never offers one), so this is the only value that can
+				// be correct. Shown so the address doesn't read as
+				// country-less, not offered as a choice.
+				{
+					fieldtype: "Data", fieldname: "country", label: __("Country"),
+					default: "United States", read_only: 1,
+				},
+				{ fieldtype: "Section Break" },
+				// The Address doctype's own two flags, under its own labels
+				// verbatim and with no gloss of the wizard's own. The same
+				// checkboxes appear on the Address form the user will edit
+				// later, so anything renamed or annotated here would only be
+				// something to un-learn there. Preferred Billing is what
+				// get_default_address() sorts on and therefore what decides the
+				// tax origin (see the section comment above); that rule lives
+				// in this file and in the design doc, not in a caption on the
+				// form.
+				{
+					fieldtype: "Check", fieldname: "is_primary_address",
+					label: __("Preferred Billing Address"),
+				},
+				{
+					fieldtype: "Check", fieldname: "is_shipping_address",
+					label: __("Preferred Shipping Address"),
+				},
+			],
+			primary_action_label: __("Save address"),
+			primary_action: (values) => {
+				d.disable_primary_action();
+				const payload = {
+					address_title: values.address_title,
+					address_line1: values.address_line1,
+					address_line2: values.address_line2,
+					city: values.city,
+					taxjar_state_code: values.taxjar_state_code,
+					pincode: values.pincode,
+					is_primary_address: values.is_primary_address ? 1 : 0,
+					is_shipping_address: values.is_shipping_address ? 1 : 0,
+				};
+
+				const saved = isNew
+					? this._call("create_company_address", { company, values: payload })
+					: this._call("update_company_address", { company, address: existing.address, values: payload });
+
+				saved
+					.then((res) => {
+						d.hide();
+						return this._reload_address_card(entry, res.address);
+					})
+					.catch(() => d.enable_primary_action());
+			},
+		});
+
+		d.set_values(isNew
+			? {
+				address_title: company,
+				country: "United States",
+				// A new address is both, by default. It is the one the user
+				// just went out of their way to enter, so having TaxJar
+				// actually use it is the outcome they were after - and it
+				// keeps a company from ending up with several addresses and
+				// nothing pinned, which is the one state the origin is
+				// arbitrary in (see _address_is_ambiguous). Untick either to
+				// add an address without moving anything.
+				is_primary_address: 1,
+				is_shipping_address: 1,
+			}
+			: {
+				address_title: existing.address_title,
+				address_line1: existing.address_line1,
+				address_line2: existing.address_line2,
+				city: existing.city,
+				taxjar_state_code: existing.taxjar_state_code,
+				pincode: existing.pincode,
+				country: "United States",
+				is_primary_address: existing.is_primary_address ? 1 : 0,
+				is_shipping_address: existing.is_shipping_address ? 1 : 0,
+			});
+		d.show();
+	}
+
+	_state_code_options() {
+		// Read lazily rather than at module scope: US_STATE_NAMES comes from the
+		// app bundle, and a page script that throws while loading takes the
+		// whole page with it (the same reason TAXJAR_NEXUS_URL is a literal up
+		// top rather than read from there).
+		const names = (window.taxjar_integration && taxjar_integration.US_STATE_NAMES) || {};
+		return [{ label: "", value: "" }].concat(
+			Object.keys(names).sort().map((code) => ({ label: `${code} — ${names[code]}`, value: code }))
+		);
+	}
+
+	// Only two things gate: no address at all, and an incomplete one. Not a
+	// failed TaxJar verification (see _verify_address), and not an ambiguous
+	// origin - that one is resolved by the very button it would be blocking.
+	// One company named at a time, first in card order, with the verb that
+	// matches its state; the message re-points itself as each is fixed.
+	_sync_address_gate() {
+		const cards = this._addressCards || [];
+
+		const noAddress = cards.find((c) => !c.info || !c.info.address);
+		if (noAddress) {
+			this._set_next_gated(true, __("Add an address for {0} before continuing.", [noAddress.company]));
+			return;
+		}
+
+		const incomplete = cards.find((c) => (c.info.missing || []).length);
+		this._set_next_gated(
+			!!incomplete,
+			incomplete ? __("Complete the address for {0} before continuing.", [incomplete.company]) : ""
+		);
+	}
+
+	// Sends every card's current address, not just the changed ones -
+	// _set_preferred_billing() skips any row whose flag already matches, so a
+	// re-send is a no-op rather than a pointless save.
+	_save_address() {
+		const rows = (this._addressCards || [])
+			.filter((c) => c.info && c.info.address)
+			.map((c) => ({ company: c.company, address: c.info.address }));
+
+		if (!rows.length) {
+			frappe.show_alert({ message: __("Add an address for every company."), indicator: "orange" });
+			return false;
+		}
+
+		const $next = this.$root.find(".ts-next").prop("disabled", true);
+		return this._call("save_company_address", { rows })
+			.then(() => this._reload_state())
+			.then(() => true)
+			.catch(() => false)
+			.finally(() => $next.prop("disabled", false));
+	}
+
+	// ── Step 5: Features ────────────────────────────────────────────
 	// No master switch here — taxjar_enabled is managed on the TaxJar Settings
 	// doctype directly, not by this wizard. This step only ever touches the
 	// per-company Calculate/File flags.
@@ -965,7 +1521,7 @@ class TaxJarSetup {
 			.finally(() => $next.prop("disabled", false));
 	}
 
-	// ── Step 5: Sync Nexus ───────────────────────────────────────────────
+	// ── Step 6: Sync Nexus ───────────────────────────────────────────────
 	_render_nexus() {
 		const s = this.state || {};
 		const nexusByCompany = s.nexus_by_company || {};
@@ -983,7 +1539,7 @@ class TaxJarSetup {
 
 		this.$body.find(".ts-nexusnote-mount").append(frappe.ui.alert({
 			theme: "blue",
-			title: __("Nexus regions are fetched daily at midnight from TaxJar"),
+			title: __("State nexus is auto-fetched & updated daily at midnight"),
 			footer: () => frappe.ui.button({
 				label: __("Manage TaxJar Nexus"), variant: "outline", size: "xs", icon_right: "external-link",
 				onclick: () => window.open(TAXJAR_NEXUS_URL, "_blank", "noopener,noreferrer"),
@@ -995,60 +1551,159 @@ class TaxJarSetup {
 			title: __("Fetch from TaxJar"),
 			onclick: () => this._fetch_nexus(),
 		}));
-		this.$body.find(".ts-fetchstatus").append(frappe.ui.badge({ label: __("Not fetched yet") }));
-
-		this._render_nexus_groups(nexusByCompany);
 		this._render_last_sync(s.nexus_last_synced);
 
+		// Fetching with no company configured is a server-side throw ("add at
+		// least one company's accounts first"), which would land as an error
+		// dialog on merely opening this step. Say it here, where the way back
+		// to fixing it is a click.
+		if (!(s.companies || []).length) {
+			// Nothing to fetch, so nothing to fetch it with, and nothing for the
+			// banner's daily-sync promise to be about.
+			this.$body.find(".ts-fetchstatus, .ts-fetch-mount").empty();
+			this._toggle_nexus_note(false);
+			this.$body.find(".ts-nexusresult").append(frappe.ui.empty_state({
+				icon: "settings",
+				css_class: "ts-nexusempty",
+				title: __("No company accounts yet"),
+				description: __("Nexus is fetched per company. Map a company's ledgers first."),
+				actions: [{
+					label: __("Go to Map Ledgers"), variant: "outline",
+					onclick: () => this._go(SETUP_STEPS.findIndex((step) => step.key === "accounts")),
+				}],
+			}));
+			return;
+		}
+
+		// Whatever is cached renders at once, but an empty cache is not yet an
+		// answer — only the fetch below can tell "nothing fetched yet" apart
+		// from "TaxJar has no nexus", and those two need very different screens.
+		this._nexus_answered = false;
+		this._render_nexus_groups(nexusByCompany);
+
 		// Opening this step always pulls the latest — no need to remember to
-		// click Fetch just to see current nexus. The status badge above is
-		// overwritten immediately by _fetch_nexus()'s own in-progress state.
+		// click Fetch just to see current nexus.
 		this._fetch_nexus();
 	}
 
+	// Driven by the configured companies rather than by the keys of
+	// nexus_by_company, which only carries a company once TaxJar has returned at
+	// least one region for it — a company with none would otherwise just be
+	// missing from this step with nothing said about it.
 	_render_nexus_groups(nexusByCompany) {
-		const $result = this.$body.find(".ts-nexusresult");
-		const companies = Object.keys(nexusByCompany).filter((c) => nexusByCompany[c].length);
-		if (!companies.length) { $result.empty(); return; }
+		const $result = this.$body.find(".ts-nexusresult").empty();
+		const companies = ((this.state || {}).companies || []).map((c) => c.company).filter(Boolean);
+		const total = companies.reduce((n, c) => n + (nexusByCompany[c] || []).length, 0);
+
+		// The banner explains a list that is there. With no list it is one more
+		// thing to read past on the way to the only message that matters, and
+		// its own "Manage TaxJar Nexus" link duplicates that message's button.
+		this._toggle_nexus_note(!!total);
+
+		if (!total) {
+			// Before the first fetch answers there is nothing to say: an empty
+			// state here would read as "TaxJar has no nexus" while the request
+			// that decides that is still in flight.
+			if (this._nexus_answered) $result.append(this._nexus_empty_state());
+			return;
+		}
 
 		$result.html(companies.map((company) => {
-			const regions = nexusByCompany[company];
-			const pills = regions.map((r) => `
-				<span class="ts-pill">${frappe.utils.escape_html(r.region || r.region_code)}
-					<span class="ts-pillcode">${frappe.utils.escape_html(r.region_code)}</span></span>
-			`).join("");
+			const regions = nexusByCompany[company] || [];
+			const body = regions.length
+				? `<div class="ts-pills">${regions.map((r) => `
+					<span class="ts-pill">${frappe.utils.escape_html(r.region || r.region_code)}
+						<span class="ts-pillcode">${frappe.utils.escape_html(r.region_code)}</span></span>
+				`).join("")}</div>`
+				: `<div class="ts-nonexus">${__("No nexus registered in TaxJar for this company.")}
+					<a href="${TAXJAR_NEXUS_URL}" target="_blank" rel="noopener noreferrer">${__("Add it in TaxJar")}</a>
+				</div>`;
 			return `
 				<div class="ts-card">
 					<div class="ts-card-h"><b>${frappe.utils.escape_html(company)}</b></div>
-					<div class="ts-card-b"><div class="ts-pills">${pills}</div></div>
+					<div class="ts-card-b">${body}</div>
 				</div>
 			`;
 		}).join(""));
 	}
 
-	// Blank until a sync has actually happened - "Synced never" is noise on
-	// a first run, and the status badge beside it already says "Not fetched yet".
+	_toggle_nexus_note(show) {
+		this.$body.find(".ts-nexusnote-mount").toggleClass("hide", !show);
+	}
+
+	// Not an error and not a failed fetch: TaxJar answered, and the answer was
+	// that this account has no nexus registered at all. Nothing in this wizard
+	// can fix that — nexus is declared in TaxJar — so the whole screen is the
+	// trip out to TaxJar and back.
+	//
+	// One action only: the retry is the refresh button already sitting beside
+	// the title, and a second one here would be two controls for one job with
+	// no way to tell which to press.
+	_nexus_empty_state() {
+		return frappe.ui.empty_state({
+			icon: "map-pin",
+			css_class: "ts-nexusempty",
+			title: __("No nexus regions in your TaxJar account"),
+			description: __("Please add state nexus in your TaxJar account and retry syncing."),
+			// Outline, not solid: the filled treatment belongs to the page's
+			// own Continue CTA.
+			actions: [{
+				label: __("Configure Nexus in TaxJar"), variant: "outline",
+				icon: "external-link", href: TAXJAR_NEXUS_URL,
+			}],
+		});
+	}
+
+	// The one line that carries sync state, in the one place the user is already
+	// reading it: "Syncing with TaxJar" becomes "Synced just now" in place. A
+	// separate in-progress pill beside it said the same thing twice, in two
+	// shapes, with the settled answer arriving in neither of them.
+	//
+	// Blank until a sync has actually happened - "Synced never" is noise on a
+	// first run, and the step fetches on open anyway, so the blank lasts as long
+	// as it takes _fetch_nexus() to write "Syncing with TaxJar" over it.
 	_render_last_sync(when) {
 		this.$body.find(".ts-lastsync").html(
 			when ? __("Synced {0}", [frappe.datetime.comment_when(when)]) : ""
 		);
 	}
 
+	_render_syncing() {
+		this.$body.find(".ts-lastsync").text(__("Syncing with TaxJar"));
+	}
+
 	_fetch_nexus() {
+		// Every fetch clears and re-inserts the same nexus rows server-side, so
+		// two of them in flight at once are two writers on the same table. The
+		// server serialises them as well, but a second request that only ever
+		// waits for the first one's answer is not worth sending.
+		if (this._nexus_fetching) return;
+		this._nexus_fetching = true;
+
 		const $status = this.$body.find(".ts-fetchstatus").empty();
 		const $btn = this.$body.find(".ts-fetch-mount .es-button").attr("aria-busy", "true");
+		this._render_syncing();
 
 		this._call("fetch_nexus", {}).then((res) => {
+			this._nexus_answered = true;
 			this.state.nexus_by_company = res.nexus_by_company;
 			this._render_nexus_groups(res.nexus_by_company);
 			this.state.nexus_last_synced = res.nexus_last_synced;
 			this._render_last_sync(res.nexus_last_synced);
 		}).catch(() => {
+			// A failed fetch says nothing about whether nexus exists, so the
+			// "no nexus in TaxJar" screen must not stand in for this. Put the
+			// last-sync line back to whatever it said before this attempt -
+			// leaving "Syncing with TaxJar" up would claim one is still running.
+			this._render_last_sync(this.state.nexus_last_synced);
 			$status.append(frappe.ui.badge({ label: __("Could not fetch nexus."), theme: "red" }));
-		}).finally(() => $btn.removeAttr("aria-busy"));
+		}).finally(() => {
+			this._nexus_fetching = false;
+			$btn.removeAttr("aria-busy");
+		});
 	}
 
-	// ── Step 6: Review ──────────────────────────────────────────────
+	// ── Step 7: Review ──────────────────────────────────────────────
 	_render_review() {
 		const s = this.state || {};
 		const companies = s.companies || [];
@@ -1061,13 +1716,18 @@ class TaxJarSetup {
 		// never lines up cleanly in a two-column row. Tax Ledger / Shipping
 		// Ledger get their own line each too, rather than being crammed
 		// together on one line with no indication of which was which.
+		// The address sits on the same row as a yes/no rather than in a card of
+		// its own: Review is a checklist of what setup has settled, and the
+		// street itself was already shown (and verified) on the Address step.
+		const addressed = new Set((s.addresses || []).filter((a) => a.address).map((a) => a.company));
 		const accountRows = companies.map((c) => `
 			<div class="ts-accrow">
 				<div class="ts-acc-company">${frappe.utils.escape_html(c.company)}</div>
 				<div class="ts-acc-detail">${__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head || "—")}</div>
 				<div class="ts-acc-detail">${__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
+				<div class="ts-acc-detail">${__("Address")}: ${addressed.has(c.company) ? __("Configured") : __("Not configured")}</div>
 			</div>
-		`).join("") || `<div class="text-muted small">${__("No accounts configured yet.")}</div>`;
+		`).join("") || `<div class="text-muted small">${__("No ledgers configured yet.")}</div>`;
 
 		const featureRows = companies.map((c) => `
 			<div class="ts-kv ts-kv-company"><span>${frappe.utils.escape_html(c.company)}</span>
@@ -1096,10 +1756,85 @@ class TaxJarSetup {
 						<div class="ts-kv"><span>${__("Regions")}</span><span class="ts-kv-plain">${__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])}</span></div>
 						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span></div>
 					</div></div>
-				<div class="ts-card"><div class="ts-card-h"><b>${__("Accounts")}</b></div>
+				<div class="ts-card"><div class="ts-card-h"><b>${__("Ledgers & Address")}</b></div>
 					<div class="ts-card-b" style="gap:0">${accountRows}</div></div>
 				<div class="ts-card"><div class="ts-card-h"><b>${__("Features")}</b></div>
 					<div class="ts-card-b" style="gap:0">${featureRows}</div></div>
+			</div>
+		`);
+	}
+
+	// ── Activated ───────────────────────────────────────────────────
+	// Deliberately buttonless. Setup is over, so every button here would be a
+	// guess at what the user came to do next; the desk's own navigation already
+	// answers that better than a "Go to Settings" would. The one control on the
+	// screen is the video, and it plays in place - a link out to YouTube would
+	// throw away the page they just finished.
+	_render_done() {
+		this.$root.find(".ts-head, .ts-title, .ts-foot").addClass("hide");
+
+		// frappe.utils.icon, not a hand-drawn mark - the tick is a stock lucide
+		// outline from the desk's own sprite, sized up and tinted green. Colour
+		// rides --icon-stroke (the variable .icon already reads) rather than a
+		// stroke attribute, because .icon's own `stroke:` rule would win over a
+		// presentation attribute. Green is espresso's --ink-green-* foreground
+		// role, which inverts with the theme; see .ts-done-seal.
+		const seal = frappe.utils.icon("circle-check", { width: "44px", height: "44px" }, "", "", "ts-done-seal");
+
+		// The video's own thumbnail, with the play mark over it - a bare YouTube
+		// glyph on an empty box says "a video exists", not "this video". Still a
+		// facade, not an embed: one image from i.ytimg.com, and nothing from
+		// youtube.com loads for someone who never presses play.
+		//
+		// maxresdefault only exists for videos uploaded above 720p, so it 404s on
+		// plenty of them; hqdefault is generated for every video and is the
+		// fallback. It is 4:3 with letterbox bars baked in, which object-fit:
+		// cover crops back off against the 16:9 frame.
+		const poster = `https://i.ytimg.com/vi/${encodeURIComponent(SETUP_VIDEO_ID)}`;
+		const player = SETUP_VIDEO_ID ? `
+			<div class="ts-done-media">
+				<button type="button" class="ts-done-play" aria-label="${__("Play the TaxJar walkthrough")}">
+					<img class="ts-done-thumb" src="${poster}/maxresdefault.jpg" alt="">
+					<svg class="ts-yt" viewBox="0 0 68 48" aria-hidden="true" focusable="false">
+						<path class="ts-yt-body" d="M66.52 7.74a8.55 8.55 0 0 0-6.02-6.05C55.18 0 34 0 34 0S12.82 0 7.5 1.69A8.55 8.55 0 0 0 1.48 7.74C0 13.09 0 24 0 24s0 10.91 1.48 16.26a8.55 8.55 0 0 0 6.02 6.05C12.82 48 34 48 34 48s21.18 0 26.5-1.69a8.55 8.55 0 0 0 6.02-6.05C68 34.91 68 24 68 24s0-10.91-1.48-16.26z"/>
+						<path class="ts-yt-arrow" d="M27.2 34.29 45.09 24 27.2 13.71z"/>
+					</svg>
+				</button>
+				<p class="ts-done-caption">${__("Walkthrough of auto-sales tax computation & transaction syncing with TaxJar in action")}</p>
+			</div>
+		` : "";
+
+		this.$body.html(`
+			<div class="ts-done">
+				${seal}
+				<h2 class="ts-done-title">${__("TaxJar is configured successfully")}</h2>
+				${player}
+			</div>
+		`);
+		this.$body.find(".ts-done-play").on("click", () => this._play_setup_video());
+		// Bound here rather than an inline onerror="" attribute, like every other
+		// handler on this page. Safe to bind after inserting the <img>: the
+		// browser cannot fire error before this synchronous block returns.
+		this.$body.find(".ts-done-thumb").one("error", function () {
+			this.src = `${poster}/hqdefault.jpg`;
+		});
+	}
+
+	// The facade becomes the player in place. The row goes single-column at the
+	// same time: a 16:9 frame wide enough to watch leaves no room for a caption
+	// beside it, and the caption has done its job once the video is running.
+	_play_setup_video() {
+		const $media = this.$body.find(".ts-done-media").addClass("is-playing");
+		const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(SETUP_VIDEO_ID)}?autoplay=1&rel=0`;
+		$media.find(".ts-done-play").replaceWith(`
+			<div class="ts-done-frame">
+				<iframe
+					src="${src}"
+					title="${__("TaxJar walkthrough")}"
+					allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+					referrerpolicy="strict-origin-when-cross-origin"
+					allowfullscreen
+				></iframe>
 			</div>
 		`);
 	}
