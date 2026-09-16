@@ -6022,6 +6022,19 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		with open(path) as f:
 			return f.read()
 
+	def _utils_js(self):
+		"""The shared bundle, where the region hover card this page opens lives."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"
+		))
+		with open(path) as f:
+			return f.read()
+
+	def _region_card_fn(self):
+		utils = self._utils_js()
+		return utils.split("taxjar_integration.region_hover_card = function (sections) {")[1].split("\n};\n")[0]
+
 	def test_customer_id_column_present(self):
 		"""taxjar_customer_id was already fetched by get_customers and simply
 		never rendered."""
@@ -6186,6 +6199,16 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		# Codes are stored; the card reads names.
 		self.assertIn("taxjar_integration.region_full_name(country, state)", card_fn)
 
+	def test_the_region_card_is_the_shared_one(self):
+		"""The guided setup's Nexus card opens the same card from its own region
+		count. This page keeps only what is its own - two known countries, their
+		codes resolved to names - and hands the sections to the shared builder."""
+		js = self._js()
+		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
+		self.assertIn("taxjar_integration.region_hover_card([", card_fn)
+		# The card's own markup moved with it.
+		self.assertNotIn("taxjar-regions-card-heading", js)
+
 	def test_a_fully_exempt_country_says_so_instead_of_listing_everything(self):
 		"""Fifty-one names is a wall of text that has to be read to work out it
 		is all of them."""
@@ -6198,21 +6221,24 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		self.assertIn("taxjar_integration.US_STATE_CODES", card_fn)
 		self.assertIn("taxjar_integration.CA_PROVINCE_CODES", card_fn)
 		self.assertIn("states.length >= codes.length", card_fn)
+		# The shared builder prints that sentence in place of the names.
+		self.assertIn("if (all_label) {", self._region_card_fn())
 
 	def test_long_region_lists_are_summarised_after_five(self):
 		"""A 40-name wall gets skimmed for length rather than read, and the
 		count beside it already gives the length."""
-		js = self._js()
-		self.assertIn("const REGION_PREVIEW_LIMIT = 5;", js)
+		self.assertIn(
+			"taxjar_integration.REGION_PREVIEW_LIMIT = 5;", self._utils_js()
+		)
 
-		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
-		self.assertIn("names.length > REGION_PREVIEW_LIMIT", card_fn)
-		self.assertIn("names.slice(0, REGION_PREVIEW_LIMIT)", card_fn)
+		card_fn = self._region_card_fn()
+		self.assertIn("sorted.length > limit", card_fn)
+		self.assertIn("sorted.slice(0, limit)", card_fn)
 		self.assertIn('__("{0}, and {1} more."', card_fn)
 		# The all-exempt wording still wins over the cap.
 		self.assertLess(
-			card_fn.index("states.length >= codes.length"),
-			card_fn.index("names.length > REGION_PREVIEW_LIMIT"),
+			card_fn.index("if (all_label) {"),
+			card_fn.index("sorted.length > limit"),
 		)
 
 	def test_hover_cards_are_rebound_on_every_render(self):
@@ -13338,44 +13364,51 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		for gone in ("ts-cfg-sum", "ts-cfg-edit", "ts-acc-chevron", "_cardOpen"):
 			self.assertNotIn(gone, review)
 
-	def test_nexus_shows_one_tag_and_hides_the_rest_behind_a_hover(self):
+	def test_nexus_shows_a_count_and_names_the_regions_on_hover(self):
 		"""A company with economic nexus everywhere returns up to 46 regions, and
-		three of those would make this card longer than the rest of the page."""
+		three of those would make this card longer than the rest of the page.
+
+		The row used to print the first region and a "+4 regions" remainder. One
+		state out of five answers no question a reader has, so the row is the
+		count alone and the hover card carries every name."""
 		body = self._fn("_card_body_nexus(s) {")
-		self.assertIn("const first = regions[0];", body)
-		self.assertIn("const hidden = regions.length - 1;", body)
-		# The name, not the code, and no pill around it. "Florida" is what
-		# somebody checking their registrations reads; FL is what the API
-		# returns, and it stays in the hover list beside each name.
-		self.assertIn("first.region || first.region_code", body)
-		self.assertNotIn("ts-tag", body)
+		self.assertIn("const count = regions.length;", body)
+		self.assertIn('count === 1 ? __("1 region") : __("{0} regions", [count])', body)
 		self.assertIn('data-hover="regions"', body)
-		self.assertIn('__("+{0} {1}", [hidden, hidden === 1 ? __("region") : __("regions")])', body)
+		# The leading name and its remainder, both gone.
+		self.assertNotIn("const first = regions[0];", body)
+		self.assertNotIn("regions.length - 1", body)
+		self.assertNotIn("ts-tag", body)
 
 	def test_hover_targets_are_reachable_without_a_pointer(self):
 		"""frappe.ui.hover_card opens on keyboard focus as well as hover, and
-		tabindex is what puts these two spans in the tab order at all. A CSS-only
+		tabindex is what puts the region span in the tab order at all. A CSS-only
 		tooltip would show nothing on touch and nothing to a keyboard."""
 		js = self._js()
 		self.assertIn("frappe.ui.hover_card(", js)
-		for body in ("_card_body_connect(s) {", "_card_body_nexus(s) {"):
-			self.assertIn('tabindex="0"', self._fn(body))
+		self.assertIn('tabindex="0"', self._fn("_card_body_nexus(s) {"))
 
-	def test_company_names_run_on_one_line(self):
-		"""Two or three names fit a line. Stacking them made the card taller than
-		the row it came from, for nothing."""
-		fn = self._fn("_bind_hover_cards(s) {")
-		self.assertIn('.filter(Boolean).join(", ")', fn)
-		self.assertIn("content: () => companies", fn)
+	def test_the_nexus_hover_reuses_the_shared_region_card(self):
+		"""The Customer Configuration page already opens a region card from a
+		region count. Two copies of "heading, names, cap the list" would drift,
+		so both pages call taxjar_integration.region_hover_card."""
+		bind = self._fn("_bind_hover_cards(s) {")
+		self.assertIn(
+			"taxjar_integration.region_hover_card(this._nexus_sections(regions))", bind
+		)
+		# The page's own one-line-each list went with it.
+		self.assertNotIn("_hover_list", self._js())
 
-	def test_regions_stay_one_per_line(self):
-		"""A company can hold up to 46, and a comma-run of "FL - Florida" that
-		long is unreadable. Built as an element rather than a string, since
-		hover_card renders a string as one run of text - and every line goes in
-		through .text(), so a region name cannot carry markup into the card."""
-		fn = self._fn("_hover_list(lines) {")
-		self.assertIn('$("<div></div>").text(line)', fn)
-		self.assertIn("this._hover_list(regions.map(", self._fn("_bind_hover_cards(s) {"))
+	def test_nexus_regions_are_grouped_by_the_country_taxjar_named(self):
+		"""TaxJar returns the country with every nexus row, and it is not always
+		the US - a card built from the two known code lists would drop a region
+		silently. The heading is the country name that arrived with the row."""
+		fn = self._fn("_nexus_sections(regions) {")
+		self.assertIn('const country = r.country || __("Unknown");', fn)
+		self.assertIn("heading: frappe.utils.escape_html(country)", fn)
+		# Nexus is a list of registrations, so no country ever collapses to
+		# "all of them" - that sentence answers a question about exemptions.
+		self.assertIn("all_label: null", fn)
 
 	def test_a_company_with_no_nexus_says_so(self):
 		"""A blank tag row reads as a card that failed to render."""
@@ -13444,21 +13477,22 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 
 	def test_the_connection_card_carries_no_token(self):
 		"""Which key is stored for a company is the Connect step's business.
-		This card answers the question the reader has: which account, how many
-		companies, and whether anything is being logged."""
+		This card answers the question the reader has: which mode the API runs
+		in, and whether anything is being logged."""
 		body = self._fn("_card_body_connect(s) {")
 		self.assertNotIn("token_last4", body)
-		self.assertIn('__("API Configured for")', body)
 
-	def test_a_lone_company_is_named_rather_than_counted(self):
-		""""1 company" behind a hover makes the reader work for the only thing
-		the row could have said. Several names do not fit, so those collapse to
-		a count with the names behind it."""
+	def test_the_connection_card_counts_no_companies(self):
+		"""The card carried a "Configured Company(s)" row that only counted the
+		credential rows the reader had just filled in. The Connection card now
+		reports the two site-wide facts, and the companies hover went with the
+		row it opened from."""
+		js = self._js()
 		body = self._fn("_card_body_connect(s) {")
-		self.assertIn("companies.length === 1", body)
-		self.assertIn("frappe.utils.escape_html(companies[0])", body)
-		self.assertIn('__("{0} companies", [companies.length])', body)
-		self.assertIn('data-hover="companies"', body)
+		self.assertNotIn('__("{0} companies"', body)
+		self.assertNotIn('__("Configured Company(s)")', body)
+		# The hover card has no target left anywhere on the page.
+		self.assertNotIn('data-hover="companies"', js)
 
 	def test_ledgers_and_features_share_one_block_per_company(self):
 		"""Two cards made the reader match a company name across both."""
@@ -14490,18 +14524,15 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		with itself."""
 		js = self._js()
 		body = js.split("_card_body_nexus(s) {")[1].split("\n\t}\n")[0]
-		self.assertIn(
-			'__("+{0} {1}", [hidden, hidden === 1 ? __("region") : __("regions")])',
-			body,
-		)
+		self.assertIn('count === 1 ? __("1 region") : __("{0} regions", [count])', body)
 		# The site-wide line itself, not the word - "across" also appears in the
 		# prose above these functions.
 		self.assertNotIn('__("{0} across {1} {2}"', js)
 
 	def test_review_has_no_taxjar_enabled_row_and_uses_green_badges(self):
 		"""The master switch isn't managed by this wizard, so Review must not
-		claim to report its state; Live mode and the nightly refresh cadence
-		get Frappe's native green indicator-pill instead of plain text."""
+		claim to report its state; Live mode gets Frappe's native green badge
+		instead of plain text."""
 		js = self._js()
 		self.assertNotIn('__("TaxJar")', js)
 		# frappe.ui.badge, not .indicator-pill - that one is deprecated in favour
@@ -14510,22 +14541,15 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		# why the deprecated class is not used, and naming it there is the point.
 		self.assertNotIn('class="indicator-pill', js)
 		self.assertIn('frappe.ui.badge.html({ label: __("Live"), theme: "green" })', js)
-		self.assertIn('__("Auto-Refresh")', js)
-		self.assertIn('__("Daily at midnight")', js)
 
-	def test_review_values_share_one_weight(self):
-		"""Regression guard: "Daily at midnight" was the one Review value placed
-		as a direct child of .ts-kv, so it alone picked up that row's bold
-		override and rendered heavier than every value beside it. Every value
-		now goes through .ts-kv-plain, which is what keeps them consistent."""
+	def test_review_nexus_card_lists_only_companies(self):
+		"""The Nexus card carried an "Auto-Refresh / Daily at midnight" row that
+		named a schedule the reader cannot change from this page. The card now
+		holds company rows alone, so every line in it is a registration."""
 		js = self._js()
 		review = js.split("_card_body_nexus(s) {")[1].split("\n\t}\n")[0]
-		self.assertIn(
-			'<span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span>',
-			review,
-		)
-		# Nothing in the Nexus card sets a value span without that class.
-		self.assertNotIn('<span>${__("Auto-Refresh")}</span><span>', review)
+		self.assertNotIn('__("Auto-Refresh")', review)
+		self.assertNotIn('__("Daily at midnight")', review)
 
 	def test_review_accounts_stack_company_and_detail_on_separate_lines(self):
 		js = self._js()

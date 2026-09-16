@@ -1892,7 +1892,7 @@ class TaxJarSetup {
 
 	// frappe.ui.hover_card, the desk's own component, rather than a CSS-only
 	// tooltip: it opens on keyboard focus as well as on hover, so the names
-	// behind these two hints are reachable without a pointer and on touch.
+	// behind a hint are reachable without a pointer and on touch.
 	//
 	// Bound by index rather than by a name in a data attribute - a company name
 	// round-tripping through an attribute has to be escaped on the way in and
@@ -1900,38 +1900,36 @@ class TaxJarSetup {
 	_bind_hover_cards(s) {
 		const options = { side: "bottom", align: "end", open_delay: 200, close_delay: 150 };
 
-		// A plain string, which hover_card renders as text. Two or three company
-		// names sit on one line, and stacking them made the card taller than the
-		// row it came from for no gain. A string also cannot carry markup, which
-		// a company name should not be able to do.
-		const companies = (s.credentials || []).map((c) => c.company).filter(Boolean).join(", ");
-		this.$body.find('.ts-hint[data-hover="companies"]').each((i, el) => {
-			frappe.ui.hover_card($(el), { content: () => companies, ...options });
-		});
-
 		const nexusByCompany = s.nexus_by_company || {};
 		const names = Object.keys(nexusByCompany);
 		this.$body.find('.ts-hint[data-hover="regions"]').each((i, el) => {
 			const regions = nexusByCompany[names[$(el).data("i")]] || [];
 			frappe.ui.hover_card($(el), {
-				content: () => this._hover_list(regions.map((r) => (
-					r.region_code && r.region ? `${r.region_code} — ${r.region}` : (r.region || r.region_code || "—")
-				))),
+				content: () => taxjar_integration.region_hover_card(this._nexus_sections(regions)),
 				...options,
 			});
 		});
 	}
 
-	// The regions' form, and the reason they differ from the company names above:
-	// one line each, because a company can hold up to 46 of them and a single
-	// comma-run of "FL — Florida" that long is unreadable. Built as an element
-	// rather than a string, since hover_card renders a string as one run of
-	// text; every line goes in through .text(), so a region name cannot carry
-	// markup into the card.
-	_hover_list(lines) {
-		const $list = $(`<div class="ts-hoverlist"></div>`);
-		lines.forEach((line) => $("<div></div>").text(line).appendTo($list));
-		return $list[0];
+	// The same card the Customer Configuration page opens behind its own region
+	// count: one section per country, the full names below it. TaxJar sends the
+	// country name with each region, so a nexus outside the US and Canada gets a
+	// heading of its own rather than dropping out of the card.
+	//
+	// No all_label here. That sentence answers "is this every state", a question
+	// a list of exemptions raises and a list of registrations does not.
+	_nexus_sections(regions) {
+		const byCountry = new Map();
+		regions.forEach((r) => {
+			const country = r.country || __("Unknown");
+			if (!byCountry.has(country)) byCountry.set(country, []);
+			byCountry.get(country).push(r.region || r.region_code || "—");
+		});
+		return Array.from(byCountry, ([country, regionNames]) => ({
+			heading: frappe.utils.escape_html(country),
+			names: regionNames,
+			all_label: null,
+		}));
 	}
 
 	// API mode leads and appears once. It is a site setting, not a per-company
@@ -1940,7 +1938,7 @@ class TaxJarSetup {
 	//
 	// No token here. Which key is stored for a company is the Connect step's
 	// business, and this card answers the question the reader actually has:
-	// which account, how many companies, and is anything being logged.
+	// which mode the API runs in, and is anything being logged.
 	_card_body_connect(s) {
 		const mode = s.api_mode || "—";
 		// frappe.ui.badge, the Espresso component. .indicator-pill is deprecated
@@ -1950,15 +1948,6 @@ class TaxJarSetup {
 			? frappe.ui.badge.html({ label: __("Live"), theme: "green" })
 			: frappe.utils.escape_html(mode);
 
-		const companies = (s.credentials || []).map((c) => c.company).filter(Boolean);
-		// One company has a name worth printing, and printing it saves the
-		// reader a hover to learn the only thing the row could have said.
-		// Several do not fit the row, so they collapse to a count with the names
-		// behind it.
-		const configuredFor = companies.length === 1
-			? frappe.utils.escape_html(companies[0])
-			: `<span class="ts-hint" data-hover="companies" tabindex="0">${__("{0} companies", [companies.length])}</span>`;
-
 		const retentionDays = s.log_retention_days;
 		const logsDisplay = s.enable_taxjar_logging
 			? __("Enabled · {0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])
@@ -1966,16 +1955,14 @@ class TaxJarSetup {
 
 		return `
 			<div class="ts-kv"><span>${__("API Mode")}</span><span>${modeDisplay}</span></div>
-			<div class="ts-kv"><span>${__("API Configured for")}</span><span class="ts-kv-plain">${configuredFor}</span></div>
 			<div class="ts-kv"><span>${__("API Logs")}</span><span class="ts-kv-plain">${logsDisplay}</span></div>
 		`;
 	}
 
-	// One tag and a count, not the whole list. A company with economic nexus
-	// everywhere returns up to 46 regions, and three of those would make this
-	// card longer than the rest of the page put together. The rest are one hover
-	// away, with their full names, which is what someone checking a specific
-	// state actually wants.
+	// A count, not the whole list. A company with economic nexus everywhere
+	// returns up to 46 regions, and three of those would make this card longer
+	// than the rest of the page put together. The names are one hover away,
+	// grouped by country, which is what someone checking a specific state wants.
 	_card_body_nexus(s) {
 		const nexusByCompany = s.nexus_by_company || {};
 
@@ -1990,29 +1977,19 @@ class TaxJarSetup {
 					<span class="ts-kv-plain">${__("No regions registered")}</span></div>`;
 			}
 
-			// The name, not the code. "Florida" is what somebody checking their
-			// registrations reads; FL is what the API returns. The code is still
-			// in the hover list beside each name, for anyone reconciling against
-			// TaxJar's own screen.
-			const first = regions[0];
-			const label = first.region || first.region_code || "—";
-			const hidden = regions.length - 1;
-			const more = hidden > 0
-				? `<span class="ts-hint" data-hover="regions" data-i="${index}" tabindex="0">${__("+{0} {1}", [hidden, hidden === 1 ? __("region") : __("regions")])}</span>`
-				: "";
+			// The count, not one name and a remainder. A single state out of five
+			// answers no question the reader has - "where am I registered" is
+			// answered by all of them, and the hover card names them in full.
+			const count = regions.length;
+			const label = count === 1 ? __("1 region") : __("{0} regions", [count]);
 
 			return `
 				<div class="ts-kv ts-kv-company"><span>${name}</span>
-					<span class="ts-nexuscell">
-						<span>${frappe.utils.escape_html(label)}</span>${more}
-					</span></div>
+					<span class="ts-hint" data-hover="regions" data-i="${index}" tabindex="0">${label}</span></div>
 			`;
 		}).join("");
 
-		return `
-			${rows || `<div class="text-muted small">${__("No nexus regions synced yet.")}</div>`}
-			<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span></div>
-		`;
+		return rows || `<div class="text-muted small">${__("No nexus regions synced yet.")}</div>`;
 	}
 
 	// Ledgers and features describe the same company from two sides, so they

@@ -26,9 +26,6 @@ const STATUS_COLORS = {
 
 const SYNC_UPDATE_EVENT = "taxjar_customers_update";
 
-// How many region names the hover card spells out before summarising the rest.
-const REGION_PREVIEW_LIMIT = 5;
-
 // Whether an exemption is configured is the tab, not a filter - so there is
 // only ever one way to express it. "Non Exempt" is a configured answer, not
 // an exemption, so it gets its own tab rather than folding into Exempted or
@@ -470,41 +467,25 @@ class TaxJarCustomerConfig {
 	// One section per country, each either the region names or - once every
 	// region this app offers for that country is on file - the fact that it is
 	// all of them, which is what a 51-name list actually means.
+	//
+	// The card itself is taxjar_integration.region_hover_card, shared with the
+	// guided setup's Nexus card. Only the two sections are this page's own: it
+	// stores codes for two known countries, so it resolves the names here and
+	// decides "all of them" against the same lists the region picker offers.
 	build_regions_card(regions) {
-		const $card = $(`<div class="taxjar-regions-card"></div>`);
-
 		const section = (country, heading, all_label, codes) => {
 			const states = regions.filter((r) => r.country === country).map((r) => r.state);
-			if (!states.length) return;
-
-			const names = states
-				.map((state) => taxjar_integration.region_full_name(country, state))
-				.sort();
-
-			let body;
-			if (states.length >= codes.length) {
-				body = all_label;
-			} else if (names.length > REGION_PREVIEW_LIMIT) {
-				// Past a handful, the list stops being read and starts being
-				// skimmed for length - which the count already says.
-				body = __("{0}, and {1} more.", [
-					names.slice(0, REGION_PREVIEW_LIMIT).join(", "),
-					names.length - REGION_PREVIEW_LIMIT,
-				]);
-			} else {
-				body = names.join(", ");
-			}
-
-			$card.append(`
-				<div class="taxjar-regions-card-heading">${heading}</div>
-				<div class="taxjar-regions-card-body">${frappe.utils.escape_html(body)}</div>
-			`);
+			return {
+				heading,
+				names: states.map((state) => taxjar_integration.region_full_name(country, state)),
+				all_label: states.length >= codes.length ? all_label : null,
+			};
 		};
 
-		section("US", __("US States"), __("All states exempted"), taxjar_integration.US_STATE_CODES);
-		section("CA", __("CA Provinces"), __("All provinces exempted"), taxjar_integration.CA_PROVINCE_CODES);
-
-		return $card;
+		return taxjar_integration.region_hover_card([
+			section("US", __("US States"), __("All states exempted"), taxjar_integration.US_STATE_CODES),
+			section("CA", __("CA Provinces"), __("All provinces exempted"), taxjar_integration.CA_PROVINCE_CODES),
+		]);
 	}
 
 	// Failed pairs the pill with a separate info icon (never nested inside the

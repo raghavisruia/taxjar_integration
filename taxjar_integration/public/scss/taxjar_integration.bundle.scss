@@ -360,3 +360,30 @@
 		color: var(--text-muted);
 	}
 }
+
+// ── Region hover card ─────────────────────────────────────────────────────
+// The card taxjar_integration.region_hover_card builds, opened from a region
+// count on the Customer Configuration page and on the guided setup's Nexus
+// card. It lives here rather than in either page's own css file because
+// frappe.ui.hover_card appends the card to the body, outside both wrappers.
+//
+// Sections stack: heading, then the names it covers. The card sizes to its
+// content, so a long list wraps rather than running off the viewport.
+.taxjar-regions-card {
+	max-width: 260px;
+	font-size: var(--text-sm);
+
+	.taxjar-regions-card-heading {
+		font-weight: var(--font-weight-semibold);
+		color: var(--heading-color);
+	}
+
+	.taxjar-regions-card-body {
+		color: var(--text-muted);
+		margin-bottom: 8px;
+
+		&:last-child {
+			margin-bottom: 0;
+		}
+	}
+}

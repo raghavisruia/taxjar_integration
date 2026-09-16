@@ -96,25 +96,3 @@
 	text-underline-offset: 3px;
 	cursor: default;
 }
-
-/* Inside the card, sections stack: heading, then the names it covers. The
-   card sizes to its content, so a long list is capped and wraps rather than
-   running off the viewport. */
-.taxjar-regions-card {
-	max-width: 260px;
-	font-size: var(--text-sm);
-}
-
-.taxjar-regions-card-heading {
-	font-weight: var(--font-weight-semibold);
-	color: var(--heading-color);
-}
-
-.taxjar-regions-card-body {
-	color: var(--text-muted);
-	margin-bottom: 8px;
-}
-
-.taxjar-regions-card-body:last-child {
-	margin-bottom: 0;
-}

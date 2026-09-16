@@ -82,6 +82,46 @@ taxjar_integration.us_state_code_options = function () {
 	);
 };
 
+// ── Region hover card ──
+// The card behind a region count, on the Customer Configuration page and on the
+// guided setup's Nexus card. A count says how many, not which; this card names
+// them, one section per country.
+//
+// Past five names the list stops being read and starts being skimmed for its
+// length, which the count beside it already gives - so it is capped.
+taxjar_integration.REGION_PREVIEW_LIMIT = 5;
+
+// `sections` is [{heading, names, all_label}]. The caller resolves the names,
+// because the two pages hold different data: the customer page stores codes for
+// two known countries, and nexus arrives from TaxJar with its own country names.
+// `all_label` is the one sentence that replaces the names when the country is
+// complete, since a 51-name list only reads as "all of them" after a count.
+taxjar_integration.region_hover_card = function (sections) {
+	const $card = $(`<div class="taxjar-regions-card"></div>`);
+	const limit = taxjar_integration.REGION_PREVIEW_LIMIT;
+
+	sections.forEach(({ heading, names, all_label }) => {
+		if (!names.length) return;
+
+		const sorted = names.slice().sort();
+		let body;
+		if (all_label) {
+			body = all_label;
+		} else if (sorted.length > limit) {
+			body = __("{0}, and {1} more.", [sorted.slice(0, limit).join(", "), sorted.length - limit]);
+		} else {
+			body = sorted.join(", ");
+		}
+
+		$card.append(`
+			<div class="taxjar-regions-card-heading">${heading}</div>
+			<div class="taxjar-regions-card-body">${frappe.utils.escape_html(body)}</div>
+		`);
+	});
+
+	return $card;
+};
+
 // ── Sync failure dialog ──
 // Some of taxjar_integration.py's classify_taxjar_error() messages (e.g. an
 // invalid API token) point the user at the guided setup wizard by name -

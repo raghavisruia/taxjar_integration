@@ -590,20 +590,17 @@
    there is to distinguish it. */
 .taxjar-setup .ts-cfg-focus { border-color: var(--text-color); }
 
-/* ── The two hover targets ───────────────────────────────────────────────
+/* ── The region count ─────────────────────────────────────────────
    A dotted underline says "there is more here" without promising a link.
    frappe.ui.hover_card does the rest, and it opens on keyboard focus too —
-   tabindex is what makes that reachable. */
+   tabindex is what makes that reachable. The card it opens is styled in
+   public/scss/taxjar_integration.bundle.scss, which the Customer
+   Configuration page shares: hover_card appends the card to the body,
+   outside this page's own wrapper. */
 .taxjar-setup .ts-hint {
 	text-decoration: underline; text-decoration-style: dotted;
 	text-underline-offset: 3px; cursor: default;
 }
-.taxjar-setup .ts-hoverlist { display: flex; flex-direction: column; gap: 2px; }
-/* One company can hold 46 regions. Past about fifteen the card would run off
-   the screen, so it scrolls rather than growing. */
-.taxjar-setup .ts-hoverlist { max-height: 260px; overflow-y: auto; }
-
-.taxjar-setup .ts-nexuscell { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* Feature flags are frappe.ui.badge (.es-badge), the Espresso component, so
    this file owns the row they sit in and nothing about the badge itself — it
