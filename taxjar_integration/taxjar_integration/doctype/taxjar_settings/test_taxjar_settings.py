@@ -12684,6 +12684,62 @@ class TestGuidedSetupCreateCompanyAddress(UnitTestCase):
 		self.assertNotIn("disabled", doc.update.call_args[0][0])
 
 
+class TestGuidedSetupUpdateCompanyAddress(UnitTestCase):
+	MODULE = _SETUP_MODULE
+
+	def _doc(self):
+		doc = MagicMock()
+		doc.name = "ADDR-1"
+		doc.is_primary_address = 0
+		doc.address_line2 = "Suite 400"
+		doc.update = MagicMock(side_effect=lambda values: doc.__dict__.update(values))
+		return doc
+
+	def _update(self, doc, values):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import (
+			update_company_address,
+		)
+
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]), \
+		     patch(self.MODULE + ".frappe.get_doc", return_value=doc):
+			return update_company_address(company="Frappe Tech", address="ADDR-1", values=values)
+
+	def test_an_explicit_blank_clears_the_field(self):
+		"""A field the user emptied must end up empty. The dialog sends every
+		text field on every save, blank ones included, because the endpoint
+		writes only the keys it is sent - see the cstr() note in taxjar_setup.js.
+		"""
+		doc = self._doc()
+		self._update(doc, {"address_line1": "88 Market St", "address_line2": ""})
+
+		self.assertEqual(doc.address_line2, "")
+		doc.save.assert_called_once()
+
+	def test_a_missing_key_leaves_the_field_alone(self):
+		"""The other half of the same rule: absent is not blank. Nothing this
+		endpoint was not asked about gets rewritten."""
+		doc = self._doc()
+		self._update(doc, {"address_line1": "88 Market St"})
+
+		self.assertEqual(doc.address_line2, "Suite 400")
+
+	def test_refuses_an_address_that_is_not_the_company_s(self):
+		"""Scoped to the company's own linked addresses, so a TaxJar Settings
+		permission is not a licence to write any Address on the site."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import (
+			update_company_address,
+		)
+
+		with patch(self.MODULE + ".frappe.has_permission"), \
+		     patch(self.MODULE + ".company_address_names", return_value=["ADDR-1"]):
+			self.assertRaises(
+				frappe.ValidationError,
+				update_company_address,
+				company="Frappe Tech", address="SOMEONE-ELSES", values={},
+			)
+
+
 class TestGuidedSetupVerifyCompanyAddress(UnitTestCase):
 	MODULE = _SETUP_MODULE
 
@@ -12799,6 +12855,16 @@ class TestGuidedSetupAddressStepJS(UnitTestCase):
 		js = self._setup_js()
 		fn = js.split("\t_render_address_card(entry) {")[1].split("\n\t}\n")[0]
 		self.assertIn("this._verify_address(entry)", fn)
+
+	def test_the_address_dialog_sends_blank_fields_rather_than_dropping_them(self):
+		"""get_values() drops any field whose value is blank, so a cleared field
+		never reached the server and the old value survived the save. Every text
+		field goes through cstr() to turn the missing key back into a blank."""
+		js = self._setup_js()
+		payload = js.split("const payload = {")[1].split("};")[0]
+		for field in ("address_title", "address_line1", "address_line2", "city",
+		              "taxjar_state_code", "pincode"):
+			self.assertIn("{0}: cstr(values.{0})".format(field), payload)
 
 	def test_verification_never_gates_continue(self):
 		"""Only completeness gates. TaxJar fails to match addresses users have

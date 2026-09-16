@@ -1504,15 +1504,22 @@ class TaxJarSetup {
 				},
 			],
 			primary_action_label: __("Save address"),
+			// cstr() on every text field, and not for tidiness: get_values()
+			// drops any field whose value is blank (`if (!is_null(v))` in
+			// field_group.js), so a field the user cleared arrives here as
+			// undefined, JSON.stringify drops the key, and the server - which
+			// writes only the keys it is sent - keeps the old value. Clearing
+			// Address Line 2 then did nothing at all. cstr() turns the missing
+			// key back into the empty string the user asked for.
 			primary_action: (values) => {
 				d.disable_primary_action();
 				const payload = {
-					address_title: values.address_title,
-					address_line1: values.address_line1,
-					address_line2: values.address_line2,
-					city: values.city,
-					taxjar_state_code: values.taxjar_state_code,
-					pincode: values.pincode,
+					address_title: cstr(values.address_title),
+					address_line1: cstr(values.address_line1),
+					address_line2: cstr(values.address_line2),
+					city: cstr(values.city),
+					taxjar_state_code: cstr(values.taxjar_state_code),
+					pincode: cstr(values.pincode),
 					is_primary_address: values.is_primary_address ? 1 : 0,
 					is_shipping_address: values.is_shipping_address ? 1 : 0,
 				};
