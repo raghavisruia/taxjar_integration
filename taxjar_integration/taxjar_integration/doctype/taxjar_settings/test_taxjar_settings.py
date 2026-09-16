@@ -2450,12 +2450,216 @@ class TestNexusPage(UnitTestCase):
 		data = json.loads(self._read("taxjar_nexus.json"))
 		self.assertEqual({r["role"] for r in data["roles"]}, {"System Manager"})
 
-	def test_page_js_renders_through_the_shared_renderers(self):
-		"""Same markup as the settings form's tab, from one place."""
+	def test_page_draws_its_own_cards_not_the_shared_table_renderers(self):
+		"""Every card on this page carries its own title, subtitle, "Synced ..."
+		caption and refresh control. The settings form already supplies all four
+		from its section headers and its labelled buttons, so one renderer can no
+		longer serve both - the form keeps the shared tables."""
 		js = self._read("taxjar_nexus.js")
-		self.assertIn("taxjar_integration.render_nexus_cards(", js)
-		self.assertIn("taxjar_integration.render_product_tax_category_summary(", js)
+		self.assertNotIn("taxjar_integration.render_nexus_cards(", js)
+		self.assertNotIn("taxjar_integration.render_product_tax_category_summary(", js)
+		# The "Synced ..." fallback is still shared - it is the same caption.
 		self.assertIn("taxjar_integration.format_last_synced(", js)
+
+	def test_cards_are_built_from_the_desk_component_library(self):
+		"""Badges, buttons and empty states come from frappe.ui, so the page
+		follows the desk's own components instead of a private copy of them."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("frappe.ui.badge(", js)
+		self.assertIn("frappe.ui.button(", js)
+		self.assertIn("frappe.ui.empty_state(", js)
+
+	def test_layout_follows_the_company_count(self):
+		"""One company gets both cards stacked in a column only as wide as its
+		content. Two or more get one card per company in a grid."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("companies.length > 1", js)
+		self.assertIn("taxjar-nexus-grid", js)
+		self.assertIn("taxjar-nexus-solo", js)
+
+	def test_page_css_names_no_colour_or_size_of_its_own(self):
+		"""Every value in the page's stylesheet reads a desk token, so the page
+		follows the dark theme. A literal colour here would be a value the rest
+		of the desk does not know about, and a type size would be one the desk
+		type scale does not name."""
+		css = self._read("taxjar_nexus.css")
+		self.assertNotRegex(css, r":[^;]*#[0-9a-fA-F]{3,8}\b")
+		self.assertNotIn("font-size", css)
+		for declaration in re.findall(r"(?:color|background)\s*:\s*([^;]+);", css):
+			self.assertIn("var(--", declaration, f"{declaration!r} names no token")
+
+	def test_every_type_size_comes_from_the_desk_scale(self):
+		"""The page names no size of its own. Each one is a typography class the
+		desk already defines, so the page's type matches the desk around it."""
+		import os
+
+		typography = frappe.get_app_path("frappe", "public", "css", "espresso", "typography.css")
+		with open(typography) as f:
+			defined = f.read()
+
+		used = set(re.findall(
+			r"\btext-(?:p-)?(?:2xs|xs|sm|base|lg|xl|[2-9]xl|1[0-2]xl)(?:-[a-z]+)?\b",
+			self._read("taxjar_nexus.js"),
+		))
+		self.assertTrue(used, "the page uses no typography class at all")
+		for name in sorted(used):
+			self.assertIn(f".{name} {{", defined, f"{name} is not a desk type style")
+		self.assertTrue(os.path.exists(typography))
+
+	def test_the_page_names_one_font_family_and_it_is_the_desk_mono(self):
+		"""Body type comes from the desk's --font-stack, which the page never
+		touches. The one family it does name is for a region code, and it is the
+		stack the desk already gives code, kbd, pre and samp."""
+		css = self._read("taxjar_nexus.css")
+		families = re.findall(r"font-family\s*:\s*([^;]+);", css)
+		self.assertEqual(len(families), 1)
+		self.assertIn("var(--font-stack-mono,", families[0])
+		self.assertIn('Menlo, Monaco, Consolas, "Courier New", monospace', families[0])
+		self.assertNotIn("--font-stack:", css)
+
+	def test_a_section_is_no_wider_than_the_cards_it_heads(self):
+		"""The bar's refresh control acts on the cards below it, so it sits at
+		their right edge, not the window's. The company count decides where that
+		is, and only the page knows the count - so it hands the stylesheet the
+		number and the stylesheet works out the width."""
+		js = self._read("taxjar_nexus.js")
+		css = self._read("taxjar_nexus.css")
+		self.assertIn('setProperty("--taxjar-cards"', js)
+		self.assertIn("var(--taxjar-cards)", css)
+		# auto-fill would leave an empty track standing at the right edge, and
+		# the control would line up with that rather than with the last card.
+		# The declaration, not the file - the comment above it names auto-fill
+		# to say why the grid does not use it.
+		columns = re.search(r"grid-template-columns:([^;]+);", css).group(1)
+		self.assertIn("auto-fit", columns)
+		self.assertNotIn("auto-fill", columns)
+
+	def test_the_two_sections_are_the_same_width(self):
+		"""Two right edges a hundred pixels apart read as two unrelated blocks.
+		The page sets one width on itself and both sections inherit it, so the
+		count of companies cannot pull one section out of line with the other."""
+		js = self._read("taxjar_nexus.js")
+		# Set on the page's own element, once - not per section.
+		self.assertEqual(js.count('setProperty("--taxjar-cards"'), 1)
+		self.assertIn('this.$body[0].style.setProperty("--taxjar-cards"', js)
+		fn = js.split("_section($parent) {")[1].split("\n\t}")[0]
+		self.assertNotIn("setProperty", fn)
+
+	def test_page_css_carries_only_what_components_and_utilities_cannot(self):
+		"""The grid, the section width, the "as wide as its content" column, the
+		chip shape and the mono face. Everything else is a component or a
+		utility class."""
+		css = self._read("taxjar_nexus.css")
+		self.assertIn("grid-template-columns", css)
+		self.assertIn("width: max-content", css)
+		# The chip is the espresso badge, adjusted - not a private copy of one.
+		self.assertIn(".taxjar-nexus-chip.es-badge", css)
+		self.assertIn(".taxjar-nexus-code", css)
+
+	def test_region_code_goes_in_after_the_badge_is_built(self):
+		"""frappe.ui.badge escapes its label, so a code handed to it as markup
+		would show as visible tags. It is appended to the finished badge."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_region_chip(row) {")[1].split("\n\t}")[0]
+		self.assertIn("frappe.ui.badge({", fn)
+		self.assertIn(".text(row.region_code)", fn)
+
+	def test_country_code_is_not_shown_on_the_page(self):
+		"""The country name labels the group each chip sits in, so the code would
+		add a third item to a chip that shows two. It stays on the settings
+		form's raw Nexus table."""
+		self.assertNotIn("country_code", self._read("taxjar_nexus.js"))
+
+	def test_category_count_still_links_to_the_list(self):
+		"""The count is the way into /app/product-tax-category, as it was in the
+		shared summary box."""
+		self.assertIn('href="/app/product-tax-category"', self._read("taxjar_nexus.js"))
+
+	def test_the_category_count_is_drawn_at_the_size_the_design_asks_for(self):
+		"""26px, which the desk type scale names --text-5xl. The earlier
+		--text-2xl is 18px, which read as body text beside its own label."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("text-5xl-semibold", js)
+		self.assertNotIn("text-2xl-semibold", js)
+
+	def test_the_count_is_always_in_a_card(self):
+		"""One box holds the count under either layout - never a bare line on
+		the page."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_render_count($parent, count) {")[1].split("\n\t}")[0]
+		self.assertIn('href="/app/product-tax-category"', fn)
+		for caller in ("_render_category_card(", "_render_category_section("):
+			body = js.split(caller)[2].split("\n\t}")[0]
+			self.assertIn("this._card()", body)
+			self.assertIn("this._render_count(", body)
+
+	def test_both_sections_take_the_same_shape_in_a_given_layout(self):
+		"""Product Tax Category follows State Nexus: a card with a head when one
+		company is listed, a page level bar over cards when several are."""
+		js = self._read("taxjar_nexus.js")
+		# Many companies: each section is a bar over the same grid.
+		for fn_name in ("_render_company_grid(", "_render_category_section("):
+			body = js.split(fn_name)[2].split("\n\t}")[0]
+			self.assertIn("taxjar-nexus-grid", body)
+		# One company: both are a card whose head is padded into it.
+		for fn_name in ("_render_nexus_card(", "_render_category_card("):
+			body = js.split(fn_name)[2].split("\n\t}")[0]
+			self.assertIn('css_class: "px-5 py-4"', body)
+
+	def test_a_head_keeps_its_control_on_the_title_row(self):
+		"""A wrapping head dropped the refresh control below the title and hard
+		against the left edge, where it read as a control for whatever came
+		next. The title block shrinks instead."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_render_head($parent, opts) {")[1].split("\n\t}")[0]
+		self.assertNotIn("flex-wrap", fn)
+		self.assertIn("min-w-0", fn)
+		# And a section is never too narrow for all four parts of a head.
+		self.assertIn("var(--taxjar-section-min)", self._read("taxjar_nexus.css"))
+
+	def test_every_head_puts_the_description_under_its_title(self):
+		"""One head serves a card and a page level bar, so a title reads the
+		same way in both. Side by side, the description read as part of the
+		title rather than as a line about it."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_render_head($parent, opts) {")[1].split("\n\t}")[0]
+		self.assertIn("flex flex-col gap-0.5 min-w-0", fn)
+		self.assertNotIn("items-baseline", fn)
+		self.assertNotIn("opts.inline", js)
+
+	def test_the_region_code_is_set_in_a_mono_face(self):
+		"""The code beside a region name, and nothing else on the page. The desk
+		has no mono class, so the page names one."""
+		js = self._read("taxjar_nexus.js")
+		self.assertEqual(js.count("taxjar-nexus-code"), 1)
+		self.assertIn("monospace", self._read("taxjar_nexus.css"))
+
+	def test_a_company_card_is_named_not_counted(self):
+		"""The card lists the regions right below the name, so a count of the
+		rows under it repeated what the reader could already see."""
+		js = self._read("taxjar_nexus.js")
+		self.assertNotIn("_region_count", js)
+		self.assertNotIn("{0} regions", js)
+
+	def test_the_sync_caption_carries_no_status_light(self):
+		"""The design draws a green dot beside "Synced just now" on State Nexus
+		and none on Product Tax Category. On a real site that marks one section
+		rather than one state: the dot stayed green at forty minutes, while the
+		section synced seconds ago had none. A colour a reader takes for a
+		status has to stand for one, so the caption carries the fact alone."""
+		js = self._read("taxjar_nexus.js")
+		css = self._read("taxjar_nexus.css")
+		self.assertNotIn("taxjar-nexus-dot", js)
+		self.assertNotIn("taxjar-nexus-dot", css)
+		self.assertIn('__("Synced {0}"', js)
+
+	def test_the_region_chip_is_the_espresso_badge_adjusted(self):
+		"""No badge variant carries a fill and an outline together, and none is
+		a soft rectangle - so the design's chip needs those four properties set.
+		It still starts from the component, not from a bare div."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn('css_class: "taxjar-nexus-chip"', js)
+		self.assertIn(".taxjar-nexus-chip.es-badge", self._read("taxjar_nexus.css"))
 
 	def test_page_js_fetches_on_show_not_in_the_constructor(self):
 		"""Desk pages are cached in frappe.pages[name]; a constructor-time fetch
@@ -2485,7 +2689,7 @@ class TestNexusPage(UnitTestCase):
 		like once System Settings' timezone runs ahead of the browser's. The
 		caption must not blank out there."""
 		js = self._read("taxjar_nexus.js")
-		fn = js.split("_render_synced($section, when) {")[1].split("\n\t}")[0]
+		fn = js.split("_render_synced($head, when) {")[1].split("\n\t}")[0]
 		self.assertIn("frappe.datetime.comment_when(when)", fn)
 		self.assertIn("|| taxjar_integration.format_last_synced(when)", fn)
 		self.assertIn('__("Synced {0}"', fn)
@@ -2494,15 +2698,16 @@ class TestNexusPage(UnitTestCase):
 		"""comment_when() returns a whole <span class="frappe-timestamp"> element,
 		not a bare string - text() rendered it as visible markup."""
 		js = self._read("taxjar_nexus.js")
-		fn = js.split("_render_synced($section, when) {")[1].split("\n\t}")[0]
+		fn = js.split("_render_synced($head, when) {")[1].split("\n\t}")[0]
 		self.assertIn('.html(relative ?', fn)
 		self.assertNotIn(".text(", fn)
 
-	def test_category_box_does_not_repeat_the_header_caption(self):
-		"""The section header carries "Synced ..." on this page, so the shared
-		summary box is asked to drop its own "Last updated" line - unlike on
-		the settings form, where the box is the only place it can go."""
-		self.assertIn("show_last_updated: false", self._read("taxjar_nexus.js"))
+	def test_synced_caption_appears_once_per_card(self):
+		"""The card head is the only place the caption goes. The settings form
+		still puts it in the summary box, which is its only place for it."""
+		js = self._read("taxjar_nexus.js")
+		self.assertEqual(js.count('__("Synced {0}"'), 1)
+		self.assertNotIn("Last updated", js)
 
 	def test_requests_go_through_xcall_so_finally_actually_runs(self):
 		"""frappe.call returns a jQuery jqXHR, and a jQuery 3 Deferred has

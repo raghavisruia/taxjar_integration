@@ -1,40 +1,111 @@
-/* Only the page's own chrome lives here - the nexus cards and the category
-   summary box carry their own styles from public/js/taxjar_utils.js, which is
-   also what the TaxJar Settings form's Nexus tab renders. */
+/* The page is built from the desk component library and the shared utility
+   classes (frappe/public/scss/common/utilities.scss), so its colours, type,
+   spacing, borders and radii all come from the desk's own tokens and follow
+   the dark theme.
+
+   Five things in the design have no component and no utility class. Each one
+   is below, with what it is and why it cannot come from either. Every value
+   still reads a token where a token exists. */
 
 .taxjar-nexus-page {
 	padding: 15px;
+
+	/* The width one card settles at when nothing squeezes it, and the space
+	   between two of them. Both are read below to work out how wide a section
+	   is allowed to get. */
+	--taxjar-card-width: 340px;
+	--taxjar-card-gap: calc(var(--spacing) * 4);
+
+	/* No section is narrower than this, whatever it holds. A head has a title,
+	   a description, a "Synced ..." caption and a control to fit on one line,
+	   and one card alone does not leave room for all four. The longest
+	   description on the page needs about 270px at this type size, and the
+	   caption and control about 165px more - so this leaves a translation some
+	   room before the description takes a second line. */
+	--taxjar-section-min: 520px;
 }
 
-/* Two sections on one page, told apart by a divider rather than a card each -
-   same as the section breaks they mirror on the settings form. */
-.taxjar-nexus-section + .taxjar-nexus-section {
-	margin-top: 24px;
-	padding-top: 24px;
-	border-top: 1px solid var(--border-color);
+/* 1. Two or more companies: one card per company, as many across as the window
+      fits. The utilities carry flex but no grid, and a wrapping flex row
+      cannot give every card in a row the same width. Cards start at the top of
+      their row, so a company with one region does not stretch to the height of
+      a company with ten.
+
+      auto-fit, not auto-fill: a track with no card in it collapses to nothing,
+      so the last card always ends at the right edge of the grid. auto-fill
+      leaves that track standing, and the bar's refresh control then sits one
+      empty column further right than the card it belongs to. */
+.taxjar-nexus-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+	gap: var(--taxjar-card-gap);
+	align-items: start;
 }
 
-/* Title on the left, "Synced ..." and the refresh control pushed to the far
-   edge, so they line up with the right edge of the table below - the guided
-   setup wizard's Sync Nexus step (.ts-nexusaction) laid out the same way. */
-.taxjar-nexus-section-head {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	flex-wrap: wrap;
-	margin-bottom: 16px;
+/* 2. A section is a bar and the cards it heads, and it is never wider than the
+      cards need. Without this the bar stretched the whole window, and its
+      refresh control sat far to the right of the cards it acts on - two empty
+      columns away, on a wide window with two companies.
+
+      --taxjar-cards is the company count. The page sets it once, on itself, so
+      every section works out the same width and their right edges line up. It
+      has to come from the page because only the page knows how many companies
+      came back. A section holding one card fills that width with the one card.
+
+      The window still wins when it is the narrower of the two, and the grid
+      then reflows to fewer columns with the bar following it. */
+.taxjar-nexus-section {
+	max-width: max(
+		var(--taxjar-section-min),
+		calc(
+			var(--taxjar-cards) * var(--taxjar-card-width) + (var(--taxjar-cards) - 1) *
+				var(--taxjar-card-gap)
+		)
+	);
 }
 
-.taxjar-nexus-section-title {
-	margin-right: auto;
-	font-size: var(--text-3xl);
-	font-weight: var(--font-weight-bold);
-	color: var(--heading-color);
+/* 3. One company: both cards only as wide as their own content, so a short
+      list of regions does not stretch a card across the whole window.
+
+      min() rather than the floor on its own: CSS gives min-width priority over
+      max-width, so a flat minimum would push the card past the right edge of a
+      phone. This way the minimum gives way to the screen once the screen is
+      the smaller of the two. */
+.taxjar-nexus-solo {
+	width: max-content;
+	min-width: min(var(--taxjar-section-min), 100%);
+	max-width: 100%;
 }
 
-.taxjar-nexus-synced {
-	font-size: var(--text-sm);
-	white-space: nowrap;
+/* 4. The region chip is the espresso badge (.es-badge, lg, outline), which
+      brings the flex row, the nowrap, the type size and the border. The design
+      then asks for four things no badge variant can express: a soft rectangle
+      in place of the badge's pill, a fill behind the outline (subtle has the
+      fill but no border, outline the border but no fill), the taller box its
+      6px of padding gives, and the near-black a region name reads in rather
+      than the badge's muted grey. */
+.taxjar-nexus-chip.es-badge {
+	height: auto;
+	padding: 6px 10px;
+	gap: 7px;
+	border-radius: var(--radius-3);
+	background: var(--surface-gray-1);
+	border-color: var(--outline-gray-1);
+	color: var(--ink-gray-8);
+}
+
+/* 5. The design sets a region code in a mono face, so a two letter code reads
+      as a code and not as a short word.
+
+      The desk has a --font-stack for its body type but no token for mono. Its
+      one mono stack is the one bootstrap gives code, kbd, pre and samp, which
+      is what every other piece of code in the desk renders in - so the list
+      below is that stack, copied. A <code> element would carry it without the
+      copy, but it also carries a pink fill and a padding that no utility class
+      can clear, which costs more than it saves. --font-stack-mono is read
+      first, so this falls away on its own if the desk ever names one. */
+.taxjar-nexus-code {
+	font-family: var(--font-stack-mono, Menlo, Monaco, Consolas, "Courier New", monospace);
 }
 
 /* The icon-only sync button has no loading_label span, so the framework's own
