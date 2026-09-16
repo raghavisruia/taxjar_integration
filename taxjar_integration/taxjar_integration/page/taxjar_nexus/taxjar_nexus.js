@@ -70,6 +70,12 @@ class TaxJarNexusSummary {
 		);
 
 		this._render_page_head($column);
+		// A rule between the page head and the sections under it. Both section
+		// heads are the same shape as the page head at a smaller step, so
+		// without the rule the page head reads as the first section's own
+		// heading rather than as the heading for both. The column's own gap
+		// sets the space on each side of it.
+		$('<div class="border-t border-outline-gray-1"></div>').appendTo($column);
 		this._render_nexus_section(
 			$column,
 			this._group_by_company(summary.nexus || []),
@@ -155,7 +161,18 @@ class TaxJarNexusSummary {
 				.toggleClass("taxjar-nexus-wide", companies.length === 1)
 				.appendTo($grid);
 
-			$('<div class="text-base-medium text-ink-gray-8 truncate px-4 py-3"></div>')
+			// The head is filled, the way the guided setup wizard fills its own
+			// card heads (.ts-card-h in taxjar_setup.css): --subtle-fg there is
+			// an alias of --surface-gray-2, so one token serves both pages and
+			// both themes.
+			//
+			// The head rounds its own two top corners because the card draws no
+			// overflow: hidden - a square fill would otherwise sit outside the
+			// card's rounded corners. Logical corner names (ss/se), so the fill
+			// stays tucked into the card when the layout flips.
+			$(
+				'<div class="text-base-medium text-ink-gray-8 truncate px-4 py-3 bg-surface-gray-2 rounded-ss-lg rounded-se-lg"></div>'
+			)
 				.text(company.name)
 				.appendTo($card);
 
