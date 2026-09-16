@@ -2278,6 +2278,56 @@ class TestAddressClientScript(UnitTestCase):
 		# reqd is toggled based on is_us, not needs_state
 		self.assertIn("is_us", js)
 
+	def test_address_js_labels_the_state_code_options_with_the_state_name(self):
+		"""A list of 51 bare codes is read one guess at a time. The form relabels
+		every option through the shared builder, so "AK" reads "AK — Alaska"."""
+		js = self._read_js()
+		self.assertIn("_label_state_code_options", js)
+		self.assertIn(
+			'frm.set_df_property("taxjar_state_code", "options", taxjar_integration.us_state_code_options())',
+			js,
+		)
+
+	def test_address_js_labels_the_state_code_options_on_onload(self):
+		"""The options never change after the form opens, so they are built once."""
+		js = self._read_js()
+		onload_idx = js.index("onload(frm)")
+		self.assertGreater(js.index("_label_state_code_options(frm)", onload_idx), onload_idx)
+
+	def test_the_state_code_option_keeps_the_code_as_its_value(self):
+		"""The label gains the state name. The saved value stays the 2-letter
+		code, which is the only thing TaxJar accepts."""
+		import os
+		path = os.path.join(self._app_root(), "public", "js", "taxjar_utils.js")
+		with open(path) as f:
+			js = f.read()
+		fn = js.split("taxjar_integration.us_state_code_options = function () {")[1].split("\n};")[0]
+		self.assertIn('{ label: `${code} — ${names[code]}`, value: code }', fn)
+		# A blank option, so the field can go back to empty.
+		self.assertIn('[{ label: "", value: "" }]', fn)
+
+	def test_the_state_code_options_are_sorted_by_code(self):
+		"""The code is what the reader scans down, so the list follows it."""
+		import os
+		path = os.path.join(self._app_root(), "public", "js", "taxjar_utils.js")
+		with open(path) as f:
+			js = f.read()
+		fn = js.split("taxjar_integration.us_state_code_options = function () {")[1].split("\n};")[0]
+		self.assertIn("Object.keys(names).sort()", fn)
+
+	def test_the_guided_setup_builds_its_state_options_the_same_way(self):
+		"""One builder for both pickers, or the two lists drift apart."""
+		import os
+		path = os.path.join(
+			self._app_root(), "taxjar_integration", "page", "taxjar_setup", "taxjar_setup.js",
+		)
+		with open(path) as f:
+			js = f.read()
+		fn = js.split("\t_state_code_options() {")[1].split("\n\t}")[0]
+		self.assertIn("taxjar_integration.us_state_code_options()", fn)
+		# No second copy of the label format here.
+		self.assertNotIn("${names[code]}", fn)
+
 	def test_hooks_registers_address_validate(self):
 		"""hooks.py must declare an Address validate doc event."""
 		from taxjar_integration import hooks

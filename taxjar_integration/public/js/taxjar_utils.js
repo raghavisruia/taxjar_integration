@@ -66,6 +66,22 @@ taxjar_integration.region_full_name = function (country, code) {
 	return (taxjar_integration.REGION_NAMES_BY_COUNTRY[country] || {})[code] || code;
 };
 
+// Select options for a US state code, as "AK — Alaska" over the stored "AK".
+// The value is still the 2-letter code TaxJar asks for, but a list of 51 bare
+// codes is read one guess at a time, so the option text carries the name too.
+// One builder for every state picker in the app - the Address form and the
+// guided setup's address dialog - so both lists read the same.
+//
+// Sorted by code, because the code is what the reader scans down.
+taxjar_integration.us_state_code_options = function () {
+	const names = taxjar_integration.US_STATE_NAMES;
+	// A leading blank option, so the field can go back to empty. Frappe adds
+	// one on its own only when the options are a newline string.
+	return [{ label: "", value: "" }].concat(
+		Object.keys(names).sort().map((code) => ({ label: `${code} — ${names[code]}`, value: code }))
+	);
+};
+
 // ── Sync failure dialog ──
 // Some of taxjar_integration.py's classify_taxjar_error() messages (e.g. an
 // invalid API token) point the user at the guided setup wizard by name -

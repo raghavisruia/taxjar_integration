@@ -1,6 +1,7 @@
 // TaxJar — Address form client script
 // Auto-syncs taxjar_state_code ↔ state when country is "United States".
 // Enforces mandatory fields: state (US/CA), taxjar_state_code (US), pincode (US).
+// Labels the State Code options with the state name.
 
 // State code → full name map is defined once in taxjar_utils.js (loaded globally
 // via the app bundle) so the Address and Customer forms stay in lockstep.
@@ -25,6 +26,16 @@ function _has_state_code_field(frm) {
 	return !!frm.fields_dict["taxjar_state_code"];
 }
 
+// The field stores a 2-letter code, and the custom field's own options are
+// those codes alone - the server validates against them. The form relabels each
+// option to "AK — Alaska" so the reader does not have to decode it. The value
+// under every option stays the code, so nothing about what is saved changes.
+// The labels come from the same builder the guided setup address dialog uses.
+function _label_state_code_options(frm) {
+	if (!_has_state_code_field(frm)) return;
+	frm.set_df_property("taxjar_state_code", "options", taxjar_integration.us_state_code_options());
+}
+
 function _set_taxjar_mandatory_fields(frm) {
 	const country = frm.doc.country;
 	// Use country names — standard Frappe Country DocType values, not subject to change.
@@ -41,6 +52,11 @@ function _set_taxjar_mandatory_fields(frm) {
 }
 
 frappe.ui.form.on("Address", {
+	onload(frm) {
+		// Once per form: the options never change after this.
+		_label_state_code_options(frm);
+	},
+
 	refresh(frm) {
 		_set_taxjar_mandatory_fields(frm);
 	},

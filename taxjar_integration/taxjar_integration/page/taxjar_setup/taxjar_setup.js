@@ -1540,14 +1540,12 @@ class TaxJarSetup {
 	}
 
 	_state_code_options() {
-		// Read lazily rather than at module scope: US_STATE_NAMES comes from the
-		// app bundle, and a page script that throws while loading takes the
-		// whole page with it (the same reason TAXJAR_NEXUS_URL is a literal up
-		// top rather than read from there).
-		const names = (window.taxjar_integration && taxjar_integration.US_STATE_NAMES) || {};
-		return [{ label: "", value: "" }].concat(
-			Object.keys(names).sort().map((code) => ({ label: `${code} — ${names[code]}`, value: code }))
-		);
+		// Read lazily rather than at module scope: us_state_code_options comes
+		// from the app bundle, and a page script that throws while loading takes
+		// the whole page with it (the same reason TAXJAR_NEXUS_URL is a literal
+		// up top rather than read from there).
+		if (!window.taxjar_integration) return [{ label: "", value: "" }];
+		return taxjar_integration.us_state_code_options();
 	}
 
 	// Only two things gate: no address at all, and an incomplete one. Not a
