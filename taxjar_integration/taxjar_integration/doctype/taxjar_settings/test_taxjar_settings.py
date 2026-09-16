@@ -2469,13 +2469,84 @@ class TestNexusPage(UnitTestCase):
 		self.assertIn("frappe.ui.button(", js)
 		self.assertIn("frappe.ui.empty_state(", js)
 
-	def test_layout_follows_the_company_count(self):
-		"""One company gets both cards stacked in a column only as wide as its
-		content. Two or more get one card per company in a grid."""
+	def test_the_page_is_one_centred_column(self):
+		"""The page head, both section heads and every card run the same width
+		and sit in the middle of the window, so every right edge lines up and
+		each refresh control sits at the edge of what it acts on."""
+		css = self._read("taxjar_nexus.css")
+		column = re.search(r"\.taxjar-nexus-column \{([^}]+)\}", css).group(1)
+		self.assertIn("max-width: 720px", column)
+		self.assertIn("margin-inline: auto", column)
+		self.assertIn('"taxjar-nexus-column', self._read("taxjar_nexus.js"))
+
+	def test_the_page_carries_a_heading_over_both_sections(self):
+		"""A parent heading is what lets the two section titles sit at a smaller
+		step without reading as body text. It says what the page is for rather
+		than repeating the desk title bar, which already names the page."""
 		js = self._read("taxjar_nexus.js")
-		self.assertIn("companies.length > 1", js)
-		self.assertIn("taxjar-nexus-grid", js)
-		self.assertIn("taxjar-nexus-solo", js)
+		fn = js.split("_render_page_head($parent) {")[1].split("\n\t}")[0]
+		self.assertIn("text-4xl-semibold", fn)
+		self.assertIn('__("Manage nexus & product category")', fn)
+		self.assertIn("Review the nexus for your company", fn)
+		# The title bar's own wording, which the page keeps, is set elsewhere.
+		self.assertNotIn('__("Nexus & Product Category")', fn)
+		# And the section titles drop a step below it.
+		head = js.split("_render_head($parent, opts) {")[1].split("\n\t}")[0]
+		self.assertIn("text-lg-semibold", head)
+
+	def test_company_cards_append_in_rows_of_two(self):
+		"""A fixed pair of columns, not a track count read off the window: cards
+		append in rows of two and the row width never changes under them."""
+		css = self._read("taxjar_nexus.css")
+		columns = re.search(r"grid-template-columns:([^;]+);", css).group(1)
+		self.assertIn("repeat(2,", columns)
+		self.assertNotIn("auto-fit", columns)
+		self.assertNotIn("auto-fill", columns)
+		# One column once two would leave a card too narrow for a region name.
+		self.assertIn("@media (max-width: 575.98px)", css)
+
+	def test_a_lone_card_takes_the_whole_row(self):
+		"""Half a row with nothing beside it reads as a card that failed to
+		load, and its right edge would stop short of the control above it."""
+		js = self._read("taxjar_nexus.js")
+		css = self._read("taxjar_nexus.css")
+		self.assertIn('toggleClass("taxjar-nexus-wide", companies.length === 1)', js)
+		self.assertIn("grid-column: 1 / -1", css)
+		# The blank state spans the row for the same reason.
+		fn = js.split("_render_nexus_section($parent, companies, last_synced) {")[1]
+		self.assertIn('<div class="taxjar-nexus-wide"></div>', fn.split("\n\t}")[0])
+
+	def test_a_long_region_list_opens_in_place(self):
+		"""Six chips, then one control that opens the rest into the same row as
+		the same chips. A hover panel would be closed to a keyboard and to
+		touch, and would draw the hidden regions in a second style."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("const REGIONS_SHOWN = 6;", js)
+		fn = js.split("_render_chips($chips, regions, open) {")[1].split("\n\t}")[0]
+		# A real button, so the control is reachable without a pointer.
+		self.assertIn("frappe.ui.button({", fn)
+		self.assertIn('__("Show fewer")', fn)
+		self.assertIn("this._render_chips($chips, regions, !open)", fn)
+		# The control is a click, not a pointer gesture. (The word "hover" is in
+		# the file only in the comment saying why, so match on the handlers.)
+		for pointer_only in ("mouseenter", "mouseover", "mouseleave", ":hover"):
+			self.assertNotIn(pointer_only, js)
+
+	def test_the_hidden_count_reads_as_english_at_one(self):
+		""""+1 regions" is the bug this guards."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_hidden_label(hidden) {")[1].split("\n\t}")[0]
+		self.assertIn('__("+1 region")', fn)
+		self.assertIn('__("+{0} regions", [hidden])', fn)
+
+	def test_the_open_state_is_not_carried_across_a_sync(self):
+		"""render() rebuilds the whole body, so an open card cannot survive it.
+		Starting closed every time is the only state the page can honour."""
+		js = self._read("taxjar_nexus.js")
+		self.assertIn("this.$body.empty();", js)
+		# No stash of which cards were open.
+		self.assertNotIn("localStorage", js)
+		self.assertNotIn("this.open", js)
 
 	def test_page_css_names_no_colour_or_size_of_its_own(self):
 		"""Every value in the page's stylesheet reads a desk token, so the page
@@ -2517,45 +2588,6 @@ class TestNexusPage(UnitTestCase):
 		self.assertIn('Menlo, Monaco, Consolas, "Courier New", monospace', families[0])
 		self.assertNotIn("--font-stack:", css)
 
-	def test_a_section_is_no_wider_than_the_cards_it_heads(self):
-		"""The bar's refresh control acts on the cards below it, so it sits at
-		their right edge, not the window's. The company count decides where that
-		is, and only the page knows the count - so it hands the stylesheet the
-		number and the stylesheet works out the width."""
-		js = self._read("taxjar_nexus.js")
-		css = self._read("taxjar_nexus.css")
-		self.assertIn('setProperty("--taxjar-cards"', js)
-		self.assertIn("var(--taxjar-cards)", css)
-		# auto-fill would leave an empty track standing at the right edge, and
-		# the control would line up with that rather than with the last card.
-		# The declaration, not the file - the comment above it names auto-fill
-		# to say why the grid does not use it.
-		columns = re.search(r"grid-template-columns:([^;]+);", css).group(1)
-		self.assertIn("auto-fit", columns)
-		self.assertNotIn("auto-fill", columns)
-
-	def test_the_two_sections_are_the_same_width(self):
-		"""Two right edges a hundred pixels apart read as two unrelated blocks.
-		The page sets one width on itself and both sections inherit it, so the
-		count of companies cannot pull one section out of line with the other."""
-		js = self._read("taxjar_nexus.js")
-		# Set on the page's own element, once - not per section.
-		self.assertEqual(js.count('setProperty("--taxjar-cards"'), 1)
-		self.assertIn('this.$body[0].style.setProperty("--taxjar-cards"', js)
-		fn = js.split("_section($parent) {")[1].split("\n\t}")[0]
-		self.assertNotIn("setProperty", fn)
-
-	def test_page_css_carries_only_what_components_and_utilities_cannot(self):
-		"""The grid, the section width, the "as wide as its content" column, the
-		chip shape and the mono face. Everything else is a component or a
-		utility class."""
-		css = self._read("taxjar_nexus.css")
-		self.assertIn("grid-template-columns", css)
-		self.assertIn("width: max-content", css)
-		# The chip is the espresso badge, adjusted - not a private copy of one.
-		self.assertIn(".taxjar-nexus-chip.es-badge", css)
-		self.assertIn(".taxjar-nexus-code", css)
-
 	def test_region_code_goes_in_after_the_badge_is_built(self):
 		"""frappe.ui.badge escapes its label, so a code handed to it as markup
 		would show as visible tags. It is appended to the finished badge."""
@@ -2570,10 +2602,32 @@ class TestNexusPage(UnitTestCase):
 		form's raw Nexus table."""
 		self.assertNotIn("country_code", self._read("taxjar_nexus.js"))
 
-	def test_category_count_still_links_to_the_list(self):
-		"""The count is the way into /app/product-tax-category, as it was in the
-		shared summary box."""
-		self.assertIn('href="/app/product-tax-category"', self._read("taxjar_nexus.js"))
+	def test_the_whole_count_phrase_is_one_link(self):
+		""""868 categories configured" reads as one phrase, so all of it is the
+		way into /app/product-tax-category. Underlining the number alone left
+		the label beside it looking like a mistake.
+
+		Inline, not a flex row: a flex item is blockified and a decoration on
+		the container does not reliably reach one, which broke the underline
+		into two pieces."""
+		js = self._read("taxjar_nexus.js")
+		fn = js.split("_render_count($parent, count) {")[1].split("\n\t}")[0]
+		self.assertIn('href="/app/product-tax-category"', fn)
+		self.assertIn('__("categories configured")', fn)
+		# Both halves sit inside the one anchor.
+		self.assertEqual(fn.count("appendTo($link)"), 2)
+		self.assertNotIn("flex", fn)
+
+	def test_the_count_link_is_marked_with_a_dotted_underline(self):
+		"""The card has no other affordance saying it can be clicked, and the
+		two halves keep their own ink rather than turning link blue."""
+		css = self._read("taxjar_nexus.css")
+		rule = re.search(r"\.taxjar-nexus-count \{([^}]+)\}", css).group(1)
+		self.assertIn("underline dotted", rule)
+		# The hover restates the shorthand - the desk's own a:hover sets
+		# text-decoration, which would reset the style to solid.
+		hover = re.search(r"\.taxjar-nexus-count:hover \{([^}]+)\}", css).group(1)
+		self.assertIn("underline dotted", hover)
 
 	def test_the_category_count_is_drawn_at_the_size_the_design_asks_for(self):
 		"""26px, which the desk type scale names --text-5xl. The earlier
@@ -2581,41 +2635,6 @@ class TestNexusPage(UnitTestCase):
 		js = self._read("taxjar_nexus.js")
 		self.assertIn("text-5xl-semibold", js)
 		self.assertNotIn("text-2xl-semibold", js)
-
-	def test_the_count_is_always_in_a_card(self):
-		"""One box holds the count under either layout - never a bare line on
-		the page."""
-		js = self._read("taxjar_nexus.js")
-		fn = js.split("_render_count($parent, count) {")[1].split("\n\t}")[0]
-		self.assertIn('href="/app/product-tax-category"', fn)
-		for caller in ("_render_category_card(", "_render_category_section("):
-			body = js.split(caller)[2].split("\n\t}")[0]
-			self.assertIn("this._card()", body)
-			self.assertIn("this._render_count(", body)
-
-	def test_both_sections_take_the_same_shape_in_a_given_layout(self):
-		"""Product Tax Category follows State Nexus: a card with a head when one
-		company is listed, a page level bar over cards when several are."""
-		js = self._read("taxjar_nexus.js")
-		# Many companies: each section is a bar over the same grid.
-		for fn_name in ("_render_company_grid(", "_render_category_section("):
-			body = js.split(fn_name)[2].split("\n\t}")[0]
-			self.assertIn("taxjar-nexus-grid", body)
-		# One company: both are a card whose head is padded into it.
-		for fn_name in ("_render_nexus_card(", "_render_category_card("):
-			body = js.split(fn_name)[2].split("\n\t}")[0]
-			self.assertIn('css_class: "px-5 py-4"', body)
-
-	def test_a_head_keeps_its_control_on_the_title_row(self):
-		"""A wrapping head dropped the refresh control below the title and hard
-		against the left edge, where it read as a control for whatever came
-		next. The title block shrinks instead."""
-		js = self._read("taxjar_nexus.js")
-		fn = js.split("_render_head($parent, opts) {")[1].split("\n\t}")[0]
-		self.assertNotIn("flex-wrap", fn)
-		self.assertIn("min-w-0", fn)
-		# And a section is never too narrow for all four parts of a head.
-		self.assertIn("var(--taxjar-section-min)", self._read("taxjar_nexus.css"))
 
 	def test_every_head_puts_the_description_under_its_title(self):
 		"""One head serves a card and a page level bar, so a title reads the
@@ -2636,10 +2655,16 @@ class TestNexusPage(UnitTestCase):
 
 	def test_a_company_card_is_named_not_counted(self):
 		"""The card lists the regions right below the name, so a count of the
-		rows under it repeated what the reader could already see."""
+		rows under it repeated what the reader could already see. The count that
+		does survive is on the control that opens a long list, which is a
+		different claim - it counts what the reader cannot see."""
 		js = self._read("taxjar_nexus.js")
 		self.assertNotIn("_region_count", js)
-		self.assertNotIn("{0} regions", js)
+		header = js.split("_render_nexus_section($parent, companies, last_synced) {")[1].split(
+			"\n\t}"
+		)[0]
+		self.assertIn(".text(company.name)", header)
+		self.assertNotIn("regions", header.split(".text(company.name)")[0].rsplit("$card", 1)[-1])
 
 	def test_the_sync_caption_carries_no_status_light(self):
 		"""The design draws a green dot beside "Synced just now" on State Nexus
@@ -2653,13 +2678,34 @@ class TestNexusPage(UnitTestCase):
 		self.assertNotIn("taxjar-nexus-dot", css)
 		self.assertIn('__("Synced {0}"', js)
 
-	def test_the_region_chip_is_the_espresso_badge_adjusted(self):
-		"""No badge variant carries a fill and an outline together, and none is
-		a soft rectangle - so the design's chip needs those four properties set.
-		It still starts from the component, not from a bare div."""
+	def test_the_region_pill_matches_the_wizard(self):
+		"""The guided setup wizard's Sync Nexus step shows the same regions, so
+		the two draw the same pill. The espresso badge carries the shape, the
+		outline, the ink and the type size; only the box is set here, to the
+		wizard's own measure."""
 		js = self._read("taxjar_nexus.js")
+		css = self._read("taxjar_nexus.css")
 		self.assertIn('css_class: "taxjar-nexus-chip"', js)
-		self.assertIn(".taxjar-nexus-chip.es-badge", self._read("taxjar_nexus.css"))
+
+		rule = re.search(r"\.taxjar-nexus-chip\.es-badge \{([^}]+)\}", css).group(1)
+		self.assertIn("padding: 4px 11px", rule)
+		self.assertIn("gap: 7px", rule)
+		# Shape, colour and type stay the component's own.
+		for owned_by_the_badge in ("border-radius", "background", "color", "font-size"):
+			self.assertNotIn(owned_by_the_badge, rule)
+
+		wizard = self._read_setup_css()
+		self.assertIn("padding: 4px 11px", wizard)
+		self.assertIn("border-radius: 100px", wizard)
+
+	def _read_setup_css(self):
+		import os
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css",
+		))
+		with open(path) as f:
+			return f.read()
 
 	def test_page_js_fetches_on_show_not_in_the_constructor(self):
 		"""Desk pages are cached in frappe.pages[name]; a constructor-time fetch

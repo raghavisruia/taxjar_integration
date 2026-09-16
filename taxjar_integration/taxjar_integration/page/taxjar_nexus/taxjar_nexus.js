@@ -4,16 +4,16 @@
 // credentials they sit behind.
 //
 // This page draws its own cards instead of the shared table renderers in
-// public/js/taxjar_utils.js. Every card here carries its own title, subtitle,
-// "Synced ..." caption and refresh control, and the settings form already
-// supplies all four from its section headers and its labelled buttons. The
-// form keeps the shared table renderers, so it is unchanged.
+// public/js/taxjar_utils.js. Every section here carries its own title,
+// description, "Synced ..." caption and refresh control, and the settings form
+// already supplies all four from its section headers and its labelled buttons.
+// The form keeps the shared table renderers, so it is unchanged.
 //
-// Two layouts, picked by how many companies hold nexus regions:
-//   one company    - the nexus card above the category card, in a column only
-//                    as wide as its own content.
-//   two or more    - one card per company in a grid, under a page level bar,
-//                    with the category count in a card of its own below.
+// The page is one centred column, under a heading of its own:
+//   State Nexus           - one card per company, two cards to a row.
+//   Product Tax Category  - the count, in a card the width of the column.
+// A company with a long list of regions shows the first few and opens the rest
+// in place - see _render_chips.
 //
 // Boxes come from the desk component library (frappe.ui.badge, .button,
 // .empty_state) and the shared utility classes in
@@ -40,12 +40,14 @@ frappe.pages["taxjar-nexus"].on_page_show = function (wrapper) {
 
 const API = "taxjar_integration.taxjar_integration.page.taxjar_nexus.taxjar_nexus";
 
+// How many region chips a country shows before the rest go behind one control.
+// Two rows in a card at half the column width.
+const REGIONS_SHOWN = 6;
+
 class TaxJarNexusSummary {
 	constructor(page) {
 		this.page = page;
-		this.$body = $('<div class="taxjar-nexus-page flex flex-col gap-8"></div>').appendTo(
-			page.main
-		);
+		this.$body = $('<div class="taxjar-nexus-page"></div>').appendTo(page.main);
 	}
 
 	// frappe.xcall, not frappe.call: the latter hands back a jQuery jqXHR, and a
@@ -57,34 +59,23 @@ class TaxJarNexusSummary {
 		frappe.xcall(`${API}.get_summary`).then((summary) => this.render(summary));
 	}
 
-	// The layout follows the data, so the body is rebuilt on every render rather
-	// than patched in place. Both refresh controls are wired again here.
+	// The body is rebuilt on every render rather than patched in place, so the
+	// refresh controls are wired again here.
 	render(summary) {
 		summary = summary || {};
-		const companies = this._group_by_company(summary.nexus || []);
-		const categories = summary.product_tax_categories || {};
 
 		this.$body.empty();
-
-		// One width for the whole page, not one per section: the widest section
-		// sets it and the rest inherit, so every section and every refresh
-		// control lines up on the same right edge. taxjar_nexus.css turns the
-		// count into that width - see --taxjar-cards there.
-		this.$body[0].style.setProperty("--taxjar-cards", String(Math.max(companies.length, 1)));
-
-		if (companies.length > 1) {
-			this._render_company_grid(companies, summary.nexus_last_synced);
-			this._render_category_section(this.$body, categories);
-			return;
-		}
-
-		// One company keeps both cards in a column only as wide as its content.
-		const $column = $('<div class="taxjar-nexus-solo flex flex-col gap-8"></div>').appendTo(
+		const $column = $('<div class="taxjar-nexus-column flex flex-col gap-8"></div>').appendTo(
 			this.$body
 		);
 
-		this._render_nexus_card($column, companies[0], summary.nexus_last_synced);
-		this._render_category_card($column, categories);
+		this._render_page_head($column);
+		this._render_nexus_section(
+			$column,
+			this._group_by_company(summary.nexus || []),
+			summary.nexus_last_synced
+		);
+		this._render_category_section($column, summary.product_tax_categories || {});
 	}
 
 	// ── data ──
@@ -99,10 +90,9 @@ class TaxJarNexusSummary {
 			const name = row.company || __("(No Company)");
 			let company = companies.find((c) => c.name === name);
 			if (!company) {
-				company = { name, regions: [], countries: [] };
+				company = { name, countries: [] };
 				companies.push(company);
 			}
-			company.regions.push(row);
 
 			const country = row.country || __("Unknown");
 			let group = company.countries.find((g) => g.country === country);
@@ -116,41 +106,30 @@ class TaxJarNexusSummary {
 		return companies;
 	}
 
-	// ── layouts ──
+	// ── sections ──
 
-	// One company, or none at all: the nexus card, with the company name above
-	// its own regions.
-	_render_nexus_card($parent, company, last_synced) {
-		const $card = this._card().appendTo($parent);
-		const $head = this._render_head($card, {
-			title: __("State Nexus"),
-			subtitle: __("Auto-updated at midnight"),
-			css_class: "px-5 py-4",
-			tooltip: __("Fetch nexus regions from TaxJar"),
-			onclick: () => this._sync_nexus($card),
-		});
-		this._render_synced($head, last_synced);
+	// The page's own heading, above both sections. It is what lets the section
+	// titles below it sit at a smaller step without reading as body text.
+	//
+	// It does not repeat the desk title bar above it, which names the page.
+	// This says what the page is for.
+	_render_page_head($parent) {
+		const $head = $('<div class="flex flex-col gap-1"></div>').appendTo($parent);
 
-		const $card_body = $(
-			'<div class="border-t border-outline-gray-1 px-5 py-4 flex flex-col gap-4"></div>'
-		).appendTo($card);
-
-		if (!company) {
-			$card_body.append(this._nexus_empty_state());
-			return;
-		}
-
-		$('<div class="text-base-medium text-ink-gray-8"></div>')
-			.text(company.name)
-			.appendTo($card_body);
-		this._render_countries($card_body, company.countries);
+		$('<div class="text-4xl-semibold text-ink-gray-8"></div>')
+			.text(__("Manage nexus & product category"))
+			.appendTo($head);
+		$('<div class="text-p-sm text-ink-gray-5"></div>')
+			.text(
+				__(
+					"Review the nexus for your company & product tax category list fetched from TaxJar."
+				)
+			)
+			.appendTo($head);
 	}
 
-	// Two or more companies: the head becomes a page level bar above a grid that
-	// holds one card per company, named and then listed. The bar says the same
-	// thing the stacked card's head says.
-	_render_company_grid(companies, last_synced) {
-		const $section = this._section(this.$body);
+	_render_nexus_section($parent, companies, last_synced) {
+		const $section = this._section($parent);
 		const $head = this._render_head($section, {
 			title: __("State Nexus"),
 			subtitle: __("Auto-updated at midnight"),
@@ -161,10 +140,22 @@ class TaxJarNexusSummary {
 
 		const $grid = $('<div class="taxjar-nexus-grid"></div>').appendTo($section);
 
-		for (const company of companies) {
-			const $card = this._card().appendTo($grid);
+		if (!companies.length) {
+			$('<div class="taxjar-nexus-wide"></div>')
+				.append(this._nexus_empty_state())
+				.appendTo($grid);
+			return;
+		}
 
-			$('<div class="text-base-medium text-ink-gray-8 truncate p-4"></div>')
+		for (const company of companies) {
+			// A lone card takes the whole row: half a row with nothing beside it
+			// reads as a card that failed to load, and its right edge would stop
+			// short of the refresh control that acts on it.
+			const $card = this._card()
+				.toggleClass("taxjar-nexus-wide", companies.length === 1)
+				.appendTo($grid);
+
+			$('<div class="text-base-medium text-ink-gray-8 truncate px-4 py-3"></div>')
 				.text(company.name)
 				.appendTo($card);
 
@@ -175,35 +166,8 @@ class TaxJarNexusSummary {
 		}
 	}
 
-	// One company: the category count as a card below the nexus card, the same
-	// width and the same shape - a head, a rule, then the count.
-	_render_category_card($parent, categories) {
-		const $card = this._card().appendTo($parent);
-		const $head = this._render_head($card, {
-			title: __("Product Tax Category"),
-			subtitle: __("Updates are fetched automatically every week"),
-			css_class: "px-5 py-4",
-			tooltip: __("Fetch product tax categories from TaxJar"),
-			onclick: () => this._sync_categories($card),
-		});
-		this._render_synced($head, categories.last_updated);
-
-		const $card_body = $('<div class="border-t border-outline-gray-1 px-5 py-4"></div>').appendTo(
-			$card
-		);
-
-		if (!categories.count) {
-			$card_body.append(this._category_empty_state());
-			return;
-		}
-
-		this._render_count($card_body, categories.count);
-	}
-
-	// Two or more companies: the same shape State Nexus takes in this layout - a
-	// page level bar, then the count in a card of its own. The card sits in the
-	// same grid the company cards use, so it is one column wide rather than
-	// stretched across the page.
+	// The category list is not company scoped, so the count is the whole summary
+	// and it sits in one card the width of the column.
 	_render_category_section($parent, categories) {
 		const $section = this._section($parent);
 		const $head = this._render_head($section, {
@@ -214,9 +178,7 @@ class TaxJarNexusSummary {
 		});
 		this._render_synced($head, categories.last_updated);
 
-		const $card = this._card()
-			.addClass("p-5")
-			.appendTo($('<div class="taxjar-nexus-grid"></div>').appendTo($section));
+		const $card = this._card().addClass("p-5").appendTo($section);
 
 		if (!categories.count) {
 			$card.append(this._category_empty_state());
@@ -228,12 +190,11 @@ class TaxJarNexusSummary {
 
 	// ── pieces ──
 
-	// A section is a bar and the cards it heads. Its width comes from the page,
-	// which caps every section the same way - without that cap the bar stretched
-	// the whole window, and its refresh control sat far to the right of the
-	// cards it acts on.
+	// A section is a head and the cards under it. Both run the width of the
+	// centred column, so every right edge on the page lines up and each refresh
+	// control sits at the edge of what it acts on.
 	_section($parent) {
-		return $('<div class="taxjar-nexus-section flex flex-col gap-4"></div>').appendTo($parent);
+		return $('<div class="flex flex-col gap-4"></div>').appendTo($parent);
 	}
 
 	_card() {
@@ -243,9 +204,7 @@ class TaxJarNexusSummary {
 	}
 
 	// The title with its description under it on the left, the "Synced ..."
-	// caption and the icon only refresh control on the right. The same head
-	// serves a card and a page level bar - only the padding differs, which the
-	// caller passes in.
+	// caption and the icon only refresh control on the right.
 	//
 	// The row does not wrap. Wrapping dropped the control below the title and
 	// hard against the left edge, which reads as a control for whatever comes
@@ -253,9 +212,9 @@ class TaxJarNexusSummary {
 	// takes a second line of its own and the control stays on the right.
 	_render_head($parent, opts) {
 		const $head = $(`
-			<div class="flex items-center justify-between gap-4 ${opts.css_class || ""}">
+			<div class="flex items-center justify-between gap-4">
 				<div class="flex flex-col gap-0.5 min-w-0">
-					<div class="text-3xl-semibold text-ink-gray-8" data-head="title"></div>
+					<div class="text-lg-semibold text-ink-gray-8" data-head="title"></div>
 					<div class="text-p-sm text-ink-gray-5" data-head="subtitle"></div>
 				</div>
 			</div>
@@ -275,9 +234,9 @@ class TaxJarNexusSummary {
 			$parent
 		);
 
-		$('<span class="text-p-xs text-ink-gray-5 whitespace-nowrap taxjar-nexus-synced"></span>').appendTo(
-			$controls
-		);
+		$(
+			'<span class="text-p-xs text-ink-gray-5 whitespace-nowrap taxjar-nexus-synced"></span>'
+		).appendTo($controls);
 
 		$('<span class="taxjar-nexus-sync-mount"></span>')
 			.append(
@@ -293,19 +252,25 @@ class TaxJarNexusSummary {
 		return $controls;
 	}
 
-	// The count, big, as the link into the list it counts, with its label beside
-	// it. Both layouts draw it the same way - only the box around it changes.
+	// "868 categories configured" is one phrase, so the whole phrase is the link
+	// into the list it counts. Underlining the number alone read as a mistake.
+	//
+	// Inline, not a flex row: a flex item is blockified, and a text decoration
+	// on the container does not reliably reach one - the underline broke into
+	// two pieces with a gap between them. Inline boxes of two sizes share a
+	// baseline on their own, which is what the flex row was there for.
 	_render_count($parent, count) {
-		const $row = $('<div class="flex items-baseline gap-2 flex-wrap"></div>').appendTo($parent);
+		const $link = $(
+			'<a class="taxjar-nexus-count" href="/app/product-tax-category"></a>'
+		).appendTo($parent);
 
-		$('<a class="text-5xl-semibold text-ink-gray-8" href="/app/product-tax-category"></a>')
-			.text(count)
-			.appendTo($row);
-		$('<span class="text-p-base text-ink-gray-6 whitespace-nowrap"></span>')
+		$('<span class="text-5xl-semibold text-ink-gray-8"></span>').text(count).appendTo($link);
+		$link.append(" ");
+		$('<span class="text-p-base text-ink-gray-6"></span>')
 			.text(__("categories configured"))
-			.appendTo($row);
+			.appendTo($link);
 
-		return $row;
+		return $link;
 	}
 
 	_render_countries($parent, countries) {
@@ -316,17 +281,55 @@ class TaxJarNexusSummary {
 				.text(group.country)
 				.appendTo($group);
 
-			const $chips = $('<div class="flex flex-wrap gap-2"></div>').appendTo($group);
-			group.regions.forEach((row) => this._region_chip(row).appendTo($chips));
+			this._render_chips(
+				$('<div class="flex flex-wrap gap-2"></div>').appendTo($group),
+				group.regions
+			);
 		}
 	}
 
-	// The region name as a badge, with its region code beside the name inside the
-	// same badge. frappe.ui.badge escapes its label, so the code is appended to
-	// the finished badge rather than passed through as markup.
+	// A long list opens in place: the same chips, in the same row, so the only
+	// thing the control changes is how many of them there are. The alternative
+	// was a panel on hover, which is closed to a keyboard and to touch, and
+	// which drew the hidden regions in a second style in a second place.
+	//
+	// The cap is per country, so a company holding regions in two countries
+	// opens one country without the other. Every render starts closed: the page
+	// rebuilds its whole body on each sync, so there is no open card to carry.
+	_render_chips($chips, regions, open) {
+		$chips.empty();
+
+		const hidden = open ? 0 : Math.max(regions.length - REGIONS_SHOWN, 0);
+		const shown = hidden ? regions.slice(0, REGIONS_SHOWN) : regions;
+		shown.forEach((row) => this._region_chip(row).appendTo($chips));
+
+		if (!hidden && !open) return;
+
+		$chips.append(
+			frappe.ui.button({
+				label: hidden ? this._hidden_label(hidden) : __("Show fewer"),
+				icon_right: hidden ? "chevron-down" : "chevron-up",
+				variant: "outline",
+				size: "md",
+				onclick: () => this._render_chips($chips, regions, !open),
+			})
+		);
+	}
+
+	_hidden_label(hidden) {
+		return hidden === 1 ? __("+1 region") : __("+{0} regions", [hidden]);
+	}
+
+	// The region name as a pill, with its region code beside the name inside the
+	// same pill - the pill the guided setup wizard's Sync Nexus step already
+	// draws (.ts-pill in taxjar_setup.css). The two show the same regions, so
+	// they look the same.
+	//
+	// frappe.ui.badge escapes its label, so the code is appended to the finished
+	// pill rather than passed through as markup.
 	//
 	// The country code is not shown: the country name already labels the group
-	// this chip sits in. It stays on the raw Nexus table on the settings form.
+	// this pill sits in. It stays on the raw Nexus table on the settings form.
 	_region_chip(row) {
 		const $chip = frappe.ui.badge({
 			label: row.region || "—",
@@ -339,7 +342,7 @@ class TaxJarNexusSummary {
 		});
 
 		if (row.region_code) {
-			$('<span class="text-xs-medium taxjar-nexus-code text-ink-violet-6"></span>')
+			$('<span class="text-xs-medium taxjar-nexus-code text-ink-gray-5"></span>')
 				.text(row.region_code)
 				.appendTo($chip);
 		}
