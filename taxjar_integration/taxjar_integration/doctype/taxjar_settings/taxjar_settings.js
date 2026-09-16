@@ -28,14 +28,16 @@ function _set_setup_intro(frm) {
 	// stays fully available either way.
 	//
 	// What changes is what the banner offers. An unfinished setup gets the
-	// invitation; a finished one gets the way back in to change something. Same
-	// colour and wording as the workspace banner, because it is the same link -
+	// invitation; a finished one gets the way back to the summary. The word is
+	// "Review", not "Edit", because the page opens on the record and the button
+	// there is what starts the edit. Same colour and wording as the workspace
+	// banner, because it is the same link -
 	// a blue "go and set this up" on a site that finished setup months ago is
 	// what this reads off setup_complete to avoid.
 	const done = !!frm.doc.setup_complete;
 	frm.set_intro(
 		done
-			? `<a href="/app/taxjar-setup">${__("Edit configuration")} →</a>`
+			? `<a href="/app/taxjar-setup">${__("Review configuration")} →</a>`
 			: `<a href="/app/taxjar-setup">${__("Go to guided setup experience")} →</a>`,
 		done ? "green" : "blue"
 	);

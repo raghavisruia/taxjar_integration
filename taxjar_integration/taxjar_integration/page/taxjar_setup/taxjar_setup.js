@@ -88,13 +88,23 @@ const SETUP_STEPS = [
 	{ key: "address", label: __("Address"), title: __("Add your company address") },
 	{ key: "features", label: __("Features"), title: __("Choose features to activate") },
 	{ key: "nexus", label: __("Sync Nexus"), title: __("Sync your nexus regions") },
-	{ key: "review", label: __("Review"), title: __("Review & activate") },
+	// The summary, not a step the user walks to. Activate on the last wizard
+	// step lands here, and a finished setup opens here. It carries no rail
+	// caption and no footer, because there is nothing left to press.
+	{ key: "review", title: __("Review & activate") },
 ];
+
+// The summary is the last entry above; the wizard is everything before it. The
+// split is here so the rail, the progress bar and the Activate button all count
+// the same steps - the ones the user actually walks.
+const SUMMARY_STEP = SETUP_STEPS.length - 1;
+const WIZARD_STEPS = SETUP_STEPS.slice(0, SUMMARY_STEP);
+const LAST_WIZARD_STEP = WIZARD_STEPS.length - 1;
 
 // The steps the summary shows as editable cards, in wizard order. Titles are
 // their own, not the rail's: "Map Ledgers" and "Sync Nexus" tell a first-time
 // user what to do next, while this stack describes what is already configured.
-// The review page's cards. Four, not one per wizard step: Ledgers and Features
+// The summary page's cards. Four, not one per wizard step: Ledgers and Features
 // describe the same company from two sides, and nothing maps to a step any more
 // now that editing re-walks the whole wizard (see _start_edit).
 const CONFIG_CARDS = [
@@ -151,11 +161,11 @@ class TaxJarSetup {
 		// addition, the one thing the stock component doesn't do.
 		this.progress = new frappe.ui.Progress({
 			intervals: true,
-			interval_count: SETUP_STEPS.length,
+			interval_count: WIZARD_STEPS.length,
 		});
 		this.$root.find(".ts-rail").append(this.progress.$el);
 
-		this.$steps.html(SETUP_STEPS.map((s, i) => `
+		this.$steps.html(WIZARD_STEPS.map((s, i) => `
 			<li><button type="button" class="ts-step-btn" data-i="${i}">${frappe.utils.escape_html(s.label)}</button></li>
 		`).join(""));
 		this.$steps.find(".ts-step-btn").on("click", (e) => {
@@ -226,20 +236,20 @@ class TaxJarSetup {
 	// opened.
 	_land() {
 		if (!this.state || !this.state.setup_complete) return;
-		this.reached = SETUP_STEPS.length - 1;
-		this.cur = SETUP_STEPS.length - 1;
+		this.reached = LAST_WIZARD_STEP;
+		this.cur = SUMMARY_STEP;
 	}
 
 	// ── navigation ───────────────────────────────────────────────────
 	_go(i) {
-		if (i < 0 || i >= SETUP_STEPS.length || i > this.reached) return;
+		if (i < 0 || i >= WIZARD_STEPS.length || i > this.reached) return;
 		this.cur = i;
 		this.reached = Math.max(this.reached, i);
 		this._render();
 	}
 
 	_advance() {
-		if (this.cur < SETUP_STEPS.length - 1) {
+		if (this.cur < LAST_WIZARD_STEP) {
 			this.reached = Math.max(this.reached, this.cur + 1);
 			this._go(this.cur + 1);
 		}
@@ -254,15 +264,15 @@ class TaxJarSetup {
 			return;
 		}
 
-		const step = SETUP_STEPS[this.cur];
-		if (step.key === "review") return this._finish();
-
 		// Steps with a save API collect -> save -> reload state -> advance;
 		// steps without one (Welcome, Nexus — which persists via its own Fetch
-		// action) just advance.
+		// action) just advance. The last step activates rather than advances:
+		// there is no Review step in between any more (see _finish).
+		const step = SETUP_STEPS[this.cur];
+		const done = () => (this.cur === LAST_WIZARD_STEP ? this._finish() : this._advance());
 		const saver = this[`_save_${step.key}`];
-		if (!saver) return this._advance();
-		Promise.resolve(saver.call(this)).then((ok) => { if (ok) this._advance(); });
+		if (!saver) return done();
+		Promise.resolve(saver.call(this)).then((ok) => { if (ok) done(); });
 	}
 
 	// ── editing ──────────────────────────────────────────────────────
@@ -272,15 +282,15 @@ class TaxJarSetup {
 	// forward from there.
 	//
 	// There is no per-step edit and no way back to the summary except through
-	// the wizard. Rotating one token therefore costs four more Save & continue
-	// screens, which is the price of having exactly one path: a configuration
-	// re-confirmed end to end cannot be left half valid.
+	// the wizard. Rotating one token therefore costs the remaining screens and
+	// one Activate, which is the price of having exactly one path: a
+	// configuration re-confirmed end to end cannot be left half valid.
 	//
 	// Every step stays reachable from the rail on the way through. The data
 	// behind each one is already valid, so the rail is navigation here rather
 	// than a gate.
 	_start_edit() {
-		this.reached = SETUP_STEPS.length - 1;
+		this.reached = LAST_WIZARD_STEP;
 		this.cur = SETUP_STEPS.findIndex((step) => step.key === "connect");
 		this._focus = null;
 		this._render();
@@ -294,7 +304,7 @@ class TaxJarSetup {
 		this.$root.find(".ts-next").toggleClass("ts-next-gated", blocked);
 	}
 
-	// Activation stays on this step rather than routing to TaxJar Settings: the
+	// Activation stays on this page rather than routing to TaxJar Settings: the
 	// form is one of several places the user might want to go next, and picking
 	// one for them lands most of them somewhere they did not ask to be. No
 	// toast either - the screen itself is the confirmation.
@@ -302,11 +312,21 @@ class TaxJarSetup {
 	// It re-reads state instead of drawing the sealed screen directly, because
 	// setup_complete is what every part of this page now branches on. One read
 	// after the write keeps the screen and the flag telling the same story.
+	//
+	// The move to the summary waits on that read. If the flag did not land, the
+	// user stays on the last step with the Activate button, rather than sitting
+	// on a summary that claims a setup the server has not recorded.
 	_finish() {
 		const $btn = this.$root.find(".ts-next").prop("disabled", true);
 		this._call("finish_setup", {})
 			.then(() => this._reload_state())
-			.then(() => this._render())
+			.then(() => {
+				if (this.state && this.state.setup_complete) {
+					this.reached = LAST_WIZARD_STEP;
+					this.cur = SUMMARY_STEP;
+				}
+				this._render();
+			})
 			.finally(() => $btn.prop("disabled", false));
 	}
 
@@ -320,7 +340,7 @@ class TaxJarSetup {
 		//
 		// Two chrome states. The wizard shows the rail and the footer, whether
 		// this is a first run or a re-walk - they are the same walk. The sealed
-		// review page hides both; its one action sits beside the title instead,
+		// summary hides both; its one action sits beside the title instead,
 		// where the design puts it, rather than in the desk's own action slot.
 		const sealed = this._is_sealed();
 		this.$root.find(".ts-head").toggleClass("hide", sealed);
@@ -332,7 +352,7 @@ class TaxJarSetup {
 
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
 
-		const nextLabel = this.cur === SETUP_STEPS.length - 1
+		const nextLabel = this.cur === LAST_WIZARD_STEP
 			? __("Activate")
 			: (step.nextLabel || __("Save & continue"));
 		this.$root.find(".ts-next .es-button__label").text(nextLabel);
@@ -341,7 +361,7 @@ class TaxJarSetup {
 
 		// Bar fills up to and including the current step; the caption row
 		// below is pure navigation, clickable once a step's been reached.
-		this.progress.set_value(((this.cur + 1) / SETUP_STEPS.length) * 100);
+		this.progress.set_value((Math.min(this.cur + 1, WIZARD_STEPS.length) / WIZARD_STEPS.length) * 100);
 		this.$steps.find(".ts-step-btn").each((i, el) => {
 			const $el = $(el);
 			$el.toggleClass("filled", i <= this.cur).toggleClass("active", i === this.cur);
@@ -352,13 +372,12 @@ class TaxJarSetup {
 		this[`_render_${step.key}`]();
 	}
 
-	// Sealed once setup is complete and the user is standing on the review step.
-	// A re-walk passes back through here on its way out: the per-step saves have
-	// already landed, so arriving is the whole of finishing - there is nothing
-	// left to press.
+	// Sealed once setup is complete and the user is standing on the summary.
+	// Both ways in check the flag first - _land() on arrival and _finish() after
+	// activation - so the two always agree.
 	_is_sealed() {
 		return (
-			SETUP_STEPS[this.cur].key === "review"
+			this.cur === SUMMARY_STEP
 			&& !!(this.state && this.state.setup_complete)
 		);
 	}

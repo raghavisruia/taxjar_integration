@@ -13288,9 +13288,45 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 	def test_a_finished_setup_lands_on_the_summary(self):
 		land = self._fn("_land() {")
 		self.assertIn("setup_complete", land)
-		self.assertIn("this.cur = SETUP_STEPS.length - 1", land)
+		self.assertIn("this.cur = SUMMARY_STEP", land)
 		# Every step reachable, so the rail reads as navigation, not a gate.
-		self.assertIn("this.reached = SETUP_STEPS.length - 1", land)
+		self.assertIn("this.reached = LAST_WIZARD_STEP", land)
+
+	def test_the_summary_is_not_a_step_in_the_walk(self):
+		"""The Review screen showed the same four cards the summary shows, so
+		Activate took the user from one copy of the record to another. The walk
+		now ends on the last wizard step, and Activate lands on the summary."""
+		js = self._js()
+		self.assertIn("const SUMMARY_STEP = SETUP_STEPS.length - 1;", js)
+		self.assertIn("const WIZARD_STEPS = SETUP_STEPS.slice(0, SUMMARY_STEP);", js)
+		# The rail, the progress bar and Activate all count the wizard steps.
+		self.assertIn("interval_count: WIZARD_STEPS.length", js)
+		self.assertIn("this.$steps.html(WIZARD_STEPS.map", js)
+		render = self._fn("_render() {")
+		self.assertIn("const nextLabel = this.cur === LAST_WIZARD_STEP", render)
+		# No caption for it, so the rail cannot navigate to it either.
+		steps = js.split("const SETUP_STEPS = [")[1].split("];")[0]
+		self.assertNotIn('label: __("Review")', steps)
+		go = self._fn("_go(i) {")
+		self.assertIn("i >= WIZARD_STEPS.length", go)
+
+	def test_the_last_step_activates_instead_of_advancing(self):
+		"""One button ends the walk. It still runs that step's save first, so a
+		last step that holds fields cannot activate without storing them."""
+		on_next = self._fn("_on_next() {")
+		self.assertIn("this.cur === LAST_WIZARD_STEP ? this._finish() : this._advance()", on_next)
+		self.assertIn("Promise.resolve(saver.call(this)).then((ok) => { if (ok) done(); });", on_next)
+		self.assertNotIn('step.key === "review"', on_next)
+
+	def test_activation_moves_to_the_summary_only_once_the_flag_lands(self):
+		"""finish_setup() runs the doctype's validate(), so it can refuse. The
+		user then stays on the last step with Activate, rather than reading a
+		summary that claims a setup the server has not recorded."""
+		finish = self._fn("_finish() {")
+		self.assertIn("finish_setup", finish)
+		self.assertIn("this._reload_state()", finish)
+		self.assertIn("if (this.state && this.state.setup_complete) {", finish)
+		self.assertIn("this.cur = SUMMARY_STEP;", finish)
 
 	def test_landing_runs_on_arrival_only(self):
 		"""_load_state() also runs mid-edit. Moving the user then would throw
@@ -13315,7 +13351,7 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		edit = self._fn("_start_edit() {")
 		self.assertIn('SETUP_STEPS.findIndex((step) => step.key === "connect")', edit)
 		# Every step reachable, so the rail is navigation on the way through.
-		self.assertIn("this.reached = SETUP_STEPS.length - 1", edit)
+		self.assertIn("this.reached = LAST_WIZARD_STEP", edit)
 
 	def test_there_is_no_per_step_edit_left(self):
 		"""The review page carries one action. A pencil per card would promise a
@@ -13350,9 +13386,9 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		self.assertNotIn('__("Cancel")', js)
 		self.assertNotIn('__("Back to configuration")', js)
 
-	def test_arriving_at_review_is_the_whole_of_finishing(self):
-		"""The per-step saves have already landed, so a re-walk that reaches
-		Review has nothing left to press."""
+	def test_the_summary_is_sealed_by_the_flag_not_by_a_mode(self):
+		"""The summary is the one screen with no rail and no footer. What seals
+		it is setup_complete, not an edit mode the page keeps on the side."""
 		sealed = self._fn("_is_sealed() {")
 		self.assertIn("setup_complete", sealed)
 		self.assertNotIn("this.editing", sealed)
@@ -13558,7 +13594,10 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		js = open(os.path.join(os.path.dirname(__file__), "taxjar_settings.js")).read()
 		intro = js.split("function _set_setup_intro(frm) {")[1].split("\n}\n")[0]
 		self.assertIn("frm.doc.setup_complete", intro)
-		self.assertIn('__("Edit configuration")', intro)
+		# The link opens the summary, so it offers a read. The button on that
+		# screen is what offers the edit.
+		self.assertIn('__("Review configuration")', intro)
+		self.assertNotIn('__("Edit configuration")', intro)
 		self.assertIn('__("Go to guided setup experience")', intro)
 		self.assertIn('"green"', intro)
 		self.assertIn('"blue"', intro)
@@ -13568,7 +13607,8 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		html = install.GUIDED_SETUP_ALERT_HTML
 		self.assertIn("Configure TaxJar Integration", html)
 		self.assertIn("TaxJar Integration is successfully configured", html)
-		self.assertIn("Edit configuration", html)
+		# Same link and same word as the settings form's own banner.
+		self.assertIn("Review configuration", html)
 
 	def test_workspace_banner_defaults_to_the_pending_state(self):
 		"""The script may never run - an old browser, a failed call. The state

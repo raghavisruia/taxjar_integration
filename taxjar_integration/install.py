@@ -143,7 +143,7 @@ GUIDED_SETUP_ALERT_HTML = """
 		</div>
 		<div style="font-size: 13px; color: var(--ink-gray-6); margin-top: 2px;">
 			<a href="/app/taxjar-setup" style="color: var(--ink-green-7); font-weight: 500;">
-				Edit configuration &rarr;
+				Review configuration &rarr;
 			</a>
 		</div>
 	</div>

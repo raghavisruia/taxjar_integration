@@ -164,7 +164,7 @@
    which is a "last-child" of its own wrapper) and bold only that one
    inconsistently - these two rules must stay scoped to the row's own direct
    label/value spans. */
-.taxjar-setup .ts-kv > span:first-child { color: var(--text-muted); }
+.taxjar-setup .ts-kv > span:first-child { color: var(--text-muted); font-weight: 600; }
 .taxjar-setup .ts-kv > span:last-child { font-weight: 600; }
 .taxjar-setup .ts-kv > span:last-child.ts-kv-plain { font-weight: 400; }
 /* Features rows are keyed by company, not by a field label, so the emphasis
