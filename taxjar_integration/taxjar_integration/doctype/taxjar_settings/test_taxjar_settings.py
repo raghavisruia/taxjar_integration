@@ -3887,6 +3887,114 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		clear_calls = [c for c in mock_set.call_args_list if len(c[0]) >= 4 and c[0][2] == "taxjar_customer_id" and c[0][3] == ""]
 		self.assertEqual(len(clear_calls), 0)
 
+	def _patched_sync(self, customer_doc, mock_client):
+		"""The five patches every sync test in this class shares."""
+		return (
+			patch("taxjar_integration.taxjar_integration.taxjar_integration.company_scope", return_value=_files_scope(True)),
+			patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=mock_client),
+			patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_doc", return_value=customer_doc),
+			patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"),
+			patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.set_value"),
+		)
+
+	def test_create_adopts_a_customer_taxjar_already_holds(self):
+		"""A TaxJar account outlives the site that filled it. After a re-install,
+		a restored backup, or on a second site sharing the token, the local
+		taxjar_customer_id is empty - so the sync sends a create for an id TaxJar
+		already holds, and TaxJar answers 422. The customer is updated instead of
+		being left at Failed for good."""
+		import taxjar.exceptions
+
+		customer_doc = self._make_customer_doc(customer_id="")
+		mock_client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 422, "detail": "Something could not be processed"}
+		mock_client.create_customer.side_effect = err
+		mock_client.show_customer.return_value = MagicMock()
+		mock_client.update_customer.return_value = MagicMock()
+
+		p1, p2, p3, p4, p5 = self._patched_sync(customer_doc, mock_client)
+		with p1, p2, p3, p4, p5, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_client.show_customer.assert_called_once_with("CUST-001")
+		mock_client.update_customer.assert_called_once()
+		self.assertEqual(mock_client.update_customer.call_args[0][0], "CUST-001")
+		mock_status.assert_called_once_with("CUST-001", "Synced")
+
+	def test_create_reports_the_original_error_when_the_id_is_free(self):
+		"""TaxJar answers 422 for a bad payload too. The id is free, so the
+		rejection is about the request itself and has to reach the user rather
+		than be re-sent as an update."""
+		import taxjar.exceptions
+
+		customer_doc = self._make_customer_doc(customer_id="")
+		mock_client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 422, "detail": "exemption_type is invalid"}
+		mock_client.create_customer.side_effect = err
+
+		missing = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		missing.full_response = {"status_code": 404}
+		mock_client.show_customer.side_effect = missing
+
+		p1, p2, p3, p4, p5 = self._patched_sync(customer_doc, mock_client)
+		with p1, p2, p3, p4, p5, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_client.update_customer.assert_not_called()
+		self.assertEqual(mock_status.call_args[0][1], "Failed")
+		self.assertIn("Exemption Type is invalid", mock_status.call_args[1]["error"])
+
+	def test_create_does_not_probe_taxjar_on_any_other_status(self):
+		"""A 5xx says nothing about whether the id exists, so the id is never
+		probed and the customer stays retryable on the cron."""
+		import taxjar.exceptions
+
+		customer_doc = self._make_customer_doc(customer_id="")
+		mock_client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 500, "detail": "Server error"}
+		mock_client.create_customer.side_effect = err
+
+		p1, p2, p3, p4, p5 = self._patched_sync(customer_doc, mock_client)
+		with p1, p2, p3, p4, p5, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_client.show_customer.assert_not_called()
+		mock_client.update_customer.assert_not_called()
+		self.assertEqual(mock_status.call_args[0][1], "Failed")
+
+	def test_adopted_update_never_bounces_back_into_create(self):
+		"""The adopted update runs with allow_create off. Without it, a 404 on
+		that update would send the same request back into create, which is the
+		call that just failed."""
+		import taxjar.exceptions
+
+		customer_doc = self._make_customer_doc(customer_id="")
+		mock_client = MagicMock()
+
+		create_err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		create_err.full_response = {"status_code": 422, "detail": "Something could not be processed"}
+		mock_client.create_customer.side_effect = create_err
+
+		update_err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		update_err.full_response = {"status_code": 404}
+		mock_client.update_customer.side_effect = update_err
+		mock_client.show_customer.return_value = MagicMock()
+
+		p1, p2, p3, p4, p5 = self._patched_sync(customer_doc, mock_client)
+		with p1, p2, p3, p4, p5, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		mock_client.create_customer.assert_called_once()
+		mock_client.update_customer.assert_called_once()
+		self.assertEqual(mock_status.call_args[0][1], "Failed")
+
 	def test_skips_when_no_client(self):
 		"""Should log skip AND flip the customer to Failed - a customer queued
 		by bulk_sync_to_taxjar (or on_customer_update) must not be left stuck
@@ -15384,6 +15492,20 @@ class TestClassifyTaxJarError(UnitTestCase):
 		self.assertFalse(info["retryable"])
 		self.assertIn("Transaction ID already exists in TaxJar", info["message"])
 		self.assertNotIn("tranx", info["message"])
+
+	def test_generic_detail_is_not_repeated_after_the_headline(self):
+		"""TaxJar's own 422 detail restates the status line. Kept, it produced
+		"TaxJar could not process the request: Something could not be
+		processed." - two sentences carrying one fact between them."""
+		info = classify_taxjar_error(_response_error(422, "Something could not be processed"))
+		self.assertEqual(
+			info["message"],
+			"TaxJar could not process the request. Open the TaxJar API Log for the request TaxJar rejected.",
+		)
+
+	def test_a_real_422_detail_still_reaches_the_user(self):
+		info = classify_taxjar_error(_response_error(422, "exemption_type is invalid"))
+		self.assertIn("Exemption Type is invalid", info["message"])
 
 	def test_exemption_conflict_says_what_to_do(self):
 		info = classify_taxjar_error(_response_error(

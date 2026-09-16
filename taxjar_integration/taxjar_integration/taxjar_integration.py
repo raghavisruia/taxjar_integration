@@ -2714,7 +2714,14 @@ TAXJAR_STATUS_MESSAGES = {
 # and _set_sync_status() adds the retry sentence for them anyway.
 _STATUS_HINTS = {
 	403: "Check that the TaxJar plan on this account covers this API.",
+	422: "Open the TaxJar API Log for the request TaxJar rejected.",
 }
+
+# TaxJar answers some 422s with a detail that only restates the status line.
+# Kept after our own headline it reads "TaxJar could not process the request:
+# Something could not be processed." - two sentences, no information. Treated
+# as no detail at all, which leaves the headline and the hint above.
+_EMPTY_DETAILS = frozenset({"something could not be processed"})
 
 # Statuses whose own detail never adds anything a user can act on, so the whole
 # message is ours.
@@ -2909,6 +2916,9 @@ def classify_taxjar_error(err):
 def _describe_response_error(status, detail):
 	"""Turn a TaxJar error body into one readable, actionable sentence."""
 	detail = (detail or "").strip()
+
+	if detail.lower().rstrip(".") in _EMPTY_DETAILS:
+		detail = ""
 
 	for needles, message in _DETAIL_OVERRIDES:
 		if any(needle in detail.lower() for needle in needles):
@@ -3115,11 +3125,17 @@ def sync_customer_to_taxjar(customer_name, company=None):
 
 
 def _create_taxjar_customer(client, customer_data, ctx):
-	"""POST a new customer to TaxJar. Returns the response or None on failure."""
+	"""POST a new customer to TaxJar. Adopts the customer on a duplicate id.
+
+	Returns the response, or None on failure.
+	"""
 	log_taxjar_call(action="create_customer", status="request", payload=customer_data, context=ctx)
 	try:
 		response = client.create_customer(customer_data)
 	except taxjar.exceptions.TaxJarResponseError as err:
+		adopted = _adopt_existing_taxjar_customer(client, err, customer_data, ctx)
+		if adopted is not None:
+			return adopted
 		# Status is written against ctx["name"], the Customer docname ("David
 		# Fox"). customer_data["customer_id"] is the URL-safe TaxJar id
 		# ("David-Fox"), which matches no row - writing status against that
@@ -3130,14 +3146,73 @@ def _create_taxjar_customer(client, customer_data, ctx):
 	return response
 
 
-def _update_taxjar_customer(client, customer_id, customer_data, ctx):
-	"""PUT an existing customer to TaxJar. Falls back to create on 404."""
+def _adopt_existing_taxjar_customer(client, err, customer_data, ctx):
+	"""Turn a rejected create into an update when TaxJar already holds the id.
+
+	sync_customer_to_taxjar() picks create or update from the local
+	taxjar_customer_id field, but a TaxJar account outlives the site that
+	filled it: a re-install, a restored backup, or a second site on the same
+	API token all start with that field empty. The customer is then created a
+	second time under an id TaxJar already holds, and TaxJar answers 422 with
+	"Something could not be processed" - which names neither the cause nor a
+	way out, and leaves the customer stuck at Failed for good.
+
+	Only 422 is treated this way. Every other status carries its own meaning,
+	and a 5xx or a connection failure says nothing about whether the id exists.
+
+	The extra GET costs one call, on the failure path only. It also keeps a
+	real payload rejection honest: TaxJar answers 422 for a bad exemption type
+	too, and that one still has to be reported rather than re-sent as an
+	update.
+
+	Returns the update response, or None to let the caller report the original
+	create failure.
+	"""
+	full = getattr(err, "full_response", {}) or {}
+	if cint(full.get("status_code")) != 422:
+		return None
+
+	customer_id = customer_data["customer_id"]
+	if not _taxjar_customer_exists(client, customer_id):
+		return None
+
+	log_taxjar_call(
+		action="create_customer",
+		status="error",
+		payload=customer_data,
+		error=f"Customer ID {customer_id} already exists in TaxJar — updating it instead",
+		context=ctx,
+	)
+	# allow_create=False: this path exists because the create already failed.
+	# Letting a 404 send it back into _create_taxjar_customer would bounce the
+	# same request between the two functions.
+	return _update_taxjar_customer(client, customer_id, customer_data, ctx, allow_create=False)
+
+
+def _taxjar_customer_exists(client, customer_id):
+	"""Ask TaxJar whether it already holds this customer id.
+
+	Anything other than a clean answer reads as "no". The caller then reports
+	the failure it already holds, which is the safer story to tell.
+	"""
+	try:
+		return bool(client.show_customer(customer_id))
+	except Exception:
+		return False
+
+
+def _update_taxjar_customer(client, customer_id, customer_data, ctx, allow_create=True):
+	"""PUT an existing customer to TaxJar. Falls back to create on 404.
+
+	allow_create is off for the one caller that reaches this after a create of
+	its own already failed - see _adopt_existing_taxjar_customer.
+	"""
 	log_taxjar_call(action="update_customer", status="request", payload=customer_data, context=ctx)
 	try:
 		response = client.update_customer(customer_id, customer_data)
 	except taxjar.exceptions.TaxJarResponseError as err:
 		full = getattr(err, "full_response", {}) or {}
-		if full.get("status_code") == 404:
+		if full.get("status_code") == 404 and allow_create:
 			log_taxjar_call(action="update_customer", status="error", payload=customer_data, error="404 — falling back to create", context=ctx)
 			return _create_taxjar_customer(client, customer_data, ctx)
 		_record_customer_sync_failure(err, "update_customer", customer_data, ctx, ctx["name"])
