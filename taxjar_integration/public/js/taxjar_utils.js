@@ -2,6 +2,16 @@ if (!window.taxjar_integration) {
 	window.taxjar_integration = {};
 }
 
+// The guided setup page, opened on the card that holds the setting these two
+// links exist because of. Both appear only when a company has Calculate Sales
+// Tax or File Transactions switched off, and Features is the step that owns
+// both flags - so the link says which card to open rather than dropping the
+// user on the summary to find it.
+//
+// The error-message links elsewhere in this file stay unfocused on purpose:
+// their cause varies per message, so naming one card would be a guess.
+const TAXJAR_SETUP_FEATURES_URL = "/app/taxjar-setup?focus=features";
+
 // ── Shared geography constants ──
 // Single source of truth for US state + Canadian province codes used across the
 // Address and Customer forms and the TaxJar Customers configuration page.
@@ -893,7 +903,7 @@ taxjar_integration._render_empty_status = function (frm, wrapper) {
 						${__("Sales tax calculation is turned off for {0}, so there is no tax status to show.", [
 							company,
 						])}
-						<a href="/app/taxjar-setup">${__("Configure TaxJar")} \u2192</a>
+						<a href="${TAXJAR_SETUP_FEATURES_URL}">${__("Configure TaxJar")} \u2192</a>
 					</p>
 				`);
 				return;
@@ -1323,7 +1333,7 @@ taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
 				<div style="display: flex; align-items: center; gap: 4px;">
 					${taxjar_integration._logo_html()}
 					<a
-						href="/app/taxjar-setup"
+						href="${TAXJAR_SETUP_FEATURES_URL}"
 						class="taxjar-not-enabled-link text-muted"
 						style="display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: inherit;"
 					>${__("Configure TaxJar")}${icon}</a>
@@ -1493,11 +1503,16 @@ taxjar_integration.render_not_configured_panel = function ($container) {
 };
 
 // ── Nexus & Product Tax Category summary ──
-// Both lists are rendered in two places - the TaxJar Settings form's "Nexus &
-// Product Category" tab and the standalone page of the same name
-// (/app/taxjar-nexus) - off the same data and with the same markup, so the
-// renderers live here rather than in either caller. Each takes the wrapper to
-// draw into plus the data, so neither has to know about a form or a page.
+// The tables the TaxJar Settings form's "Nexus & Product Category" tab draws.
+// They live here rather than in the form because the form only hands them a
+// wrapper and its data, so they never have to know about a form at all.
+//
+// The standalone page of the same name (/app/taxjar-nexus) drew these too,
+// until it took on a card layout of its own. Every card there carries its own
+// title, subtitle, "Synced ..." caption and refresh control, all four of which
+// the form already supplies from its section headers and labelled buttons - so
+// one renderer can no longer serve both. format_last_synced() below is still
+// shared, because both places show the same caption.
 
 // str_to_user() converts system tz -> user tz via moment-timezone and just
 // formats it - no comparison against the browser's local clock, so it can't
@@ -1609,9 +1624,9 @@ taxjar_integration.render_nexus_cards = function ($wrapper, rows) {
 
 // `summary` is get_product_tax_category_summary()'s {count, last_updated} -
 // the categories are not company-scoped, so there is nothing to group and the
-// count itself is the whole summary. `show_last_updated` is off for a caller
-// whose own section header already carries that caption (the standalone page);
-// on the settings form the box is the only place it can go.
+// count itself is the whole summary. `show_last_updated` stays an option for a
+// caller whose own section header already carries that caption; on the settings
+// form, the only caller left, the box is the only place it can go.
 taxjar_integration.render_product_tax_category_summary = function ($wrapper, summary, options) {
 	const count = (summary || {}).count || 0;
 	const show_last_updated = (options || {}).show_last_updated !== false;

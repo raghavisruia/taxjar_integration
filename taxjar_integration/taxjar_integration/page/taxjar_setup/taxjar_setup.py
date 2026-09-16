@@ -114,6 +114,19 @@ def get_setup_state():
 	}
 
 
+@frappe.whitelist()
+def get_setup_status():
+	"""Whether the guided setup has been finished.
+
+	Deliberately lighter than get_setup_state(), and deliberately not guarded on
+	TaxJar Settings: the workspace banner renders for everyone who can open the
+	workspace, including users who cannot read that doctype, and whether setup
+	has run is not a secret. Everything that is stays in get_setup_state(),
+	which does guard.
+	"""
+	return {"setup_complete": bool(frappe.db.get_single_value(SETTINGS, "setup_complete"))}
+
+
 @frappe.whitelist(methods=["POST"])
 def test_connection(company: str, token: str | None = None, mode: str | None = None):
 	"""Verify a TaxJar token against a lightweight endpoint, without persisting.
@@ -171,12 +184,36 @@ def save_connection(
 	log_retention_days: int | str | None = None,
 ):
 	"""Persist API mode + per-company tokens. A blank token in the payload means
-	"keep the existing one" (the masked field wasn't retyped), not "clear it"."""
+	"keep the existing one" (the masked field wasn't retyped), not "clear it".
+
+	Two changes here leave the stored nexus regions belonging to something else,
+	and both are detected below so the stamp that gates the auto-fetch can be
+	cleared:
+
+	* a new API mode, because _api_mode() then reads the other token field and
+	  the regions on file were fetched from the other TaxJar account;
+	* a company that had no credential before, because the nexus sync iterates
+	  company_config and has therefore never seen it.
+
+	Neither is reported to the client. The guided setup walks every step after
+	any edit, so it has no routing decision to make - clearing the stamp is the
+	whole of what these two facts are for.
+	"""
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
 	credentials = frappe.parse_json(credentials) if isinstance(credentials, str) else (credentials or [])
 
 	settings = frappe.get_single(SETTINGS)
+
+	# Measured before anything is written. With no stored credential this is the
+	# first Connect save, and there is nothing downstream to invalidate - every
+	# company is new only in the sense that the wizard has not run yet.
+	known = {cred.company for cred in (settings.table_hvjw or []) if cred.company}
+	mode_changed = bool(known) and settings.api_mode != mode
+	company_added = bool(known) and any(
+		row.get("company") and row.get("company") not in known for row in credentials
+	)
+
 	settings.api_mode = mode
 	if enable_taxjar_logging is not None:
 		settings.enable_taxjar_logging = cint(enable_taxjar_logging)
@@ -196,6 +233,14 @@ def save_connection(
 			cred = settings.append("table_hvjw", {"company": company})
 		if token:
 			cred.set(token_field, token)
+
+	# Both changes leave `nexus` holding regions that belong to a TaxJar account,
+	# or a company set, that no longer matches. Clearing the stamp re-arms
+	# on_update's own auto-fetch, which is gated on nexus_last_synced being empty
+	# - without this it never fires again after the very first sync, and a mode
+	# switch keeps the old account's regions for ever.
+	if mode_changed or company_added:
+		settings.nexus_last_synced = None
 
 	settings.save()
 	return {"ok": True}
@@ -552,14 +597,19 @@ def save_features(company_flags: list | str | None = None):
 
 @frappe.whitelist(methods=["POST"])
 def remove_company(company: str):
-	"""Drop a company from the guided setup entirely — its credential and (if
-	any) its company_config row — so it disappears from every later step too
-	rather than leaving an orphaned config with no credential behind it."""
+	"""Drop a company from the guided setup entirely — its credential, its
+	company_config row and its nexus regions — so it disappears from every later
+	step too rather than leaving an orphaned config with no credential behind
+	it."""
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
 	settings = frappe.get_single(SETTINGS)
 	settings.set("table_hvjw", [c for c in (settings.table_hvjw or []) if c.company != company])
 	settings.set("company_config", [c for c in (settings.company_config or []) if c.company != company])
+	# `nexus` is keyed by company too. Left behind, its rows kept reporting
+	# regions for a company the wizard no longer lists anywhere else, because
+	# nothing re-reads that table until the next full sync.
+	settings.set("nexus", [n for n in (settings.nexus or []) if n.company != company])
 	settings.save()
 
 	return {"ok": True}

@@ -11024,7 +11024,9 @@ class TestTaxBreakdownJS(UnitTestCase):
 		self.assertIn("if (frm.is_new() || !frm.doc.company) {", fn)
 		self.assertIn(".scope(frm.doc.company)", fn)
 		self.assertIn("Sales tax calculation is turned off for {0}", fn)
-		self.assertIn('<a href="/app/taxjar-setup">', fn)
+		# Focused, not bare: this branch renders only because the company has
+		# Calculate Sales Tax off, and Features is the step that owns that flag.
+		self.assertIn('<a href="${TAXJAR_SETUP_FEATURES_URL}">', fn)
 		# Blank while the answer is in flight, rather than a guess that
 		# corrects itself a moment later.
 		self.assertIn("wrapper.empty();", fn)
@@ -11264,7 +11266,9 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 	def test_not_enabled_link_text_and_href(self):
 		fn = self._not_enabled_fn()
 		self.assertIn("Configure TaxJar", fn)
-		self.assertIn('href="/app/taxjar-setup"', fn)
+		# Focused, not bare: this link appears only because the company has
+		# File Transactions off, and Features is the step that owns that flag.
+		self.assertIn('href="${TAXJAR_SETUP_FEATURES_URL}"', fn)
 
 	def test_not_enabled_link_reads_like_the_status_label_it_replaces(self):
 		"""Two states of one sidebar row, so they carry the same class and
@@ -13002,6 +13006,447 @@ class TestGuidedSetupSchemaAndEntry(UnitTestCase):
 			self.assertIn(key, js)
 
 
+
+# ── Change impact: what an edit invalidates ─────────────────────────────────
+
+
+class TestGuidedSetupChangeImpact(UnitTestCase):
+	"""save_connection() detects the two changes that leave the stored nexus
+	regions belonging to something else, and clears the stamp that gates the
+	auto-fetch. Measured against the stored values, on the server."""
+
+	def _cred(self, company):
+		"""A credential row, not a plain dict: save_connection() calls cred.set()
+		on it, which is a Document method rather than a mapping one."""
+		cred = MagicMock()
+		cred.company = company
+		cred.name = f"cred-{company}"
+		return cred
+
+	def _settings(self, mode="Live", companies=("Frappe Tech",)):
+		s = MagicMock()
+		s.api_mode = mode
+		s.nexus_last_synced = "2026-09-01 00:00:00"
+		s.table_hvjw = [self._cred(c) for c in companies]
+		s.company_config = []
+		s.nexus = []
+		return s
+
+	def _save(self, settings, **kwargs):
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import save_connection
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=settings):
+			return save_connection(**kwargs)
+
+	def test_mode_change_is_reported_and_clears_the_nexus_stamp(self):
+		"""_api_mode() then reads the other token field, so the regions on file
+		came from the other TaxJar account. on_update's own auto-fetch is gated
+		on nexus_last_synced being empty - without clearing it, a mode switch
+		keeps the old account's regions for ever."""
+		s = self._settings(mode="Live")
+		self._save(s, mode="Sandbox", credentials=[{"company": "Frappe Tech", "token": "t"}])
+
+		self.assertIsNone(s.nexus_last_synced)
+
+	def test_a_new_company_is_reported_and_clears_the_nexus_stamp(self):
+		"""A new company holds a credential and no company_config row, and the
+		nexus sync only iterates company_config - so it has never been seen."""
+		s = self._settings(mode="Live")
+		self._save(
+			s, mode="Live",
+			credentials=[{"company": "Frappe Tech"}, {"company": "Acme Inc"}],
+		)
+
+		self.assertIsNone(s.nexus_last_synced)
+
+	def test_first_connect_save_invalidates_nothing(self):
+		"""With no stored credential there is nothing downstream yet. Every
+		company is new only in the sense that the wizard has not run."""
+		s = self._settings(companies=())
+		self._save(s, mode="Live", credentials=[{"company": "Frappe Tech", "token": "t"}])
+
+		self.assertEqual(s.nexus_last_synced, "2026-09-01 00:00:00")
+
+	def test_rotating_a_token_invalidates_nothing(self):
+		"""Same mode, same company set. get_client() picks the new token up on
+		its own, so no later step has to run again."""
+		s = self._settings(mode="Live")
+		self._save(s, mode="Live", credentials=[{"company": "Frappe Tech", "token": "new"}])
+
+		self.assertEqual(s.nexus_last_synced, "2026-09-01 00:00:00")
+
+	def test_remove_company_drops_its_nexus_rows(self):
+		"""`nexus` is keyed by company too. Left behind, its rows kept reporting
+		regions for a company the wizard no longer lists anywhere else."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import remove_company
+		s = MagicMock()
+		s.table_hvjw = [frappe._dict(company="Frappe Tech"), frappe._dict(company="Acme Inc")]
+		s.company_config = [frappe._dict(company="Frappe Tech"), frappe._dict(company="Acme Inc")]
+		s.nexus = [
+			frappe._dict(company="Frappe Tech", region="California"),
+			frappe._dict(company="Acme Inc", region="Texas"),
+		]
+		written = {}
+		s.set.side_effect = lambda field, rows: written.__setitem__(field, rows)
+
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".frappe.get_single", return_value=s):
+			remove_company("Frappe Tech")
+
+		self.assertEqual([r.company for r in written["nexus"]], ["Acme Inc"])
+		self.assertEqual([r.company for r in written["table_hvjw"]], ["Acme Inc"])
+		self.assertEqual([r.company for r in written["company_config"]], ["Acme Inc"])
+
+	def test_setup_status_reports_the_flag_without_a_permission_check(self):
+		"""The workspace banner renders for everyone who can open the workspace,
+		including users who cannot read TaxJar Settings. Whether setup has run is
+		not a secret; everything that is stays in get_setup_state()."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import get_setup_status
+		with patch(_SETUP_MODULE + ".frappe.db.get_single_value", return_value=1) as get_value:
+			self.assertEqual(get_setup_status(), {"setup_complete": True})
+		get_value.assert_called_once_with("TaxJar Settings", "setup_complete")
+
+
+# ── The summary page, edit mode, and the banners that follow the flag ───────
+
+
+class TestGuidedSetupEditFlowJS(UnitTestCase):
+	"""String/structure assertions on the page JS, the same pattern the other
+	page tests in this file use - there is no JS runtime in this suite."""
+
+	def _js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"))
+		return open(path).read()
+
+	def _fn(self, signature):
+		return self._js().split(signature)[1].split("\n\t}\n")[0]
+
+	def _setup_css(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"))
+		return open(path).read()
+
+	def test_a_finished_setup_lands_on_the_summary(self):
+		land = self._fn("_land() {")
+		self.assertIn("setup_complete", land)
+		self.assertIn("this.cur = SETUP_STEPS.length - 1", land)
+		# Every step reachable, so the rail reads as navigation, not a gate.
+		self.assertIn("this.reached = SETUP_STEPS.length - 1", land)
+
+	def test_landing_runs_on_arrival_only(self):
+		"""_load_state() also runs mid-edit. Moving the user then would throw
+		away the step they opened."""
+		load = self._fn("_load_state() {")
+		self.assertIn("this._arriving", load)
+		self.assertIn("this._land()", load)
+
+	def test_focus_is_checked_against_the_known_cards(self):
+		arrive = self._fn("_on_arrive() {")
+		self.assertIn("CONFIG_CARDS.some((c) => c.key === key)", arrive)
+
+	def test_the_features_focus_alias_still_resolves(self):
+		"""The Features card merged into Ledgers & Features, and the invoice
+		sidebar links carrying focus=features are already out there."""
+		arrive = self._fn("_on_arrive() {")
+		self.assertIn('focus === "features" ? "ledgers" : focus', arrive)
+
+	def test_editing_starts_the_wizard_at_connect(self):
+		"""One button, and it restarts the flow. Connect rather than step 1:
+		Pre-requisites is a checklist of links to TaxJar with nothing to edit."""
+		edit = self._fn("_start_edit() {")
+		self.assertIn('SETUP_STEPS.findIndex((step) => step.key === "connect")', edit)
+		# Every step reachable, so the rail is navigation on the way through.
+		self.assertIn("this.reached = SETUP_STEPS.length - 1", edit)
+
+	def test_there_is_no_per_step_edit_left(self):
+		"""The review page carries one action. A pencil per card would promise a
+		per-card edit that the flow does not do."""
+		js = self._js()
+		for gone in ("_edit_step", "_after_edit", "_resume_from", "_exit_edit", "_connectImpact"):
+			self.assertNotIn(gone, js)
+
+	def test_the_edit_action_sits_beside_the_title(self):
+		"""In the header the design draws it in, not the desk's own action slot
+		- which renders solid, where this button is outlined. It is rendered
+		only for a sealed page, so a walking wizard never shows two actions."""
+		js = self._js()
+		self.assertNotIn("set_primary_action", js)
+		review = self._fn("_render_review() {")
+		self.assertIn("s.setup_complete", review)
+		self.assertIn('label: __("Edit configuration")', review)
+		self.assertIn('variant: "outline"', review)
+		self.assertIn('icon: "pencil"', review)
+		self.assertIn("this._start_edit()", review)
+
+	def test_a_re_walk_uses_the_same_chrome_as_a_first_run(self):
+		"""There is no separate edit mode, so no Cancel and no Save & close -
+		the rail and the footer read the same either way."""
+		render = self._fn("_render() {")
+		self.assertIn('__("Save & continue")', render)
+		self.assertIn('__("Activate")', render)
+		# Nowhere in the page, not merely absent from _render(): an edit-mode
+		# label left behind anywhere is a second flow waiting to be wired back up.
+		js = self._js()
+		self.assertNotIn('__("Save & close")', js)
+		self.assertNotIn('__("Cancel")', js)
+		self.assertNotIn('__("Back to configuration")', js)
+
+	def test_arriving_at_review_is_the_whole_of_finishing(self):
+		"""The per-step saves have already landed, so a re-walk that reaches
+		Review has nothing left to press."""
+		sealed = self._fn("_is_sealed() {")
+		self.assertIn("setup_complete", sealed)
+		self.assertNotIn("this.editing", sealed)
+
+	def test_every_card_is_open_and_carries_no_control(self):
+		"""The record is the page. Nothing to expand, nothing to operate."""
+		review = self._fn("_render_review() {")
+		self.assertIn("_card_body_", review)
+		for gone in ("ts-cfg-sum", "ts-cfg-edit", "ts-acc-chevron", "_cardOpen"):
+			self.assertNotIn(gone, review)
+
+	def test_nexus_shows_one_tag_and_hides_the_rest_behind_a_hover(self):
+		"""A company with economic nexus everywhere returns up to 46 regions, and
+		three of those would make this card longer than the rest of the page."""
+		body = self._fn("_card_body_nexus(s) {")
+		self.assertIn("const first = regions[0];", body)
+		self.assertIn("const hidden = regions.length - 1;", body)
+		# The name, not the code, and no pill around it. "Florida" is what
+		# somebody checking their registrations reads; FL is what the API
+		# returns, and it stays in the hover list beside each name.
+		self.assertIn("first.region || first.region_code", body)
+		self.assertNotIn("ts-tag", body)
+		self.assertIn('data-hover="regions"', body)
+		self.assertIn('__("+{0} {1}", [hidden, hidden === 1 ? __("region") : __("regions")])', body)
+
+	def test_hover_targets_are_reachable_without_a_pointer(self):
+		"""frappe.ui.hover_card opens on keyboard focus as well as hover, and
+		tabindex is what puts these two spans in the tab order at all. A CSS-only
+		tooltip would show nothing on touch and nothing to a keyboard."""
+		js = self._js()
+		self.assertIn("frappe.ui.hover_card(", js)
+		for body in ("_card_body_connect(s) {", "_card_body_nexus(s) {"):
+			self.assertIn('tabindex="0"', self._fn(body))
+
+	def test_company_names_run_on_one_line(self):
+		"""Two or three names fit a line. Stacking them made the card taller than
+		the row it came from, for nothing."""
+		fn = self._fn("_bind_hover_cards(s) {")
+		self.assertIn('.filter(Boolean).join(", ")', fn)
+		self.assertIn("content: () => companies", fn)
+
+	def test_regions_stay_one_per_line(self):
+		"""A company can hold up to 46, and a comma-run of "FL - Florida" that
+		long is unreadable. Built as an element rather than a string, since
+		hover_card renders a string as one run of text - and every line goes in
+		through .text(), so a region name cannot carry markup into the card."""
+		fn = self._fn("_hover_list(lines) {")
+		self.assertIn('$("<div></div>").text(line)', fn)
+		self.assertIn("this._hover_list(regions.map(", self._fn("_bind_hover_cards(s) {"))
+
+	def test_a_company_with_no_nexus_says_so(self):
+		"""A blank tag row reads as a card that failed to render."""
+		body = self._fn("_card_body_nexus(s) {")
+		self.assertIn('__("No regions registered")', body)
+
+	def test_the_record_reuses_the_page_own_card(self):
+		"""A summary of the configuration should not introduce a second kind of
+		card, and its headers should not read in a different voice from the ones
+		the user just walked past. .ts-card and .ts-card-h are the two the
+		Connect, Accounts and Features steps already use."""
+		review = self._fn("_render_review() {")
+		self.assertIn('<div class="ts-card-h"><b>${card.title}</b></div>', review)
+		self.assertIn("ts-card-b ts-card-rows", review)
+		self.assertIn("ts-cardgrid ts-cfggrid", review)
+
+		css = self._setup_css()
+		# The grid overrides the column rule only, the way .ts-nexusresult does.
+		grid = css.split(".taxjar-setup .ts-cfggrid {")[1].split("}")[0]
+		self.assertIn("grid-template-columns", grid)
+		self.assertNotIn("display: grid", grid)
+		# Both cards in a row take the height of the taller one, so every row
+		# closes on a single line rather than stepping down mid-block.
+		self.assertIn("align-items: stretch", grid)
+		# No second header style. The old uppercase/muted one is gone.
+		self.assertNotIn(".ts-cfg-h", css)
+		self.assertNotIn(".ts-cfg-b", css)
+
+	def test_review_titles_use_the_wizard_type_scale(self):
+		"""24px/700 is what .ts-title and .ts-nexustitle set. The page heading
+		should not read as a smaller class of thing than a step's."""
+		css = self._setup_css()
+		title = css.split(".taxjar-setup .ts-done-title {")[1].split("}")[0]
+		self.assertIn("font-size: 24px", title)
+		self.assertIn("font-weight: 700", title)
+		# Bold label at --text-md, its line underneath at --text-base muted -
+		# the pair .ts-togtext already sets on the Features step. The walkthrough
+		# row is the only place left that carries one; the heading stands alone.
+		desc = css.split(".taxjar-setup .ts-video-desc {")[1].split("}")[0]
+		self.assertIn("font-size: var(--text-base)", desc)
+		self.assertIn("font-size: var(--text-md)", css.split(".taxjar-setup .ts-video-title {")[1].split("}")[0])
+
+	def test_api_mode_is_reported_once_not_per_company(self):
+		"""It is a site setting. Repeating it under every company would invite
+		the reader to think it could differ between them."""
+		body = self._fn("_card_body_connect(s) {")
+		self.assertEqual(body.count('__("API Mode")'), 1)
+
+	def test_the_address_picker_offers_no_second_way_to_create_one(self):
+		"""The card already carries a New address button, which opens this step's
+		own dialog - it asks for the four fields TaxJar needs and links the
+		address to the company, where the dropdown's route opens a blank Address
+		form the user has to link by hand."""
+		js = self._js()
+		control = js.split('label: __("Company Address"), reqd: 1,')[1].split("},")[0]
+		self.assertIn("only_select: 1", control)
+
+	def test_a_verified_address_says_valid(self):
+		"""A bare tick beside the card's own pencil left the reader working out
+		which of the two was a status and which was an action."""
+		js = self._js()
+		fn = js.split("_render_address_action(entry) {")[1].split("\n\t}\n")[0]
+		self.assertIn('label: __("Valid")', fn)
+		self.assertIn('icon: "circle-check"', fn)
+		self.assertIn('theme: "green"', fn)
+
+	def test_the_connection_card_carries_no_token(self):
+		"""Which key is stored for a company is the Connect step's business.
+		This card answers the question the reader has: which account, how many
+		companies, and whether anything is being logged."""
+		body = self._fn("_card_body_connect(s) {")
+		self.assertNotIn("token_last4", body)
+		self.assertIn('__("API Configured for")', body)
+
+	def test_a_lone_company_is_named_rather_than_counted(self):
+		""""1 company" behind a hover makes the reader work for the only thing
+		the row could have said. Several names do not fit, so those collapse to
+		a count with the names behind it."""
+		body = self._fn("_card_body_connect(s) {")
+		self.assertIn("companies.length === 1", body)
+		self.assertIn("frappe.utils.escape_html(companies[0])", body)
+		self.assertIn('__("{0} companies", [companies.length])', body)
+		self.assertIn('data-hover="companies"', body)
+
+	def test_ledgers_and_features_share_one_block_per_company(self):
+		"""Two cards made the reader match a company name across both."""
+		body = self._fn("_card_body_ledgers(s) {")
+		self.assertIn('__("Tax Ledger")', body)
+		self.assertIn('__("Shipping Ledger")', body)
+		self.assertIn("_feature_chip(", body)
+
+	def test_a_switched_off_feature_says_so_in_its_label(self):
+		"""The same words under a grey dot read as "this one matters less",
+		which is a different claim from "this one is switched off"."""
+		body = self._fn("_card_body_ledgers(s) {")
+		self.assertIn('__("Sales tax"), __("Sales tax off")', body)
+		self.assertIn('__("Transaction sync"), __("Transaction sync off")', body)
+		chip = self._fn("_feature_chip(on_label, off_label, on) {")
+		# Green for on, gray for off, outlined in both states. Gray is the desk's
+		# inactive colour, so a gray badge reading "Sales tax" says the opposite
+		# of what it spells - the muted pair did exactly that. Outline keeps
+		# neither state a filled block of colour.
+		self.assertIn('theme: "green", variant: "outline"', chip)
+		self.assertIn('frappe.ui.badge.html({ label: off_label, variant: "outline" })', chip)
+		# Neither state is filled: subtle is the badge default, so an absent
+		# variant would silently be the filled one.
+		self.assertEqual(chip.count('variant: "outline"'), 2)
+
+	def test_the_address_card_prints_the_country(self):
+		"""The whole point of the address is where the sale ships from."""
+		body = self._fn("_card_body_address(s) {")
+		self.assertIn("a.country", body)
+		for field in ("a.address_line1", "a.city", "a.taxjar_state_code", "a.pincode"):
+			self.assertIn(field, body)
+
+	def test_the_focused_card_is_marked_and_scrolled_to(self):
+		"""Every card is open, so there is nothing left to expand."""
+		review = self._fn("_render_review() {")
+		self.assertIn("ts-cfg-focus", review)
+		self.assertIn("scrollIntoView", review)
+
+	def test_the_walkthrough_stays_a_click_to_play_thumbnail(self):
+		"""Nothing loads from youtube.com for someone who never presses play."""
+		header = self._fn("_done_header() {")
+		self.assertIn("SETUP_VIDEO_POSTER", header)
+		self.assertNotIn("youtube-nocookie.com", header)
+		play = self._fn("_play_setup_video() {")
+		self.assertIn("youtube-nocookie.com", play)
+		# No duration in the label: the video can be re-cut without this line
+		# going quietly wrong, and a wrong duration is worse than none.
+		self.assertIn('__("Walkthrough")', header)
+		self.assertNotIn("min", header.split('__("Walkthrough")')[1].split("</p>")[0])
+
+	def test_remedial_links_name_the_card_they_want_opened(self):
+		"""Both links appear only because a company has a feature flag off, and
+		Features is the step that owns both flags."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"))
+		utils = open(path).read()
+		self.assertIn('"/app/taxjar-setup?focus=features"', utils)
+		self.assertEqual(utils.count("TAXJAR_SETUP_FEATURES_URL"), 3)
+
+	def test_settings_form_intro_follows_the_flag(self):
+		import os
+		js = open(os.path.join(os.path.dirname(__file__), "taxjar_settings.js")).read()
+		intro = js.split("function _set_setup_intro(frm) {")[1].split("\n}\n")[0]
+		self.assertIn("frm.doc.setup_complete", intro)
+		self.assertIn('__("Edit configuration")', intro)
+		self.assertIn('__("Go to guided setup experience")', intro)
+		self.assertIn('"green"', intro)
+		self.assertIn('"blue"', intro)
+
+	def test_workspace_banner_ships_both_states(self):
+		from taxjar_integration import install
+		html = install.GUIDED_SETUP_ALERT_HTML
+		self.assertIn("Configure TaxJar Integration", html)
+		self.assertIn("TaxJar Integration is successfully configured", html)
+		self.assertIn("Edit configuration", html)
+
+	def test_workspace_banner_defaults_to_the_pending_state(self):
+		"""The script may never run - an old browser, a failed call. The state
+		left showing must be the one that still offers the setup page."""
+		from taxjar_integration import install
+		html = install.GUIDED_SETUP_ALERT_HTML
+		split = html.index('data-taxjar-state="done"')
+		self.assertNotIn("display: none;", html[:split])
+		self.assertIn("display: none;", html[split:])
+
+	def test_workspace_banner_takes_its_colours_from_the_alert_component(self):
+		"""The same tokens .es-alert reads for data-theme="blue" and "green".
+
+		They are theme roles and they invert: --surface-blue-2 is --blue-100 on
+		a light ground and --blue-900 on a dark one. The raw ramp does not -
+		--blue-50 is pale in both themes - so a fill taken from there put
+		near-white --ink-gray-9 text on a pale blue background in dark mode."""
+		from taxjar_integration import install
+		html = install.GUIDED_SETUP_ALERT_HTML
+
+		for token in (
+			"--surface-blue-2", "--ink-blue-6", "--ink-blue-7",
+			"--surface-green-2", "--ink-green-6", "--ink-green-7",
+			"--ink-gray-9", "--ink-gray-6",
+		):
+			self.assertIn(token, html)
+
+		for raw in (
+			"var(--blue-50)", "var(--blue-500)", "var(--blue-600)",
+			"var(--green-50)", "var(--green-500)", "var(--green-600)",
+		):
+			self.assertNotIn(raw, html)
+
+	def test_workspace_banner_script_reads_the_flag(self):
+		"""Rendering the state server-side would go stale the moment somebody
+		finishes the wizard, because nothing runs again until the next migrate."""
+		from taxjar_integration import install
+		script = install.GUIDED_SETUP_ALERT_SCRIPT
+		self.assertIn("get_setup_status", script)
+		self.assertIn("root_element", script)
+		self.assertIn("setup_complete", script)
+
 # ── Phase 2: guided setup JS — native controls per step ─────────────────────
 
 
@@ -13090,7 +13535,7 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		the retention figure pluralises - "1 days retention" is the bug this
 		guards."""
 		js = self._js()
-		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
+		review = js.split("_card_body_connect(s) {")[1].split("\n\t}\n")[0]
 		self.assertIn('__("API Logs")', review)
 		self.assertIn(
 			'__("Enabled · {0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])',
@@ -13530,6 +13975,18 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		# its own flex-end would reinstate the edge-alignment this fixes.
 		action_rule = css.split(".taxjar-setup .ts-cred-row .ts-cred-action {")[1].split("}")[0]
 		self.assertNotIn("align-self", action_rule)
+		# Sized above the widest state, and every state fills it.
+		self.assertIn("flex: 0 0 150px", action_rule)
+		# Controls sit at the slot's leading edge at their own width. Stretching
+		# them to 150px was what put ~29px of bare button either side of a short
+		# label, which reads as the icon being flung away from the word.
+		self.assertIn("justify-content: flex-start", action_rule)
+		self.assertNotIn("ts-cred-fill", css)
+		# frappe.ui.button has no green theme, so the verified state gets one
+		# rule of this page's own, on the same tokens the green badge reads.
+		ok = css.split(".taxjar-setup .es-button.ts-cred-ok {")[1].split("}")[0]
+		self.assertIn("var(--ink-green-7)", ok)
+		self.assertIn("var(--outline-green-3)", ok)
 		self.assertNotIn(".ts-cred-row .ts-card-remove { align-self", css)
 		# No hardcoded nudge: a margin tuned to the pill would be wrong for
 		# every other state the slot can hold.
@@ -13558,23 +14015,33 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
 		self.assertIn('.find(".ts-cred-action").empty()', fn)
 		self.assertEqual(fn.count("$action.append("), 3)
-		self.assertIn('theme: "green"', fn)
 		self.assertIn('label: __("Connect")', fn)
-		self.assertIn('tooltip: __("Retry")', fn)
+		self.assertIn('label: __("Retry")', fn)
+		self.assertIn('label: __("Connected")', fn)
+		# Icon and word in every state, and every state the same outline button.
+		self.assertIn('icon: "plug"', fn)
+		self.assertIn('icon: "circle-check"', fn)
+		self.assertIn('icon: "refresh-cw"', fn)
+		# Not stretched to the slot: .es-button centres its contents, so a 92px
+		# label forced to 150px put ~29px of bare button either side of the pair.
+		self.assertNotIn("ts-cred-fill", js)
 
 	def test_connect_failure_reason_surfaces_on_the_token_field(self):
-		"""A failed connection has to say why. It no longer does that through a
-		bespoke info popover beside the action slot - the input is marked
-		invalid (df.invalid + set_invalid, frappe's native invalid-field
-		primitive) and the reason is written under it, so the message sits next
-		to the input the user has to correct rather than behind a second
-		click."""
+		"""A failed connection has to say why, on its own line under the token
+		field, so the message sits next to the input the user has to correct
+		rather than behind a second click.
+
+		The field itself is NOT marked invalid. df.invalid + set_invalid() put
+		frappe's red has-error border round the input, which tinted the password
+		control's eye button and made a failed row the loudest thing on the step
+		- louder than the Retry button that resolves it."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
 		# Every render pushes the current error (or clears it) onto the field.
 		self.assertIn("this._set_token_error(entry, entry.lastError);", fn)
 		setter = js.split("_set_token_error(entry, message) {")[1].split("\n\t}\n")[0]
-		self.assertIn("df.invalid", setter)
+		self.assertNotIn("df.invalid", setter)
+		self.assertNotIn("set_invalid", setter)
 		self.assertIn('.find(".ts-cred-error").text(message || "")', setter)
 		# The old popover machinery is gone, not merely unused.
 		self.assertNotIn("_info_btn_html", js)
@@ -13608,6 +14075,14 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("display: grid;", row_rule)
 		self.assertIn("grid-template-columns: 1fr 1fr auto;", row_rule)
 		error_rule = css.split(".taxjar-setup .ts-cred-row .ts-cred-error {")[1].split("}")[0]
+		# --ink-red-6, not --error-color: espresso defines --error-bg and
+		# --error-border but no --error-color, so that name resolves to nothing
+		# and the reason renders in the inherited body colour. It is the only red
+		# left on a failed row now the input is not marked invalid.
+		self.assertIn("color: var(--ink-red-6)", error_rule)
+		# The declaration, not the name - both comments in this file name the
+		# token to explain why it is not used, and that is the point of them.
+		self.assertNotIn("var(--error-color)", css)
 		# Column 2 - under the token input, where its help-box would have been.
 		self.assertIn("grid-column: 2;", error_rule)
 		# An empty grid item still contributes the row-gap above it.
@@ -13622,9 +14097,10 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		failed = fn.split("} else if (entry.lastError) {")[1].split("} else {")[0]
 		self.assertIn('theme: "red"', failed)
 		self.assertIn('icon: "refresh-cw"', failed)
-		# Verified is the other themed state, and it is a different colour.
+		# Verified is the other coloured state, and it is a different colour.
+		# frappe.ui.button has no green theme, so it carries this page's class.
 		verified = fn.split("if (entry.tested) {")[1].split("} else if")[0]
-		self.assertIn('theme: "green"', verified)
+		self.assertIn('css_class: "ts-cred-ok"', verified)
 		self.assertNotIn('theme: "red"', verified)
 
 	def test_connect_button_renamed_to_connect(self):
@@ -13642,15 +14118,15 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
 		for branch in ("if (entry.tested) {", "} else if (entry.lastError) {", "} else {"):
 			self.assertIn(branch, fn)
-		# Failed and idle wire the handler inline; the verified badge is
-		# non-interactive markup on its own, so _build_status_badge does the
-		# click/keyboard wiring for that one - via a callback handed to it at
-		# the call site, since the Address step reuses the same badge for its
-		# own check (see _render_address_action).
-		self.assertEqual(fn.count("onclick: () => this._test_connection(entry)"), 2)
-		self.assertEqual(fn.count("this._test_connection(entry)"), 3)
+		# All three wire the handler inline now. The verified state was a badge -
+		# non-interactive markup that needed role, tabindex and keydown bolted on
+		# to behave like the button it already was - and is a real button.
+		self.assertEqual(fn.count("onclick: () => this._test_connection(entry)"), 3)
+		self.assertNotIn("_build_status_badge", fn)
+		# The helper survives for the Address step's Valid badge, its one caller.
 		badge = js.split("_build_status_badge(opts, onactivate) {")[1].split("\n\t}\n")[0]
 		self.assertIn("onactivate()", badge)
+		self.assertIn("_build_status_badge", js.split("_render_address_action(entry) {")[1])
 
 	def test_connect_edits_fall_back_through_reset_cred_status_to_idle_button(self):
 		"""Editing company or token after a test must clear lastError too, not
@@ -13721,21 +14197,21 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertNotIn("_fetch_nexus", empty)
 
 	def test_sync_state_transforms_the_last_synced_line_rather_than_sitting_beside_it(self):
-		""""Syncing with TaxJar" becomes "Synced just now" in the same place. An
+		""""Syncing…" becomes "Synced just now" in the same place. An
 		in-progress pill beside that line said the same thing twice, in two
 		shapes, with the settled answer arriving in neither of them. The badge
 		slot that remains is only ever a failure."""
 		js = self._js()
 		self.assertIn("this._render_syncing();", js)
 		syncing = js.split("_render_syncing() {")[1].split("\n\t}")[0]
-		self.assertIn('.find(".ts-lastsync").text(__("Syncing with TaxJar"))', syncing)
+		self.assertIn('.find(".ts-lastsync").text(__("Syncing…"))', syncing)
 
 		fetch = js.split("_fetch_nexus() {")[1].split("\n\t}\n")[0]
 		self.assertNotIn("Fetching", fetch)
 		# The only badge left on this step is the failure one.
 		self.assertEqual(fetch.count("frappe.ui.badge("), 1)
 		self.assertIn('theme: "red"', fetch)
-		# A failed attempt must not leave "Syncing with TaxJar" standing.
+		# A failed attempt must not leave "Syncing…" standing.
 		self.assertIn("this._render_last_sync(this.state.nexus_last_synced);", fetch)
 
 	def test_token_label_reads_tracked_mode_not_control_mid_flight(self):
@@ -13772,11 +14248,11 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		)
 		self.assertIn("if (alreadySaved) {", add_card)
 		self.assertIn("this._test_connection(entry);", add_card)
-		# ...and only a real result paints the verified badge.
+		# ...and only a real result paints the verified state.
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
 		verified = fn.split("if (entry.tested) {")[1].split("} else if")[0]
-		self.assertIn("_build_status_badge", verified)
-		self.assertIn('theme: "green"', verified)
+		self.assertIn('label: __("Connected")', verified)
+		self.assertIn('css_class: "ts-cred-ok"', verified)
 
 	def test_test_connection_reads_entry_company_not_the_control(self):
 		"""The auto re-test above fires synchronously right after
@@ -13830,17 +14306,27 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("_save_accounts", js)
 		self.assertIn("_save_address", js)
 		self.assertIn("_save_features", js)
-		self.assertEqual(js.count("this._reload_state()"), 6)
+		# Six saves, plus _finish() - activation re-reads state rather than
+		# drawing the sealed summary directly, because setup_complete is what
+		# every part of that screen branches on.
+		self.assertEqual(js.count("this._reload_state()"), 7)
 
-	def test_review_summarises_connection_ledgers_features_nexus(self):
-		"""Review's four cards. "Accounts" and a separate company-addresses card
-		were merged into one "Ledgers & Address": whether a company has an
-		address is a yes/no per company, not a card's worth of content, and the
-		street itself was already shown and verified on the Address step."""
+	def test_review_groups_the_record_into_four_cards(self):
+		"""Four cards, not one per wizard step. Ledgers and Features describe the
+		same company from two sides, and nothing maps to a step any more now that
+		editing re-walks the whole wizard - so the cards group by what a reader
+		looks for rather than by how the wizard is built."""
 		js = self._js()
 		self.assertIn("_render_review", js)
-		for label in ('__("Connection")', '__("Ledgers & Address")', '__("Features")', '__("Nexus")'):
-			self.assertIn(label, js)
+		keys = js.split("const CONFIG_CARDS = [")[1].split("];")[0]
+		self.assertEqual(
+			[k for k in ("connect", "nexus", "ledgers", "address") if f'key: "{k}"' in keys],
+			["connect", "nexus", "ledgers", "address"],
+		)
+		self.assertIn('__("Ledgers & Features")', keys)
+		# The separate Features card is gone, and so is its body.
+		self.assertNotIn('key: "features"', keys)
+		self.assertNotIn("_card_body_features", js)
 
 	def test_connect_card_has_remove_action_wired_to_server_api(self):
 		js = self._js()
@@ -13865,24 +14351,22 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		render_nexus = js.split("_render_nexus(")[1].split("\n\t_render_nexus_groups(")[0]
 		self.assertIn("this._fetch_nexus()", render_nexus)
 
-	def test_nexus_counts_pluralise_company(self):
-		"""1 company must not read "1 companies". The fetch step no longer
-		prints a count of its own - the region pills themselves are the result,
-		and the badge beside them carries the state - so the count that remains
-		is the Review step's, and it is the one that has to agree with itself."""
-		js = self._js()
-		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
-		self.assertIn(
-			'__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])',
-			review,
-		)
+	def test_nexus_counts_pluralise(self):
+		""""1 regions" is the bug this guards.
 
-	def test_review_nexus_row_pluralises_company(self):
+		The review page used to carry one "{0} across {1} companies" line for
+		the whole site. It now lists each company with its own count, which is
+		the number a reader can act on, so that is the count that has to agree
+		with itself."""
 		js = self._js()
+		body = js.split("_card_body_nexus(s) {")[1].split("\n\t}\n")[0]
 		self.assertIn(
-			'__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])',
-			js,
+			'__("+{0} {1}", [hidden, hidden === 1 ? __("region") : __("regions")])',
+			body,
 		)
+		# The site-wide line itself, not the word - "across" also appears in the
+		# prose above these functions.
+		self.assertNotIn('__("{0} across {1} {2}"', js)
 
 	def test_review_has_no_taxjar_enabled_row_and_uses_green_badges(self):
 		"""The master switch isn't managed by this wizard, so Review must not
@@ -13890,7 +14374,12 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		get Frappe's native green indicator-pill instead of plain text."""
 		js = self._js()
 		self.assertNotIn('__("TaxJar")', js)
-		self.assertIn("indicator-pill green", js)
+		# frappe.ui.badge, not .indicator-pill - that one is deprecated in favour
+		# of the Espresso badge, and the feature chips use the same component.
+		# The emitted markup, not the word: the comment above the call explains
+		# why the deprecated class is not used, and naming it there is the point.
+		self.assertNotIn('class="indicator-pill', js)
+		self.assertIn('frappe.ui.badge.html({ label: __("Live"), theme: "green" })', js)
 		self.assertIn('__("Auto-Refresh")', js)
 		self.assertIn('__("Daily at midnight")', js)
 
@@ -13900,12 +14389,12 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		override and rendered heavier than every value beside it. Every value
 		now goes through .ts-kv-plain, which is what keeps them consistent."""
 		js = self._js()
-		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
+		review = js.split("_card_body_nexus(s) {")[1].split("\n\t}\n")[0]
 		self.assertIn(
 			'<span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span>',
 			review,
 		)
-		# Nothing in the Review card sets a value span without that class.
+		# Nothing in the Nexus card sets a value span without that class.
 		self.assertNotIn('<span>${__("Auto-Refresh")}</span><span>', review)
 
 	def test_review_accounts_stack_company_and_detail_on_separate_lines(self):
@@ -13919,17 +14408,26 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		gets its own labelled line rather than sharing one. The Address line
 		joined them later and is held to the same rule."""
 		js = self._js()
-		account_rows = js.split("const accountRows = companies.map((c) => `")[1].split("`).join")[0]
+		account_rows = js.split("_card_body_ledgers(s) {")[1].split("\n\t}\n")[0]
 		self.assertIn('__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head', account_rows)
 		self.assertIn('__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head', account_rows)
-		self.assertIn('__("Address")}: ${addressed.has(c.company)', account_rows)
-		# Every detail line opens with its own label. Counting them against a
-		# hardcoded total only has to be bumped again the next time Review grows
-		# a row - which is exactly how this assertion came to be wrong.
+		# Every detail line in the Ledgers card opens with its own label.
+		# Counting them against a hardcoded total only has to be bumped again
+		# the next time the card grows a row - which is exactly how this
+		# assertion came to be wrong.
 		self.assertEqual(
 			account_rows.count('<div class="ts-acc-detail">'),
 			account_rows.count('<div class="ts-acc-detail">${__("'),
 		)
+
+	def test_summary_address_card_shows_the_street_not_a_yes_no(self):
+		"""The Address card is the only place the summary says which address
+		TaxJar prices from. A company with several addresses is exactly where
+		"Configured" stops being an answer."""
+		js = self._js()
+		body = js.split("_card_body_address(s) {")[1].split("\n\t}\n")[0]
+		for field in ("a.address_line1", "a.city", "a.taxjar_state_code", "a.pincode"):
+			self.assertIn(field, body)
 
 	def test_welcome_step_button_says_continue_not_save(self):
 		"""Nothing is saved on the Welcome step (no form fields) — its button

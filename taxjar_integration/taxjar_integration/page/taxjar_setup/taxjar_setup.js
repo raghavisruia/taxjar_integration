@@ -12,9 +12,8 @@
 // the nexus banner, empty/loading states — is frappe's Espresso desk component
 // library (frappe.ui.button/.badge/.tab_buttons/.alert/.empty_state/.skeleton,
 // demoed live in Component Explorer, /app/component-explorer). A connection
-// failure surfaces as the token field's own error text (df.invalid — frappe's
-// native invalid-field primitive — plus a message line under the field), not a
-// popover.
+// failure surfaces as a message line under the token field, beside a Retry
+// button, not a popover and not a red field.
 // Only the card layout around all of this is custom CSS. Connect, Accounts and Features
 // persist per step (Continue = collect -> save API -> reload state -> advance),
 // so the guide is resumable; Nexus persists via its own Fetch action instead of
@@ -37,7 +36,7 @@ frappe.pages["taxjar-setup"].on_page_load = function (wrapper) {
 };
 
 frappe.pages["taxjar-setup"].on_page_show = function (wrapper) {
-	wrapper.taxjar_setup._load_state();
+	wrapper.taxjar_setup._on_arrive();
 };
 
 const AUTOFILE_DOC_URL = "https://support.taxjar.com/article/908-how-does-autofile-work";
@@ -49,6 +48,12 @@ const AUTOFILE_DOC_URL = "https://support.taxjar.com/article/908-how-does-autofi
 // when the final walkthrough is published. Empty string drops the whole player
 // row rather than shipping a play button that opens nothing.
 const SETUP_VIDEO_ID = "qSP820YuqX4";
+// The video's own thumbnail host. maxresdefault only exists for videos uploaded
+// above 720p, so it 404s on plenty of them; hqdefault is generated for every
+// video and is the fallback (see the error handler on .ts-done-thumb).
+const SETUP_VIDEO_POSTER = SETUP_VIDEO_ID
+	? `https://i.ytimg.com/vi/${encodeURIComponent(SETUP_VIDEO_ID)}`
+	: "";
 // Same URL as taxjar_integration.TAXJAR_NEXUS_URL in the app bundle. Kept as
 // its own literal rather than read from there: this runs at module scope, and
 // a page script that throws on load takes the whole page with it.
@@ -86,6 +91,19 @@ const SETUP_STEPS = [
 	{ key: "review", label: __("Review"), title: __("Review & activate") },
 ];
 
+// The steps the summary shows as editable cards, in wizard order. Titles are
+// their own, not the rail's: "Map Ledgers" and "Sync Nexus" tell a first-time
+// user what to do next, while this stack describes what is already configured.
+// The review page's cards. Four, not one per wizard step: Ledgers and Features
+// describe the same company from two sides, and nothing maps to a step any more
+// now that editing re-walks the whole wizard (see _start_edit).
+const CONFIG_CARDS = [
+	{ key: "connect", title: __("Connection") },
+	{ key: "nexus", title: __("Nexus") },
+	{ key: "ledgers", title: __("Ledgers & Features") },
+	{ key: "address", title: __("Address") },
+];
+
 class TaxJarSetup {
 	constructor(page) {
 		this.page = page;
@@ -96,6 +114,10 @@ class TaxJarSetup {
 		// API Credentials starts expanded - it's a required step, so hiding it
 		// by default would just cost an extra click every single time.
 		this._credsExpanded = true;
+		// The card a remedial link asked to point at, read off the route on
+		// arrival. The review page opens every card, so this marks and scrolls
+		// to one rather than opening it.
+		this._focus = null;
 		this._build_shell();
 	}
 
@@ -165,7 +187,47 @@ class TaxJarSetup {
 		$sk.append(frappe.ui.skeleton({ width: "45%", height: "14px" }));
 		$sk.append(frappe.ui.skeleton({ width: "100%", height: "72px" }));
 		$sk.append(frappe.ui.skeleton({ width: "100%", height: "72px" }));
-		this._reload_state().then(() => this._render());
+		this._reload_state().then(() => {
+			if (this._arriving) {
+				this._arriving = false;
+				this._land();
+			}
+			this._render();
+		});
+	}
+
+	// Every arrival re-reads the route. The desk caches this page in
+	// frappe.pages[], so a second visit only un-hides the DOM that is already
+	// there. `focus` names the card the link wants opened: the invoice sidebar
+	// and the transaction tax panel appear because one specific thing is off,
+	// and they say which one.
+	_on_arrive() {
+		let focus = null;
+		try {
+			focus = new URLSearchParams(window.location.search).get("focus");
+		} catch (e) {
+			focus = null;
+		}
+		// One alias. The Features card merged into Ledgers & Features, and the
+		// links carrying `focus=features` are already out there on invoices.
+		const key = focus === "features" ? "ledgers" : focus;
+		this._focus = CONFIG_CARDS.some((c) => c.key === key) ? key : null;
+		this._arriving = true;
+		this._load_state();
+	}
+
+	// Where a fresh arrival lands. A finished setup opens on the summary, with
+	// every step reachable so the rail reads as navigation rather than a gate.
+	// An unfinished one keeps the position the user had, which is what makes
+	// the guide resumable.
+	//
+	// Gated on arrival rather than run from every _render(): _load_state() also
+	// runs mid-edit, and moving the user then would throw away the step they
+	// opened.
+	_land() {
+		if (!this.state || !this.state.setup_complete) return;
+		this.reached = SETUP_STEPS.length - 1;
+		this.cur = SETUP_STEPS.length - 1;
 	}
 
 	// ── navigation ───────────────────────────────────────────────────
@@ -203,6 +265,27 @@ class TaxJarSetup {
 		Promise.resolve(saver.call(this)).then((ok) => { if (ok) this._advance(); });
 	}
 
+	// ── editing ──────────────────────────────────────────────────────
+	// The one way to change anything. It starts the wizard at Connect - the
+	// first step that holds configuration, since Pre-requisites is a checklist
+	// of links to TaxJar with nothing on it to edit - and the user walks
+	// forward from there.
+	//
+	// There is no per-step edit and no way back to the summary except through
+	// the wizard. Rotating one token therefore costs four more Save & continue
+	// screens, which is the price of having exactly one path: a configuration
+	// re-confirmed end to end cannot be left half valid.
+	//
+	// Every step stays reachable from the rail on the way through. The data
+	// behind each one is already valid, so the rail is navigation here rather
+	// than a gate.
+	_start_edit() {
+		this.reached = SETUP_STEPS.length - 1;
+		this.cur = SETUP_STEPS.findIndex((step) => step.key === "connect");
+		this._focus = null;
+		this._render();
+	}
+
 	// Visually disabled but still clickable, so a click can explain why instead
 	// of a native `disabled` button silently eating it.
 	_set_next_gated(blocked, message) {
@@ -211,14 +294,19 @@ class TaxJarSetup {
 		this.$root.find(".ts-next").toggleClass("ts-next-gated", blocked);
 	}
 
-	// Activation ends on its own screen rather than routing to TaxJar Settings:
-	// the form is one of several places the user might want to go next, and
-	// picking one for them lands most of them somewhere they did not ask to be.
-	// No toast either - the screen itself is the confirmation.
+	// Activation stays on this step rather than routing to TaxJar Settings: the
+	// form is one of several places the user might want to go next, and picking
+	// one for them lands most of them somewhere they did not ask to be. No
+	// toast either - the screen itself is the confirmation.
+	//
+	// It re-reads state instead of drawing the sealed screen directly, because
+	// setup_complete is what every part of this page now branches on. One read
+	// after the write keeps the screen and the flag telling the same story.
 	_finish() {
 		const $btn = this.$root.find(".ts-next").prop("disabled", true);
 		this._call("finish_setup", {})
-			.then(() => this._render_done())
+			.then(() => this._reload_state())
+			.then(() => this._render())
 			.finally(() => $btn.prop("disabled", false));
 	}
 
@@ -229,14 +317,21 @@ class TaxJarSetup {
 		// Panel shows exactly one step's content, swapped in full on navigate.
 		// Nexus renders its own title inline (beside "Synced ...") instead of
 		// using the shared heading above the body.
-		// The success screen hides the rail and the footer. Any render after it is
-		// a step again — the user left the page and came back, so on_page_show
-		// re-ran _load_state() — so put them back before drawing it. That is also
-		// why the success screen needs no flag of its own to remember it is up:
-		// the only route out of it is a reload, which lands here.
-		this.$root.find(".ts-head, .ts-foot").removeClass("hide");
-		this.$root.find(".ts-title").toggleClass("hide", step.key === "nexus").text(step.title);
+		//
+		// Two chrome states. The wizard shows the rail and the footer, whether
+		// this is a first run or a re-walk - they are the same walk. The sealed
+		// review page hides both; its one action sits beside the title instead,
+		// where the design puts it, rather than in the desk's own action slot.
+		const sealed = this._is_sealed();
+		this.$root.find(".ts-head").toggleClass("hide", sealed);
+		this.$root.find(".ts-foot").toggleClass("hide", sealed);
+
+		this.$root.find(".ts-title")
+			.toggleClass("hide", step.key === "nexus" || sealed)
+			.text(step.title);
+
 		this.$root.find(".ts-back").toggleClass("hide", this.cur === 0);
+
 		const nextLabel = this.cur === SETUP_STEPS.length - 1
 			? __("Activate")
 			: (step.nextLabel || __("Save & continue"));
@@ -255,6 +350,17 @@ class TaxJarSetup {
 
 		this.$body.empty();
 		this[`_render_${step.key}`]();
+	}
+
+	// Sealed once setup is complete and the user is standing on the review step.
+	// A re-walk passes back through here on its way out: the per-step saves have
+	// already landed, so arriving is the whole of finishing - there is nothing
+	// left to press.
+	_is_sealed() {
+		return (
+			SETUP_STEPS[this.cur].key === "review"
+			&& !!(this.state && this.state.setup_complete)
+		);
 	}
 
 	// ── Step 1: Welcome ──────────────────────────────────────────────
@@ -615,48 +721,68 @@ class TaxJarSetup {
 		this.$body.find(".ts-card-remove").prop("disabled", onlyRow);
 	}
 
-	// The action slot cycles through three states: an idle "Connect" button,
-	// a transient "testing…" state (see _test_connection), a green check
-	// badge once verified (a status, so a badge - clicking it re-tests), and
-	// a red Retry button on failure (an action, so a real button, unlike the
-	// status it sits next to). The failure reason itself isn't shown here at
-	// all — it lives as the token field's own error text (see
-	// _set_token_error), frappe's native invalid-field primitive rather than
-	// a bespoke popover. Centralised here since every entry point that can
-	// invalidate a previous test (edit company, edit token, switch mode)
-	// needs to fall back to the same idle button.
+	// The action slot cycles through four states: an idle Connect button, a
+	// transient Connecting… (see _test_connection), a green Connected badge
+	// once verified (a status, so a badge - clicking it re-tests), and a Retry
+	// button on failure (an action, so a real button, unlike the status it
+	// sits next to).
+	//
+	// Every one is the same outline button carrying an icon and a word, at its
+	// own natural width. They are NOT stretched to the slot: .es-button centres
+	// its contents, so a 92px "Connect" forced to 150px put ~29px of bare button
+	// either side of the pair and read as the icon being flung away from the
+	// word. The slot stays reserved - that is what stops Company and Token
+	// resizing mid-request - and the buttons sit at its leading edge, so all
+	// four start at the same x without any of them being padded out.
+	//
+	// The failure reason is not shown here at all. It lives on its own line
+	// under the token field (see _set_token_error), next to the input the user
+	// has to correct. Centralised here since every entry point that can
+	// invalidate a previous test (edit company, edit token, switch mode) needs
+	// to fall back to the same idle button.
 	_render_cred_action(entry) {
 		const $action = entry.$card.find(".ts-cred-action").empty();
 		this._set_token_error(entry, entry.lastError);
 		if (entry.tested) {
-			$action.append(this._build_status_badge({
-				theme: "green", icon: "check", size: "lg", title: __("Verified. Click to test again."),
-			}, () => this._test_connection(entry)));
+			// A button, not a badge. It was a badge because it is a status, but
+			// it has always been clickable too - and a badge is non-interactive
+			// markup, so it needed role, tabindex and a keydown handler bolted
+			// on to behave like the button it already was. As a button it gets
+			// all of that natively, and it stops being a filled pill of a
+			// different height and radius in a row of three buttons.
+			$action.append(frappe.ui.button({
+				label: __("Connected"), icon: "circle-check", variant: "outline",
+				css_class: "ts-cred-ok", title: __("Verified. Click to test again."),
+				onclick: () => this._test_connection(entry),
+			}));
 		} else if (entry.lastError) {
 			$action.append(frappe.ui.button({
-				icon: "refresh-cw", variant: "outline", theme: "red",
-				tooltip: __("Retry"),
+				label: __("Retry"), icon: "refresh-cw", variant: "outline", theme: "red",
 				onclick: () => this._test_connection(entry),
 			}));
 		} else {
+			// A plug that is not in yet. circle-check answers it above rather
+			// than a plug-zap: the question this button settles is whether the
+			// token works, and a tick says verified where a live plug says
+			// powered.
 			$action.append(frappe.ui.button({
-				label: __("Connect"), variant: "outline",
+				label: __("Connect"), icon: "plug", variant: "outline",
 				onclick: () => this._test_connection(entry),
 			}));
 		}
 	}
 
-	// An icon-only status badge doubling as a re-check trigger - frappe.ui.badge
-	// itself is deliberately non-interactive markup, so the click/keyboard
-	// wiring that makes it re-checkable lives here instead. No visible label:
-	// the title (and the aria-label badge.js derives from it on an icon-only
-	// badge) carries the meaning instead of a "Verified" word. Only the
-	// success state uses this - a failure is an actionable Retry button
-	// instead (see _render_cred_action), not a badge.
+	// A status badge doubling as a re-check trigger - frappe.ui.badge itself is
+	// deliberately non-interactive markup, so the click/keyboard wiring that
+	// makes it re-checkable lives here instead. Only the success state uses it:
+	// a failure is an actionable Retry button (see _render_cred_action), not a
+	// status. The title says clicking re-tests, which the word alone does not.
 	//
-	// `onactivate` rather than a hardcoded _test_connection: the Address step's
-	// own verify badge (see _render_address_action) is the same primitive
-	// pointed at a different check.
+	// One caller left: the Address step's Valid badge (see
+	// _render_address_action). The Connect step used this too until its verified
+	// state became a real button, which needs none of the wiring below.
+	// `onactivate` stays a parameter rather than a hardcoded call so the helper
+	// does not name the one check it happens to serve.
 	_build_status_badge(opts, onactivate) {
 		const $badge = frappe.ui.badge(opts);
 		$badge.attr({ role: "button", tabindex: 0 }).css("cursor", "pointer");
@@ -670,20 +796,21 @@ class TaxJarSetup {
 		return $badge;
 	}
 
-	// Failure reason on the token field itself, not a separate popover. The red
-	// border is frappe's native invalid-field primitive (df.invalid +
-	// set_invalid(), the same one a required/malformed field uses; see
-	// base_input.js). The message is NOT set_description(), though: that renders
-	// into the control's own .help-box, which made the token column taller than
-	// Company - and since the action slot bottom-aligns to the row, the Retry
-	// button slid down level with the error text instead of the input it
-	// retries. It can't just be moved either; set_description() looks the
-	// .help-box up inside the control wrapper. So the message gets its own line
-	// in the row (.ts-cred-error), styled and placed as that help-box was.
+	// Failure reason on its own line under the token field, and nothing else.
+	// The field is no longer marked invalid: df.invalid + set_invalid() put
+	// frappe's red has-error border round the input, which tinted the password
+	// control's eye button and made a failed row the loudest thing on the step -
+	// louder than the Retry button that actually resolves it. The sentence and
+	// the Retry button say what happened between them.
+	//
+	// The message is NOT set_description(), though: that renders into the
+	// control's own .help-box, which made the token column taller than Company -
+	// and since the action slot bottom-aligns to the row, the Retry button slid
+	// down level with the error text instead of the input it retries. It can't
+	// just be moved either; set_description() looks the .help-box up inside the
+	// control wrapper. So the message gets its own line in the row
+	// (.ts-cred-error), styled and placed as that help-box was.
 	_set_token_error(entry, message) {
-		const tokenCtrl = entry.controls.token;
-		tokenCtrl.df.invalid = !!message;
-		tokenCtrl.set_invalid();
 		// .text(), not .html() - the message is server-supplied (TaxJar's own
 		// error text for a rejected token), and :empty is what hides the line.
 		entry.$card.find(".ts-cred-error").text(message || "");
@@ -747,14 +874,17 @@ class TaxJarSetup {
 		}
 		// Transient state, not routed through _render_cred_action - nothing
 		// about entry.tested/lastError has changed yet, this is just what the
-		// action slot looks like while the request is in flight. Espresso's
-		// spinner (.es-spinner - the same primitive a button shows for its
-		// own loading state) stands in on its own here rather than inside a
-		// button, since there's no button label worth keeping around for the
-		// half-second the request takes.
-		entry.$card.find(".ts-cred-action").empty().append(
-			$(`<span class="es-spinner" role="status"></span>`).attr("aria-label", __("Connecting…"))
-		);
+		// action slot looks like while the request is in flight.
+		//
+		// A real button in its own loading state, rather than a bare spinner:
+		// frappe.ui.button renders Espresso's .es-spinner beside the loading
+		// label, at the button's own height and width, and blocks clicks while
+		// aria-busy is set. A lone spinner was the narrowest thing the slot ever
+		// held, so the column stepped in on click and back out on the answer.
+		entry.$card.find(".ts-cred-action").empty().append(frappe.ui.button({
+			label: __("Connect"), loading_label: __("Connecting…"), loading: true,
+			variant: "outline",
+		}));
 
 		this._call("test_connection", {
 			company,
@@ -1010,7 +1140,6 @@ class TaxJarSetup {
 		if (!info.address) {
 			$body.append(`
 				<p class="ts-addr-none">${__("No address on file for this company.")}</p>
-				<p class="ts-fieldnote">${__("TaxJar calculates sales tax from the address your orders ship out of.")}</p>
 				<div class="ts-addr-add"></div>
 			`);
 			// Outline, not solid. It is the only action on the card, but the
@@ -1055,6 +1184,19 @@ class TaxJarSetup {
 			df: {
 				fieldtype: "Link", fieldname: "address", options: "Address",
 				label: __("Company Address"), reqd: 1,
+				// Drops the dropdown's own "Create a new Address" - the card
+				// already carries a New address button, and two ways to create
+				// the same thing, three lines apart, is one too many. The button
+				// is also the better of the two: it opens this step's own dialog,
+				// which asks for the four fields TaxJar needs and links the
+				// address to the company, where frappe's own route would open a
+				// blank Address form the user has to link by hand.
+				//
+				// only_select takes Advanced Search with it - frappe has no flag
+				// for one without the other (see link.js) - and that is no loss
+				// here: the list is already filtered to this company's own US
+				// addresses, which is rarely more than two or three rows.
+				only_select: 1,
 				// address_query is frappe's own Dynamic Link-aware search; the
 				// leftover `country` filter it doesn't consume becomes a plain
 				// field filter on Address. Same reasoning as the Company link on
@@ -1219,8 +1361,12 @@ class TaxJarSetup {
 		if (!this._address_is_verifiable(entry)) return;
 
 		if (entry.verified) {
+			// "Valid", not a bare tick. The card beside it already carries a
+			// pencil, and two icon-only controls in one corner leave the reader
+			// working out which is a status and which is an action.
 			$action.append(this._build_status_badge({
-				theme: "green", icon: "check", size: "lg", title: __("Found by TaxJar. Click to check again."),
+				label: __("Valid"), theme: "green", icon: "circle-check", size: "lg",
+				title: __("Found by TaxJar. Click to check again."),
 			}, () => this._verify_address(entry)));
 		} else if (entry.verifyError) {
 			$action.append(frappe.ui.button({
@@ -1258,7 +1404,7 @@ class TaxJarSetup {
 					entry.verifyNote = ADDRESS_NOT_CHECKED_REASONS[res.reason] || ADDRESS_NOT_CHECKED_REASONS.error;
 				} else {
 					entry.verified = !!res.valid;
-					entry.verifyError = res.valid ? null : __("Address is invalid as per TaxJar.");
+					entry.verifyError = res.valid ? null : __("Invalid address as per TaxJar.");
 					entry.verifyNote = null;
 				}
 				this._render_address_verify_note(entry);
@@ -1655,13 +1801,13 @@ class TaxJarSetup {
 	}
 
 	// The one line that carries sync state, in the one place the user is already
-	// reading it: "Syncing with TaxJar" becomes "Synced just now" in place. A
+	// reading it: "Syncing…" becomes "Synced just now" in place. A
 	// separate in-progress pill beside it said the same thing twice, in two
 	// shapes, with the settled answer arriving in neither of them.
 	//
 	// Blank until a sync has actually happened - "Synced never" is noise on a
 	// first run, and the step fetches on open anyway, so the blank lasts as long
-	// as it takes _fetch_nexus() to write "Syncing with TaxJar" over it.
+	// as it takes _fetch_nexus() to write "Syncing…" over it.
 	_render_last_sync(when) {
 		this.$body.find(".ts-lastsync").html(
 			when ? __("Synced {0}", [frappe.datetime.comment_when(when)]) : ""
@@ -1669,7 +1815,7 @@ class TaxJarSetup {
 	}
 
 	_render_syncing() {
-		this.$body.find(".ts-lastsync").text(__("Syncing with TaxJar"));
+		this.$body.find(".ts-lastsync").text(__("Syncing…"));
 	}
 
 	_fetch_nexus() {
@@ -1694,7 +1840,7 @@ class TaxJarSetup {
 			// A failed fetch says nothing about whether nexus exists, so the
 			// "no nexus in TaxJar" screen must not stand in for this. Put the
 			// last-sync line back to whatever it said before this attempt -
-			// leaving "Syncing with TaxJar" up would claim one is still running.
+			// leaving "Syncing…" up would claim one is still running.
 			this._render_last_sync(this.state.nexus_last_synced);
 			$status.append(frappe.ui.badge({ label: __("Could not fetch nexus."), theme: "red" }));
 		}).finally(() => {
@@ -1703,131 +1849,297 @@ class TaxJarSetup {
 		});
 	}
 
-	// ── Step 7: Review ──────────────────────────────────────────────
+	// ── Step 7: the configuration record ────────────────────────────
+	// Review and the activated screen are one page in two states. Every card is
+	// open and none of them carries a control: this is the configuration
+	// written out, not a set of things to operate. One Edit configuration
+	// button sits beside the title, and it restarts the wizard.
 	_render_review() {
 		const s = this.state || {};
-		const companies = s.companies || [];
+
+		this.$body.html(`
+			${s.setup_complete ? this._done_header() : ""}
+			<div class="ts-cardgrid ts-cfggrid"></div>
+		`);
+
+		if (s.setup_complete) {
+			this.$body.find(".ts-done-action").append(frappe.ui.button({
+				label: __("Edit configuration"),
+				variant: "outline",
+				icon: "pencil",
+				onclick: () => this._start_edit(),
+			}));
+			this._bind_setup_video();
+		}
+
+		const $grid = this.$body.find(".ts-cfggrid");
+		CONFIG_CARDS.forEach((card) => {
+			$grid.append(`
+				<div class="ts-card${this._focus === card.key ? " ts-cfg-focus" : ""}">
+					<div class="ts-card-h"><b>${card.title}</b></div>
+					<div class="ts-card-b ts-card-rows">${this[`_card_body_${card.key}`](s)}</div>
+				</div>
+			`);
+		});
+
+		this._bind_hover_cards(s);
+
+		// A remedial link named a card. Every card is open, so there is nothing
+		// to expand - mark it and bring it into view instead.
+		if (this._focus) {
+			const focused = $grid.find(".ts-cfg-focus")[0];
+			if (focused) focused.scrollIntoView({ block: "center", behavior: "smooth" });
+		}
+	}
+
+	// frappe.ui.hover_card, the desk's own component, rather than a CSS-only
+	// tooltip: it opens on keyboard focus as well as on hover, so the names
+	// behind these two hints are reachable without a pointer and on touch.
+	//
+	// Bound by index rather than by a name in a data attribute - a company name
+	// round-tripping through an attribute has to be escaped on the way in and
+	// unescaped on the way out, and one of those always gets forgotten.
+	_bind_hover_cards(s) {
+		const options = { side: "bottom", align: "end", open_delay: 200, close_delay: 150 };
+
+		// A plain string, which hover_card renders as text. Two or three company
+		// names sit on one line, and stacking them made the card taller than the
+		// row it came from for no gain. A string also cannot carry markup, which
+		// a company name should not be able to do.
+		const companies = (s.credentials || []).map((c) => c.company).filter(Boolean).join(", ");
+		this.$body.find('.ts-hint[data-hover="companies"]').each((i, el) => {
+			frappe.ui.hover_card($(el), { content: () => companies, ...options });
+		});
+
 		const nexusByCompany = s.nexus_by_company || {};
-		const totalNexus = Object.values(nexusByCompany).reduce((n, arr) => n + arr.length, 0);
-		const nexusCompaniesN = Object.keys(nexusByCompany).length;
+		const names = Object.keys(nexusByCompany);
+		this.$body.find('.ts-hint[data-hover="regions"]').each((i, el) => {
+			const regions = nexusByCompany[names[$(el).data("i")]] || [];
+			frappe.ui.hover_card($(el), {
+				content: () => this._hover_list(regions.map((r) => (
+					r.region_code && r.region ? `${r.region_code} — ${r.region}` : (r.region || r.region_code || "—")
+				))),
+				...options,
+			});
+		});
+	}
 
-		// Company name and its accounts stack on their own lines — a company
-		// name and "Tax head · Shipping head" side by side wraps unevenly and
-		// never lines up cleanly in a two-column row. Tax Ledger / Shipping
-		// Ledger get their own line each too, rather than being crammed
-		// together on one line with no indication of which was which.
-		// The address sits on the same row as a yes/no rather than in a card of
-		// its own: Review is a checklist of what setup has settled, and the
-		// street itself was already shown (and verified) on the Address step.
-		const addressed = new Set((s.addresses || []).filter((a) => a.address).map((a) => a.company));
-		const accountRows = companies.map((c) => `
-			<div class="ts-accrow">
-				<div class="ts-acc-company">${frappe.utils.escape_html(c.company)}</div>
-				<div class="ts-acc-detail">${__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head || "—")}</div>
-				<div class="ts-acc-detail">${__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
-				<div class="ts-acc-detail">${__("Address")}: ${addressed.has(c.company) ? __("Configured") : __("Not configured")}</div>
-			</div>
-		`).join("") || `<div class="text-muted small">${__("No ledgers configured yet.")}</div>`;
+	// The regions' form, and the reason they differ from the company names above:
+	// one line each, because a company can hold up to 46 of them and a single
+	// comma-run of "FL — Florida" that long is unreadable. Built as an element
+	// rather than a string, since hover_card renders a string as one run of
+	// text; every line goes in through .text(), so a region name cannot carry
+	// markup into the card.
+	_hover_list(lines) {
+		const $list = $(`<div class="ts-hoverlist"></div>`);
+		lines.forEach((line) => $("<div></div>").text(line).appendTo($list));
+		return $list[0];
+	}
 
-		const featureRows = companies.map((c) => `
-			<div class="ts-kv ts-kv-company"><span>${frappe.utils.escape_html(c.company)}</span>
-				<span>${c.calculate && c.file ? __("Sales Tax · Transactions Sync") : c.calculate ? __("Compute Sales Tax") : c.file ? __("Sync Transactions") : __("Off")}</span></div>
-		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;
-
+	// API mode leads and appears once. It is a site setting, not a per-company
+	// one, so repeating it under every company would invite the reader to think
+	// it could differ between them.
+	//
+	// No token here. Which key is stored for a company is the Connect step's
+	// business, and this card answers the question the reader actually has:
+	// which account, how many companies, and is anything being logged.
+	_card_body_connect(s) {
 		const mode = s.api_mode || "—";
+		// frappe.ui.badge, the Espresso component. .indicator-pill is deprecated
+		// in favour of it, and the badge is what the feature chips below use, so
+		// the two states on this page are drawn by one component.
 		const modeDisplay = mode === "Live"
-			? `<span class="indicator-pill green no-indicator-dot">${__("Live")}</span>`
+			? frappe.ui.badge.html({ label: __("Live"), theme: "green" })
 			: frappe.utils.escape_html(mode);
+
+		const companies = (s.credentials || []).map((c) => c.company).filter(Boolean);
+		// One company has a name worth printing, and printing it saves the
+		// reader a hover to learn the only thing the row could have said.
+		// Several do not fit the row, so they collapse to a count with the names
+		// behind it.
+		const configuredFor = companies.length === 1
+			? frappe.utils.escape_html(companies[0])
+			: `<span class="ts-hint" data-hover="companies" tabindex="0">${__("{0} companies", [companies.length])}</span>`;
 
 		const retentionDays = s.log_retention_days;
 		const logsDisplay = s.enable_taxjar_logging
 			? __("Enabled · {0} {1} retention", [retentionDays, retentionDays === 1 ? __("day") : __("days")])
 			: __("Off");
 
-		this.$body.html(`
-			<div class="ts-cardgrid">
-				<div class="ts-card"><div class="ts-card-h"><b>${__("Connection")}</b></div>
-					<div class="ts-card-b" style="gap:0">
-						<div class="ts-kv"><span>${__("Mode")}</span><span>${modeDisplay}</span></div>
-						<div class="ts-kv"><span>${__("API Logs")}</span><span class="ts-kv-plain">${logsDisplay}</span></div>
-					</div></div>
-				<div class="ts-card"><div class="ts-card-h"><b>${__("Nexus")}</b></div>
-					<div class="ts-card-b" style="gap:0">
-						<div class="ts-kv"><span>${__("Regions")}</span><span class="ts-kv-plain">${__("{0} across {1} {2}", [totalNexus, nexusCompaniesN, nexusCompaniesN === 1 ? __("company") : __("companies")])}</span></div>
-						<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span></div>
-					</div></div>
-				<div class="ts-card"><div class="ts-card-h"><b>${__("Ledgers & Address")}</b></div>
-					<div class="ts-card-b" style="gap:0">${accountRows}</div></div>
-				<div class="ts-card"><div class="ts-card-h"><b>${__("Features")}</b></div>
-					<div class="ts-card-b" style="gap:0">${featureRows}</div></div>
-			</div>
-		`);
+		return `
+			<div class="ts-kv"><span>${__("API Mode")}</span><span>${modeDisplay}</span></div>
+			<div class="ts-kv"><span>${__("API Configured for")}</span><span class="ts-kv-plain">${configuredFor}</span></div>
+			<div class="ts-kv"><span>${__("API Logs")}</span><span class="ts-kv-plain">${logsDisplay}</span></div>
+		`;
 	}
 
-	// ── Activated ───────────────────────────────────────────────────
-	// Deliberately buttonless. Setup is over, so every button here would be a
-	// guess at what the user came to do next; the desk's own navigation already
-	// answers that better than a "Go to Settings" would. The one control on the
-	// screen is the video, and it plays in place - a link out to YouTube would
-	// throw away the page they just finished.
-	_render_done() {
-		this.$root.find(".ts-head, .ts-title, .ts-foot").addClass("hide");
+	// One tag and a count, not the whole list. A company with economic nexus
+	// everywhere returns up to 46 regions, and three of those would make this
+	// card longer than the rest of the page put together. The rest are one hover
+	// away, with their full names, which is what someone checking a specific
+	// state actually wants.
+	_card_body_nexus(s) {
+		const nexusByCompany = s.nexus_by_company || {};
 
-		// frappe.utils.icon, not a hand-drawn mark - the tick is a stock lucide
-		// outline from the desk's own sprite, sized up and tinted green. Colour
-		// rides --icon-stroke (the variable .icon already reads) rather than a
-		// stroke attribute, because .icon's own `stroke:` rule would win over a
-		// presentation attribute. Green is espresso's --ink-green-* foreground
-		// role, which inverts with the theme; see .ts-done-seal.
-		const seal = frappe.utils.icon("circle-check", { width: "44px", height: "44px" }, "", "", "ts-done-seal");
+		const rows = Object.keys(nexusByCompany).map((company, index) => {
+			const regions = nexusByCompany[company];
+			const name = frappe.utils.escape_html(company);
 
-		// The video's own thumbnail, with the play mark over it - a bare YouTube
-		// glyph on an empty box says "a video exists", not "this video". Still a
-		// facade, not an embed: one image from i.ytimg.com, and nothing from
-		// youtube.com loads for someone who never presses play.
-		//
-		// maxresdefault only exists for videos uploaded above 720p, so it 404s on
-		// plenty of them; hqdefault is generated for every video and is the
-		// fallback. It is 4:3 with letterbox bars baked in, which object-fit:
-		// cover crops back off against the 16:9 frame.
-		const poster = `https://i.ytimg.com/vi/${encodeURIComponent(SETUP_VIDEO_ID)}`;
-		const player = SETUP_VIDEO_ID ? `
-			<div class="ts-done-media">
-				<button type="button" class="ts-done-play" aria-label="${__("Play the TaxJar walkthrough")}">
-					<img class="ts-done-thumb" src="${poster}/maxresdefault.jpg" alt="">
-					<svg class="ts-yt" viewBox="0 0 68 48" aria-hidden="true" focusable="false">
-						<path class="ts-yt-body" d="M66.52 7.74a8.55 8.55 0 0 0-6.02-6.05C55.18 0 34 0 34 0S12.82 0 7.5 1.69A8.55 8.55 0 0 0 1.48 7.74C0 13.09 0 24 0 24s0 10.91 1.48 16.26a8.55 8.55 0 0 0 6.02 6.05C12.82 48 34 48 34 48s21.18 0 26.5-1.69a8.55 8.55 0 0 0 6.02-6.05C68 34.91 68 24 68 24s0-10.91-1.48-16.26z"/>
-						<path class="ts-yt-arrow" d="M27.2 34.29 45.09 24 27.2 13.71z"/>
-					</svg>
+			// A company registered nowhere is a legitimate answer, and a blank
+			// cell reads as a card that failed to render rather than as one.
+			if (!regions.length) {
+				return `<div class="ts-kv ts-kv-company"><span>${name}</span>
+					<span class="ts-kv-plain">${__("No regions registered")}</span></div>`;
+			}
+
+			// The name, not the code. "Florida" is what somebody checking their
+			// registrations reads; FL is what the API returns. The code is still
+			// in the hover list beside each name, for anyone reconciling against
+			// TaxJar's own screen.
+			const first = regions[0];
+			const label = first.region || first.region_code || "—";
+			const hidden = regions.length - 1;
+			const more = hidden > 0
+				? `<span class="ts-hint" data-hover="regions" data-i="${index}" tabindex="0">${__("+{0} {1}", [hidden, hidden === 1 ? __("region") : __("regions")])}</span>`
+				: "";
+
+			return `
+				<div class="ts-kv ts-kv-company"><span>${name}</span>
+					<span class="ts-nexuscell">
+						<span>${frappe.utils.escape_html(label)}</span>${more}
+					</span></div>
+			`;
+		}).join("");
+
+		return `
+			${rows || `<div class="text-muted small">${__("No nexus regions synced yet.")}</div>`}
+			<div class="ts-kv"><span>${__("Auto-Refresh")}</span><span class="ts-kv-plain">${__("Daily at midnight")}</span></div>
+		`;
+	}
+
+	// Ledgers and features describe the same company from two sides, so they
+	// share a block rather than making the reader match a name across two cards.
+	_card_body_ledgers(s) {
+		return (s.companies || []).map((c) => `
+			<div class="ts-accrow">
+				<div class="ts-acc-company">${frappe.utils.escape_html(c.company)}</div>
+				<div class="ts-acc-detail">${__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head || "—")}</div>
+				<div class="ts-acc-detail">${__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
+				<div class="ts-flags">
+					${this._feature_chip(__("Sales tax"), __("Sales tax off"), c.calculate)}
+					${this._feature_chip(__("Transaction sync"), __("Transaction sync off"), c.file)}
+				</div>
+			</div>
+		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;
+	}
+
+	// frappe.ui.badge, the Espresso component, rather than a chip of this page's
+	// own. It carries the theme, the radius and the type size already, and it
+	// inverts with the desk theme without this file owning a second palette.
+	//
+	// Outline in both states, so neither is a filled block of colour on a page
+	// of ordinary configuration. The colour is in the text and the border only.
+	//
+	// It has to be colour, though, and it has to be green for on. Gray is the
+	// inactive colour everywhere in the desk, so a gray badge reading "Sales
+	// tax" says the opposite of what it spells - which is what the muted pair
+	// did. Separating the two by fill instead was worse: nobody would guess
+	// that rule, and gray-on-gray gave them near enough the same weight to read
+	// as one flat group.
+	//
+	// The label still carries the state as well. Colour reaches neither a
+	// reader who does not register it nor a screen reader, which never will.
+	_feature_chip(on_label, off_label, on) {
+		return on
+			? frappe.ui.badge.html({ label: on_label, theme: "green", variant: "outline" })
+			: frappe.ui.badge.html({ label: off_label, variant: "outline" });
+	}
+
+	// The street itself, not a yes/no. This card is the only place the record
+	// says which address TaxJar prices from, and a company with several
+	// addresses is exactly where that matters. Country is printed because the
+	// whole point of the address is where the sale ships from.
+	_card_body_address(s) {
+		return (s.addresses || []).map((a) => {
+			const lines = a.address
+				? [
+					a.address_line1,
+					[a.city, [a.taxjar_state_code, a.pincode].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+					a.country,
+				].filter(Boolean)
+				: [__("Not configured")];
+
+			return `
+				<div class="ts-accrow">
+					<div class="ts-acc-company">${frappe.utils.escape_html(a.company)}</div>
+					${lines.map((line) => `<div class="ts-acc-detail">${frappe.utils.escape_html(line)}</div>`).join("")}
+				</div>
+			`;
+		}).join("") || `<div class="text-muted small">${__("No addresses configured yet.")}</div>`;
+	}
+
+	// ── Activated header ────────────────────────────────────────────
+	// A tick, the headline, and the one action, on a single row. Restrained on
+	// purpose: this screen is read far more often than it is arrived at, and a
+	// full-width celebration wears out the second time somebody opens it to
+	// check a ledger.
+	_done_header() {
+		// A filled disc with a stock lucide tick inside it. Colour rides
+		// --icon-stroke, the variable .icon already reads, rather than a stroke
+		// attribute - .icon's own `stroke:` rule would win over one of those.
+		const tick = `<span class="ts-done-tick">${frappe.utils.icon("check", "sm")}</span>`;
+
+		// A facade, not an embed: one image from i.ytimg.com, and nothing from
+		// youtube.com loads for somebody who never presses play. No duration in
+		// the label - the video can be re-cut without this line going quietly
+		// wrong, and a wrong duration is worse than none.
+		const video = SETUP_VIDEO_ID ? `
+			<div class="ts-video">
+				<button type="button" class="ts-video-play" aria-label="${__("Play the TaxJar walkthrough")}">
+					<img class="ts-video-thumb" src="${SETUP_VIDEO_POSTER}/maxresdefault.jpg" alt="">
+					<span class="ts-video-mark">
+						<svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3 1.5 10 6l-7 4.5Z"/></svg>
+					</span>
 				</button>
-				<p class="ts-done-caption">${__("Walkthrough of auto-sales tax computation & transaction syncing with TaxJar in action")}</p>
+				<div class="ts-video-text">
+					<p class="ts-video-title">${__("Walkthrough")}</p>
+					<p class="ts-video-desc">${__("See auto sales-tax computation and transaction syncing with TaxJar in action.")}</p>
+				</div>
 			</div>
 		` : "";
 
-		this.$body.html(`
+		return `
 			<div class="ts-done">
-				${seal}
-				<h2 class="ts-done-title">${__("TaxJar is configured successfully")}</h2>
-				${player}
+				${tick}
+				<h2 class="ts-done-title">${__("TaxJar is configured")}</h2>
+				<span class="ts-done-spacer"></span>
+				<div class="ts-done-action"></div>
 			</div>
-		`);
-		this.$body.find(".ts-done-play").on("click", () => this._play_setup_video());
+			${video}
+		`;
+	}
+
+	_bind_setup_video() {
+		this.$body.find(".ts-video-play").on("click", () => this._play_setup_video());
 		// Bound here rather than an inline onerror="" attribute, like every other
 		// handler on this page. Safe to bind after inserting the <img>: the
 		// browser cannot fire error before this synchronous block returns.
-		this.$body.find(".ts-done-thumb").one("error", function () {
-			this.src = `${poster}/hqdefault.jpg`;
+		//
+		// maxresdefault only exists for videos uploaded above 720p, so it 404s on
+		// plenty of them; hqdefault is generated for every video.
+		this.$body.find(".ts-video-thumb").one("error", function () {
+			this.src = `${SETUP_VIDEO_POSTER}/hqdefault.jpg`;
 		});
 	}
 
-	// The facade becomes the player in place. The row goes single-column at the
-	// same time: a 16:9 frame wide enough to watch leaves no room for a caption
-	// beside it, and the caption has done its job once the video is running.
+	// The row becomes the player. A 168x96 frame is a thumbnail, not something
+	// anybody can watch, so the card drops its side-by-side layout and gives the
+	// video the width - the description has done its job once the video runs.
 	_play_setup_video() {
-		const $media = this.$body.find(".ts-done-media").addClass("is-playing");
+		const $video = this.$body.find(".ts-video").addClass("is-playing");
 		const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(SETUP_VIDEO_ID)}?autoplay=1&rel=0`;
-		$media.find(".ts-done-play").replaceWith(`
-			<div class="ts-done-frame">
+		$video.find(".ts-video-play").replaceWith(`
+			<div class="ts-video-frame">
 				<iframe
 					src="${src}"
 					title="${__("TaxJar walkthrough")}"

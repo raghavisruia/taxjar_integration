@@ -327,8 +327,9 @@
    slot hands a different width to the two flex: 1 fields in every state. That
    made Company/Live token columns not line up between rows sitting in
    different states, and made a row's own inputs resize mid-request on
-   Connect. A reserved column keeps both stable; the width is sized for the
-   widest steady-state content (the idle "Connect" button). */
+   Connect. A reserved column keeps both stable; the width is sized above the
+   widest content any state can hold, which is "Connecting…" and its spinner -
+   above it, not equal to it, so no state has to be padded out to reach it. */
 /* Action slot and remove button share one bottom-aligned wrapper rather than
    each carrying align-self: flex-end of their own. Bottom-aligning them
    separately lined up their bottom EDGES, and they are different heights - the
@@ -343,15 +344,37 @@
 	display: flex; align-items: center; gap: 12px; align-self: flex-end;
 }
 .taxjar-setup .ts-cred-row .ts-cred-action {
-	flex: 0 0 84px; display: flex; align-items: center; gap: 6px;
+	flex: 0 0 150px; display: flex; align-items: center; justify-content: flex-start;
 }
+/* The buttons are NOT stretched to the slot. .es-button centres its contents,
+   so a 92px "Connect" forced to the full 150px put ~29px of bare button either
+   side of the icon-and-word pair, which reads as the icon being flung away
+   from the word - the ragged column moved inside the buttons rather than going
+   away. They sit at the slot's leading edge instead, at their own width, so
+   all four states start at the same x and each keeps the button's own 8px gap.
+
+   frappe.ui.button offers only gray and red themes, so the verified state's
+   green is this page's own. --ink-green-7 and --outline-green-3 are the same
+   espresso tokens the green badge reads, so it inverts with the theme like
+   every other green here; the icon follows because the button renders it with
+   stroke="currentColor". */
+.taxjar-setup .es-button.ts-cred-ok {
+	color: var(--ink-green-7);
+	border-color: var(--outline-green-3);
+}
+.taxjar-setup .es-button.ts-cred-ok:hover { border-color: var(--ink-green-7); }
 /* The failure reason, sitting in the token column's second line - exactly
-   where that field's own .help-box would have put it, and carrying the same
-   red as the input border frappe's has-error/has-error-invalid gives it
-   (controls.scss), so the two read as one signal. :empty rather than a
-   toggled class: an empty grid item would still contribute its row-gap. */
+   where that field's own .help-box would have put it. It is the only red left
+   on a failed row now that the input is no longer marked invalid, so it has to
+   actually be red. :empty rather than a toggled class: an empty grid item would
+   still contribute its row-gap. */
+/* --ink-red-6, not --error-color: espresso defines --error-bg and
+   --error-border but no --error-color, so the rule resolved to nothing and the
+   reason rendered in the inherited body colour - the same trap .ts-addr-warn
+   below fell into. --ink-red-6 is the foreground red espresso itself uses for
+   destructive text, and it inverts with the theme. */
 .taxjar-setup .ts-cred-row .ts-cred-error {
-	grid-column: 2; font-size: var(--text-sm); color: var(--error-color);
+	grid-column: 2; font-size: var(--text-sm); color: var(--ink-red-6);
 }
 .taxjar-setup .ts-cred-row .ts-cred-error:empty { display: none; }
 /* .ts-card-b's default align-items: stretch would otherwise stretch the
@@ -457,83 +480,132 @@
 .taxjar-setup .ts-addr-warn { color: var(--ink-red-6); font-size: var(--text-sm); }
 .taxjar-setup .ts-addr-muted { color: var(--text-muted); font-size: var(--text-sm); }
 
-/* ── Activated: the screen after Activate ────────────────────────────────
-   The wizard's chrome (rail, step captions, footer buttons) is hidden here —
-   setup is finished, so a Back/Next pair would only invite the user back into
-   a flow they just completed. Nothing on this screen is a button except the
-   video, and it plays inline; where the user goes next is the desk's job.
-   Green is espresso's --ink-green-* role (the Component Explorer palette), not
-   the raw --green-* scale: ink-* is the foreground role and inverts with the
-   theme, where --green-600 stays dark and all but vanishes on a dark ground.
-   The literal hexes below are the two colours that are not the desk's to pick
-   — YouTube's red, and the ground behind a video frame. */
+/* ── The activated review page ───────────────────────────────────────────
+   Restrained on purpose. This screen is read far more often than it is
+   arrived at — a full-width celebration wears out the second time somebody
+   opens it to check a ledger — so the tick, the headline and the one action
+   share a single row.
+
+   Colours are desk tokens throughout. --ink-green-* is the foreground role,
+   which inverts with the theme, where the raw --green-* ramp does not: it is
+   pale on both grounds and would put light text on a light fill in dark mode. */
 .taxjar-setup .ts-done {
-	display: flex; flex-direction: column; align-items: center;
-	gap: 20px; text-align: center; padding: 64px 0 32px;
+	display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+	padding: 4px 0 24px;
 }
+.taxjar-setup .ts-done-spacer { flex: 1; }
+.taxjar-setup .ts-done-action { flex: none; }
 
-/* Stock frappe.utils.icon("circle-check"), sized up and tinted. .icon already
-   reads --icon-stroke / --icon-fill, so overriding those two is the whole
-   theme: no override of `stroke:` itself, which would fight the framework's
-   own rule the next time it changes. Left at .icon's 1.5px stroke — at 44px
-   that reads as a hairline, which is the point. */
-.taxjar-setup .ts-done-seal {
-	flex: none;
+/* A filled disc behind a stock lucide tick. --icon-stroke is the variable
+   .icon already reads; a stroke="" attribute would lose to .icon's own rule. */
+.taxjar-setup .ts-done-tick {
+	flex: none; width: 32px; height: 32px; border-radius: 50%;
+	display: inline-flex; align-items: center; justify-content: center;
+	background: var(--surface-green-2);
 	--icon-stroke: var(--ink-green-7);
-	--icon-fill: none;
 }
+/* Same 24px/700 as .ts-title and .ts-nexustitle. This is the page's heading,
+   and it should not read as a smaller class of thing than a step's. min-width
+   lets it shrink inside the flex row rather than pushing the button off. */
+.taxjar-setup .ts-done-title { margin: 0; min-width: 0; font-size: 24px; font-weight: 700; }
 
-.taxjar-setup .ts-done-title { margin: 0; font-size: 24px; font-weight: 700; }
-
-/* Facade and caption side by side, stacking under ~560px. Once the video is
-   playing the row goes single-column regardless — see .is-playing below. */
-.taxjar-setup .ts-done-media {
-	display: flex; align-items: center; justify-content: center;
-	gap: 28px; flex-wrap: wrap; margin-top: 12px; width: 100%;
-}
-/* Thumbnail with the play mark centred over it. 16:9 with the image cropped to
-   fill, so hqdefault's baked-in letterbox bars fall outside the frame when
-   maxresdefault is missing and the fallback loads. The dark ground shows only
-   while the image is in flight, or if i.ytimg.com is unreachable — the play
-   mark still reads against it, so an offline desk gets a working button rather
-   than a blank box. Fixed dark, not a theme surface: it stands in for a video
-   frame, and a light-theme desk showing a white gap there reads as broken. */
-.taxjar-setup .ts-done-play {
-	flex: none; position: relative; overflow: hidden;
-	width: 280px; aspect-ratio: 16 / 9; padding: 0; cursor: pointer;
-	display: flex; align-items: center; justify-content: center;
-	background: #0f0f0f; border: 1px solid var(--border-color);
-	border-radius: var(--radius-lg, 12px);
-}
-.taxjar-setup .ts-done-thumb {
-	position: absolute; inset: 0;
-	width: 100%; height: 100%; object-fit: cover;
-}
-/* Above the thumbnail, and dimmed a touch until the box is hovered — the mark
-   is the affordance, so it brightens as the pointer arrives rather than
-   sitting at full saturation over someone's video frame. */
-.taxjar-setup .ts-done-play .ts-yt {
-	position: relative; width: 62px; height: 44px; opacity: 0.88;
-	filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.4));
-}
-.taxjar-setup .ts-done-play:hover .ts-yt { opacity: 1; }
-.taxjar-setup .ts-yt-body { fill: #f61c0d; }
-.taxjar-setup .ts-yt-arrow { fill: #fff; }
-
-.taxjar-setup .ts-done-caption {
-	margin: 0; max-width: 330px; text-align: left;
-	font-size: var(--text-md); line-height: 1.6;
-}
-
-/* Playing: the frame takes the column and the caption drops under it, centred.
-   A 16:9 frame wide enough to watch leaves nothing usable beside it. */
-.taxjar-setup .ts-done-media.is-playing { flex-direction: column; gap: 14px; }
-.taxjar-setup .ts-done-frame {
-	width: 100%; max-width: 720px; aspect-ratio: 16 / 9;
+/* ── Walkthrough ─────────────────────────────────────────────────────────
+   A row, not a hero: thumbnail beside its description, the width of the page.
+   Still a facade — one image from i.ytimg.com, and nothing from youtube.com
+   loads for somebody who never presses play. */
+.taxjar-setup .ts-video {
+	display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+	padding: 16px 18px; margin-bottom: 16px;
 	border: 1px solid var(--border-color); border-radius: var(--radius-lg, 12px);
-	overflow: hidden;
 }
-.taxjar-setup .ts-done-frame iframe { display: block; width: 100%; height: 100%; border: 0; }
-.taxjar-setup .ts-done-media.is-playing .ts-done-caption {
-	max-width: 720px; text-align: center; color: var(--text-muted);
+.taxjar-setup .ts-video-play {
+	flex: none; position: relative; overflow: hidden; padding: 0; cursor: pointer;
+	width: 168px; height: 96px;
+	display: flex; align-items: center; justify-content: center;
+	/* Fixed dark, not a theme surface: it stands in for a video frame, and it
+	   shows only while the thumbnail is in flight or if i.ytimg.com is
+	   unreachable. A light gap there reads as broken. */
+	background: #0f0f0f;
+	border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px);
 }
+/* 16:9 cropped to fill, so hqdefault's baked-in letterbox bars fall outside
+   the frame when maxresdefault is missing and the fallback loads. */
+.taxjar-setup .ts-video-thumb { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.taxjar-setup .ts-video-mark {
+	position: relative; width: 34px; height: 34px; border-radius: 50%;
+	display: inline-flex; align-items: center; justify-content: center;
+	background: rgba(0, 0, 0, 0.62); backdrop-filter: blur(2px);
+}
+.taxjar-setup .ts-video-mark svg { width: 12px; height: 12px; fill: #fff; margin-left: 1px; }
+.taxjar-setup .ts-video-play:hover .ts-video-mark { background: rgba(0, 0, 0, 0.8); }
+
+.taxjar-setup .ts-video-text { flex: 1; min-width: 200px; }
+.taxjar-setup .ts-video-title { margin: 0 0 4px; font-size: var(--text-md); font-weight: 600; }
+.taxjar-setup .ts-video-desc { margin: 0; font-size: var(--text-base); line-height: 1.5; color: var(--text-muted); }
+
+/* Playing: the frame takes the row and the description drops away. A 168x96
+   player is a thumbnail, not something anybody can watch. */
+.taxjar-setup .ts-video.is-playing { flex-direction: column; align-items: stretch; gap: 0; }
+.taxjar-setup .ts-video.is-playing .ts-video-text { display: none; }
+.taxjar-setup .ts-video-frame {
+	width: 100%; max-width: 720px; margin: 0 auto; aspect-ratio: 16 / 9;
+	border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px); overflow: hidden;
+}
+.taxjar-setup .ts-video-frame iframe { display: block; width: 100%; height: 100%; border: 0; }
+
+/* ── The configuration record ────────────────────────────────────────────
+   Four cards. Ledgers and Features describe the same company from two sides,
+   so they share one. Nothing maps to a wizard step any more — editing
+   re-walks the whole wizard — so the cards group by what a reader looks for.
+
+   The cards themselves are .ts-card with .ts-card-h, the same two the Connect,
+   Accounts and Features steps use. A summary of the configuration should not
+   introduce a second kind of card, and its headers should not read in a
+   different voice from the ones the user just walked past.
+
+   Only the column rule is this grid's own, the way .ts-nexusresult overrides
+   the same property: .ts-cardgrid caps a card at 420px so a lone form card
+   doesn't stretch across the page, while these are a record and should fill
+   the width.
+
+   Both cards in a row take the height of the taller one, so every row closes
+   on a single line. Left to `start` they ended wherever their content did, and
+   a Nexus card holding two lines beside a Connection card holding three broke
+   the block into a ragged staircase. The shorter card carries some empty space
+   under its last row; a straight edge down the page is worth more than that,
+   because these cards are read by scanning across them. Stated rather than
+   inherited: this is the grid default, but it is also a decision, and the next
+   reader should find the reason here rather than re-derive it. */
+.taxjar-setup .ts-cfggrid {
+	grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+	align-items: stretch;
+}
+
+/* The record's rows carry their own padding and dividers, so .ts-card-b's flex
+   gap — sized for stacked form controls — would double the spacing between
+   them, and its 14px top padding would sit on top of the first row's own. */
+.taxjar-setup .ts-card-b.ts-card-rows { gap: 0; padding: 2px 14px 8px; }
+
+/* The card a remedial link named. Every card is open, so the marker is all
+   there is to distinguish it. */
+.taxjar-setup .ts-cfg-focus { border-color: var(--text-color); }
+
+/* ── The two hover targets ───────────────────────────────────────────────
+   A dotted underline says "there is more here" without promising a link.
+   frappe.ui.hover_card does the rest, and it opens on keyboard focus too —
+   tabindex is what makes that reachable. */
+.taxjar-setup .ts-hint {
+	text-decoration: underline; text-decoration-style: dotted;
+	text-underline-offset: 3px; cursor: default;
+}
+.taxjar-setup .ts-hoverlist { display: flex; flex-direction: column; gap: 2px; }
+/* One company can hold 46 regions. Past about fifteen the card would run off
+   the screen, so it scrolls rather than growing. */
+.taxjar-setup .ts-hoverlist { max-height: 260px; overflow-y: auto; }
+
+.taxjar-setup .ts-nexuscell { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* Feature flags are frappe.ui.badge (.es-badge), the Espresso component, so
+   this file owns the row they sit in and nothing about the badge itself — it
+   brings its own theme, radius and type size, and inverts with the desk. */
+.taxjar-setup .ts-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
