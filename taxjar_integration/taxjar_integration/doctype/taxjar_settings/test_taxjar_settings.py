@@ -7931,18 +7931,38 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			result = get_transactions(filters={}, page=-5)
 		self.assertEqual(result["page"], 1)
 
-	def test_retry_is_offered_only_where_every_row_can_be_retried(self):
-		"""The Failed tab is the eligibility filter now - it is what the old
-		"{n} retryable" counter had to spell out when Failed rows sat mixed in
-		with Synced and Queued."""
+	def test_retry_acts_only_on_the_rows_that_can_be_retried(self):
+		"""Every row on the Failed tab is retryable, so the tab is its own
+		filter. All Transactions is the union of all five, so a selection there
+		can hold Synced, Queued, Draft and Excluded rows that Resync cannot
+		touch - and those are filtered out before the action runs."""
 		js = self._transactions_js()
 		bulk_fn = js.split("update_bulk_state() {")[1].split("\n\t}\n")[0]
-		self.assertIn("if (this.active_tab !== FAILED_TAB) {", bulk_fn)
-		self.assertIn('__("Resync with TaxJar")', bulk_fn)
+		self.assertIn('taxjar_sync_status === "Failed"', bulk_fn)
+		self.assertIn("this.bulk_retry(retryable)", bulk_fn)
 		self.assertIn('__("{0} selected"', bulk_fn)
-		# No per-row status test left: the tab already did it.
-		self.assertNotIn('taxjar_sync_status === "Failed"', bulk_fn)
 		self.assertIn("bulk_retry", js)
+
+	def test_a_selection_says_what_the_action_can_act_on(self):
+		"""Ticking five rows of which two failed has to say two somewhere before
+		the press. The caption counts the selection, so the menu item counts
+		what it will do - on All Transactions, where the two can differ."""
+		js = self._transactions_js()
+		label_fn = js.split("retry_label(count) {")[1].split("\n\t}\n")[0]
+		self.assertIn('__("Resync {0} failed transactions", [count])', label_fn)
+		# "Resync 1 failed transactions" is the bug this guards.
+		self.assertIn('__("Resync 1 failed transaction")', label_fn)
+		# On the Failed tab the count would only repeat the caption beside it.
+		self.assertIn("if (this.active_tab === FAILED_TAB) return", label_fn)
+		self.assertIn('__("Resync with TaxJar")', label_fn)
+
+	def test_a_selection_with_nothing_eligible_says_so_on_the_button(self):
+		"""An empty menu leaves the button disabled, and a disabled button that
+		explains itself is the only warning the reader gets before pressing."""
+		js = self._transactions_js()
+		bulk_fn = js.split("update_bulk_state() {")[1].split("\n\t}\n")[0]
+		self.assertIn('__("None of the selected transactions can be resynced")', bulk_fn)
+		self.assertIn('__("Select one or more records to run an action")', bulk_fn)
 
 	def _transactions_js(self):
 		import os
@@ -7987,9 +8007,9 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		js = self._transactions_js()
 		self.assertNotIn("SENT_TABS", js)
 		self.assertNotIn("STATUS_TABS", js)
-		# Retry is still offered only where a row was actually sent, though -
+		# Retry is still offered only where a retryable row can appear, though -
 		# the checkbox is a capability, not a reading, so it stays per-tab.
-		self.assertIn("checkboxColumn: key === FAILED_TAB", js)
+		self.assertIn("checkboxColumn: key === FAILED_TAB || key === ALL_TAB", js)
 
 	def test_a_draft_is_told_what_to_do_rather_than_given_a_status(self):
 		"""Nothing syncs before submit, so whatever the field holds for a draft -
@@ -8020,11 +8040,18 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		self.assertNotIn("taxjar-sync-trigger", draft_branch)
 		self.assertNotIn("data-info", draft_branch)
 
-	def test_only_the_failed_tab_has_a_checkbox_column(self):
-		"""Retry is the only bulk action, so selection is offered exactly where
-		it can be run."""
+	def test_selection_is_offered_where_retryable_rows_are(self):
+		"""Failed holds nothing else, and All Transactions is where a reader who
+		has not gone looking for the Failed tab meets those same rows. The three
+		between them hold nothing retryable, so a checkbox there would lead only
+		to an empty menu."""
 		js = self._transactions_js()
-		self.assertIn("checkboxColumn: key === FAILED_TAB", js)
+		self.assertIn("checkboxColumn: key === FAILED_TAB || key === ALL_TAB", js)
+		fn = js.split("tab_offers_selection() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this.active_tab === FAILED_TAB", fn)
+		self.assertIn("this.active_tab === ALL_TAB", fn)
+		for no_selection in ("QUEUED_TAB", "SYNCED_TAB", "DRAFT_TAB", "EXCLUDED_TAB"):
+			self.assertNotIn(no_selection, fn)
 
 	def test_the_tabs_and_their_order(self):
 		"""Everything first, so the reader sees the whole population before

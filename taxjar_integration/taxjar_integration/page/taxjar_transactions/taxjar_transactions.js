@@ -475,9 +475,12 @@ class TaxJarTransactionSync {
 				columns: this.get_columns(),
 				data: this.invoices,
 				options: {
-					// Retry is the only bulk action, so selection is offered
-					// exactly where it can be run.
-					checkboxColumn: key === FAILED_TAB,
+					// Failed is where every row can be retried, and All
+					// Transactions is where a reader who has not gone looking
+					// for the Failed tab meets those same rows. The three
+					// between them hold nothing retryable, so a checkbox there
+					// would only lead to an empty menu.
+					checkboxColumn: key === FAILED_TAB || key === ALL_TAB,
 					noDataMessage: __("No transactions found"),
 				},
 				on_check_row: () => this.update_bulk_state(),
@@ -620,25 +623,51 @@ class TaxJarTransactionSync {
 		return this.datatable?.get_checked_items().filter(Boolean) || [];
 	}
 
-	// Only the Failed tab offers selection, and every row on it is retryable -
-	// the tab is the eligibility filter that the old "{n} retryable" counter
-	// used to be, back when Failed rows sat mixed in with Synced and Queued.
+	// Every row on the Failed tab is retryable, so the tab itself is the
+	// eligibility filter. All Transactions is the union of all five, so a
+	// selection there can hold rows that Resync cannot touch - Synced, Queued,
+	// Draft, Excluded. bulk_retry() on the server skips those anyway, but an
+	// action that silently does nothing to three of the five rows a reader
+	// ticked is a report they only get afterwards. So the count of rows ticked
+	// and the count the action can act on are stated apart, before the press:
+	// the caption counts the selection, the menu item counts what it will do.
+	//
+	// With nothing eligible there is no menu item, which leaves the button
+	// disabled and explaining itself - see BulkActionButton.
 	update_bulk_state() {
-		if (this.active_tab !== FAILED_TAB) {
+		if (!this.tab_offers_selection()) {
 			this.$tab_actions.hide();
 			return;
 		}
 		this.$tab_actions.show();
 
 		const checked = this.get_checked();
+		const retryable = checked.filter((row) => row.taxjar_sync_status === "Failed");
 
 		this.$selection_count.text(checked.length ? __("{0} selected", [checked.length]) : "");
 		this.bulk_action.set_items(
-			checked.length
-				? [{ label: __("Resync with TaxJar"), action: () => this.bulk_retry(checked) }]
+			retryable.length
+				? [{ label: this.retry_label(retryable.length), action: () => this.bulk_retry(retryable) }]
 				: []
 		);
-		this.bulk_action.disabled_title = __("Select one or more records to run an action");
+		this.bulk_action.disabled_title = checked.length
+			? __("None of the selected transactions can be resynced")
+			: __("Select one or more records to run an action");
+	}
+
+	tab_offers_selection() {
+		return this.active_tab === FAILED_TAB || this.active_tab === ALL_TAB;
+	}
+
+	// On the Failed tab every ticked row is retryable, so the count would only
+	// repeat the caption beside it. On All Transactions it is the one place the
+	// reader learns that three of their five rows are not going anywhere.
+	retry_label(count) {
+		if (this.active_tab === FAILED_TAB) return __("Resync with TaxJar");
+
+		return count === 1
+			? __("Resync 1 failed transaction")
+			: __("Resync {0} failed transactions", [count]);
 	}
 
 	bulk_retry(rows) {
