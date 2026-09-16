@@ -1479,6 +1479,15 @@ def validate_return_against(doc, method):
 		# Both tags survive clean_html(), which strips anything off its
 		# allowlist. Sentence per translatable string, with the markup outside
 		# them.
+		#
+		# The rule below checks the FIRST token of a concatenated message, not
+		# whether the text is translated: it asks for _( and finds "<b>". Every
+		# sentence here is translated, and so is the title. The untranslated
+		# literals are the tags and the arrow, which must stay untranslated.
+		# Keeping them outside _() is the point - a translator never sees an
+		# HTML tag and so cannot break one. ERPNext puts its markup inside the
+		# string instead, which is why the rule never fires there.
+		# nosemgrep: frappe-missing-translate-function-python
 		frappe.throw(
 			"<b>"
 			+ _(
