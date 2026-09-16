@@ -1761,20 +1761,23 @@ class TaxJarSetup {
 	// least one region for it — a company with none would otherwise just be
 	// missing from this step with nothing said about it.
 	_render_nexus_groups(nexusByCompany) {
-		const $result = this.$body.find(".ts-nexusresult").empty();
+		const $result = this.$body.find(".ts-nexusresult").empty().removeAttr("aria-busy");
 		const companies = ((this.state || {}).companies || []).map((c) => c.company).filter(Boolean);
 		const total = companies.reduce((n, c) => n + (nexusByCompany[c] || []).length, 0);
 
 		// The banner explains a list that is there. With no list it is one more
 		// thing to read past on the way to the only message that matters, and
 		// its own "Manage TaxJar Nexus" link duplicates that message's button.
-		this._toggle_nexus_note(!!total);
+		// While the first fetch runs the list is still the expected answer, so
+		// the banner stays up rather than dropping in over the cards later.
+		this._toggle_nexus_note(!!total || !this._nexus_answered);
 
 		if (!total) {
 			// Before the first fetch answers there is nothing to say: an empty
 			// state here would read as "TaxJar has no nexus" while the request
 			// that decides that is still in flight.
 			if (this._nexus_answered) $result.append(this._nexus_empty_state());
+			else this._render_nexus_placeholder($result, companies);
 			return;
 		}
 
@@ -1795,6 +1798,25 @@ class TaxJarSetup {
 				</div>
 			`;
 		}).join(""));
+	}
+
+	// A first visit has nothing cached and the fetch takes a few seconds, so the
+	// step would otherwise stand at its title with the whole grid blank. The
+	// company names are known already and only their regions are not, so the
+	// wait draws the answer's own shape: one card per company, with bars where
+	// the region pills go.
+	_render_nexus_placeholder($result, companies) {
+		const widths = ["72px", "58px", "84px", "64px", "76px"];
+		$result.attr("aria-busy", "true").html(companies.map((company) => `
+			<div class="ts-card">
+				<div class="ts-card-h"><b>${frappe.utils.escape_html(company)}</b></div>
+				<div class="ts-card-b">
+					<div class="ts-pills">${widths.map((width) => frappe.ui.skeleton.html({
+						width, height: "26px", css_class: "ts-pillskel",
+					})).join("")}</div>
+				</div>
+			</div>
+		`).join(""));
 	}
 
 	_toggle_nexus_note(show) {

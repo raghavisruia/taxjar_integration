@@ -418,6 +418,10 @@
 	padding: 4px 11px; display: inline-flex; gap: 7px;
 }
 .taxjar-setup .ts-pillcode { font-family: var(--font-family-monospace, monospace); color: var(--text-muted); }
+/* The bars that stand in for region pills while the first fetch runs. They take
+   the pill's own height and radius, so the placeholder holds the height the
+   answer needs and nothing moves when the regions arrive. */
+.taxjar-setup .ts-pillskel { border-radius: 100px; }
 /* A company TaxJar returned no regions for, in a grid alongside companies that
    did have some — so it stays a card, with the way out stated inside it. */
 .taxjar-setup .ts-nonexus { font-size: var(--text-sm); color: var(--text-muted); }

@@ -14450,9 +14450,13 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 	def test_nexus_note_is_hidden_when_there_is_no_list_to_explain(self):
 		"""The banner explains a list of regions. With no list it is one more
 		thing to read past on the way to the only message that matters - and its
-		own "Manage TaxJar Nexus" link duplicates that message's button."""
+		own "Manage TaxJar Nexus" link duplicates that message's button.
+
+		The first fetch is the exception. A list is still the expected answer
+		then, so the banner stays up rather than dropping in over the cards once
+		the regions arrive."""
 		js = self._js()
-		self.assertIn("_toggle_nexus_note(!!total)", js)
+		self.assertIn("_toggle_nexus_note(!!total || !this._nexus_answered)", js)
 		toggle = js.split("_toggle_nexus_note(show) {")[1].split("\n\t}")[0]
 		self.assertIn('.find(".ts-nexusnote-mount").toggleClass("hide", !show)', toggle)
 
