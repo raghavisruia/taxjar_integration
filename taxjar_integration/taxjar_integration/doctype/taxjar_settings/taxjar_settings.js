@@ -22,13 +22,22 @@ function _render_product_tax_category_html(frm) {
 }
 
 function _set_setup_intro(frm) {
-	// Guided-setup banner: always offered, whether or not setup is complete -
-	// the wizard is safe to re-run any time (make_custom_fields() etc. are all
-	// idempotent), so there is no "done, stop asking" state to check for.
-	// Manual editing of the form below stays fully available either way.
+	// Always offered, whether or not setup is complete - the wizard is safe to
+	// re-run any time (make_custom_fields() etc. are all idempotent), so there is
+	// no "done, stop asking" state to check for. Manual editing of the form below
+	// stays fully available either way.
+	//
+	// What changes is what the banner offers. An unfinished setup gets the
+	// invitation; a finished one gets the way back in to change something. Same
+	// colour and wording as the workspace banner, because it is the same link -
+	// a blue "go and set this up" on a site that finished setup months ago is
+	// what this reads off setup_complete to avoid.
+	const done = !!frm.doc.setup_complete;
 	frm.set_intro(
-		`<a href="/app/taxjar-setup">${__("Go to guided setup experience")} →</a>`,
-		"blue"
+		done
+			? `<a href="/app/taxjar-setup">${__("Edit configuration")} →</a>`
+			: `<a href="/app/taxjar-setup">${__("Go to guided setup experience")} →</a>`,
+		done ? "green" : "blue"
 	);
 }
 

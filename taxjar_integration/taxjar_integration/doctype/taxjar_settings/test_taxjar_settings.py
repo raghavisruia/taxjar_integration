@@ -9456,15 +9456,17 @@ class TestGuidedSetupAlert(UnitTestCase):
 			ws.save(ignore_permissions=True)
 
 	def test_creates_custom_html_block_with_expected_content(self):
+		from taxjar_integration import install
 		from taxjar_integration.install import add_guided_setup_alert
 		add_guided_setup_alert()
 
 		block = frappe.get_doc("Custom HTML Block", self.block_name)
 		self.assertIn("taxjar-setup", block.html)
 		self.assertIn("blue", block.html)
-		# Always shown - no setup_complete gate to hide it once the wizard is
-		# run, unlike the Settings form's own intro.
-		self.assertFalse(block.script)
+		# Always shown - the banner is never hidden once the wizard is run, it
+		# changes state. The script is what reads setup_complete and swaps it to
+		# the green half; both halves ship in the html above.
+		self.assertEqual(block.script, install.GUIDED_SETUP_ALERT_SCRIPT)
 
 	def test_registers_custom_blocks_child_row(self):
 		"""The `custom_blocks` child table on Workspace is what the block editor
@@ -9549,9 +9551,11 @@ class TestGuidedSetupAlert(UnitTestCase):
 		"""A style/copy edit to the constants in install.py must reach sites that
 		already ran setup once before, not just fresh installs - the app is the
 		source of truth, same convention as create_custom_fields(update=True).
-		Also covers a site left over from before the hide-on-setup_complete
-		script was removed: its stale script must be cleared, not merely left
-		alone because the html already matches."""
+		Covers the script as well as the html. The block carries one again - it
+		is what reads setup_complete and swaps the banner to its green state -
+		so a site whose script is stale, empty or left over from an older
+		version must be brought back to the constant, not left alone because
+		the html already matches."""
 		from taxjar_integration import install
 
 		install.add_guided_setup_alert()
@@ -9564,7 +9568,7 @@ class TestGuidedSetupAlert(UnitTestCase):
 
 		refreshed = frappe.get_doc("Custom HTML Block", self.block_name)
 		self.assertEqual(refreshed.html, install.GUIDED_SETUP_ALERT_HTML)
-		self.assertFalse(refreshed.script)
+		self.assertEqual(refreshed.script, install.GUIDED_SETUP_ALERT_SCRIPT)
 
 
 # ── Nexus & Product Category tab: count/last-updated summary ─────────────────

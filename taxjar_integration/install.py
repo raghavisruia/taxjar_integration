@@ -63,6 +63,19 @@ GUIDED_SETUP_ALERT_BLOCK = "TaxJar Guided Setup Alert"
 # the supported extension point for custom workspace content. "Subtle" = a soft
 # tinted fill rather than the "outline" variant's bordered-only look.
 #
+# The colours are the ones .es-alert itself reads for data-theme="blue" and
+# data-theme="green" (frappe/public/css/espresso/components/alert.css):
+# --surface-*-2 for the fill, --ink-*-6 for the icon, and --ink-gray-9 /
+# --ink-gray-6 for the two lines of text. --ink-*-7 carries the link, which the
+# component has no equivalent for - in light mode it is --blue-600 / --green-600,
+# the values this banner used to hardcode.
+#
+# They are theme ROLES, and that is the point of using them: --surface-blue-2 is
+# --blue-100 on a light ground and --blue-900 on a dark one. The raw ramp does
+# not invert - --blue-50 is #f1f8fe in light and #c9e0f5 in dark, pale in both -
+# so a fill taken from there put near-white --ink-gray-9 text on a pale blue
+# background for every user on the dark theme.
+#
 # Custom HTML Block content is rendered inside a Shadow DOM
 # (CustomBlockWidget -> frappe.create_shadow_element(), dom.js), which is its own
 # tree scope - an <svg><use href="#icon-info"> referencing the global lucide sprite
@@ -71,18 +84,26 @@ GUIDED_SETUP_ALERT_BLOCK = "TaxJar Guided Setup Alert"
 # box-sizing: border-box;` on the outer div is likewise explicit rather than
 # assumed, since the shadow host custom element's own default display/sizing
 # behavior isn't something this app controls.
+# Both states ship in the html and the script below picks one, rather than the
+# server rendering whichever state was true at migrate time. A banner baked at
+# migrate goes stale the moment somebody finishes the wizard, and nothing runs
+# again until the next migrate.
+#
+# The pending state is the one that renders if the script never runs (an old
+# browser, a failed call, a user who cannot read the flag). It links to the
+# setup page either way, so the fallback is the safe half.
 GUIDED_SETUP_ALERT_HTML = """
-<div style="
+<div data-taxjar-state="pending" style="
 	display: flex;
 	align-items: flex-start;
 	gap: 12px;
 	width: 100%;
 	box-sizing: border-box;
 	padding: 14px 16px;
-	background: var(--blue-50);
-	border-radius: 8px;
+	background: var(--surface-blue-2);
+	border-radius: var(--radius-md);
 ">
-	<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue-500)"
+	<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--ink-blue-6)"
 		stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
 		style="flex-shrink: 0; margin-top: 1px;">
 		<circle cx="12" cy="12" r="10" />
@@ -90,16 +111,65 @@ GUIDED_SETUP_ALERT_HTML = """
 		<path d="M12 8h.01" />
 	</svg>
 	<div>
-		<div style="font-weight: 600; font-size: 13px; color: var(--heading-color);">
+		<div style="font-weight: 600; font-size: 13px; color: var(--ink-gray-9);">
 			Configure TaxJar Integration
 		</div>
-		<div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">
-			<a href="/app/taxjar-setup" style="color: var(--blue-600); font-weight: 500;">
+		<div style="font-size: 13px; color: var(--ink-gray-6); margin-top: 2px;">
+			<a href="/app/taxjar-setup" style="color: var(--ink-blue-7); font-weight: 500;">
 				Go to guided setup experience &rarr;
 			</a>
 		</div>
 	</div>
 </div>
+<div data-taxjar-state="done" style="
+	display: none;
+	align-items: flex-start;
+	gap: 12px;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 14px 16px;
+	background: var(--surface-green-2);
+	border-radius: var(--radius-md);
+">
+	<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--ink-green-6)"
+		stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+		style="flex-shrink: 0; margin-top: 1px;">
+		<circle cx="12" cy="12" r="10" />
+		<path d="m9 12 2 2 4-4" />
+	</svg>
+	<div>
+		<div style="font-weight: 600; font-size: 13px; color: var(--ink-gray-9);">
+			TaxJar Integration is successfully configured
+		</div>
+		<div style="font-size: 13px; color: var(--ink-gray-6); margin-top: 2px;">
+			<a href="/app/taxjar-setup" style="color: var(--ink-green-7); font-weight: 500;">
+				Edit configuration &rarr;
+			</a>
+		</div>
+	</div>
+</div>
+""".strip()
+
+# Runs inside the block's Shadow DOM, where frappe.create_shadow_element() hands
+# it `root_element` (the shadow root) as its only local. `frappe` itself is a
+# window global, so frappe.xcall reaches it from in here.
+#
+# get_setup_status() is used rather than get_setup_state(): this runs for every
+# user who opens the workspace, and get_setup_state() guards on read permission
+# for TaxJar Settings, which most of them do not have. A failure leaves the
+# pending state showing, which is the state that links somewhere useful anyway.
+GUIDED_SETUP_ALERT_SCRIPT = """
+frappe
+	.xcall("taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup.get_setup_status")
+	.then(function (status) {
+		if (!status || !status.setup_complete) return;
+		var pending = root_element.querySelector('[data-taxjar-state="pending"]');
+		var done = root_element.querySelector('[data-taxjar-state="done"]');
+		if (!pending || !done) return;
+		pending.style.display = "none";
+		done.style.display = "flex";
+	})
+	.catch(function () {});
 """.strip()
 
 
@@ -150,8 +220,8 @@ def setup_taxjar():
 
 
 def add_guided_setup_alert():
-	"""Blue/subtle banner at the top of the workspace nudging first-time users
-	toward the guided setup wizard, spanning the full row width (col: 12) above the
+	"""Subtle banner at the top of the workspace, blue while the guided setup has
+	not been finished and green once it has, spanning the full row width (col: 12) above the
 	Setup/Manage/Sync cards below it. Idempotent and self-healing: creates the
 	Custom HTML Block if missing, otherwise keeps its html/script in sync with the
 	constants above, and re-normalizes its position/width in the workspace content
@@ -176,18 +246,19 @@ def add_guided_setup_alert():
 
 def _ensure_guided_setup_alert_block():
 	"""Create the guided-setup alert's Custom HTML Block if missing, or bring its
-	html/script back in line with the constants above."""
+	html and script back in line with the constants above."""
 	if frappe.db.exists("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK):
 		block = frappe.get_doc("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK)
-		if block.html != GUIDED_SETUP_ALERT_HTML or block.script:
+		if block.html != GUIDED_SETUP_ALERT_HTML or block.script != GUIDED_SETUP_ALERT_SCRIPT:
 			block.html = GUIDED_SETUP_ALERT_HTML
-			block.script = ""
+			block.script = GUIDED_SETUP_ALERT_SCRIPT
 			block.save(ignore_permissions=True)
 	else:
 		frappe.get_doc({
 			"doctype": "Custom HTML Block",
 			"name": GUIDED_SETUP_ALERT_BLOCK,
 			"html": GUIDED_SETUP_ALERT_HTML,
+			"script": GUIDED_SETUP_ALERT_SCRIPT,
 			"private": 0,
 		}).insert(ignore_permissions=True)
 
