@@ -17,8 +17,10 @@ def execute():
 
 	What is left behind - product_tax_category and tax_collectable - is what the
 	tax engine reads: the first feeds product_tax_code on every TaxJar call, the
-	second is read back as the per-line sales_tax on create_order. The four
-	removed here were written and never read by any server code:
+	second is read back as the per-line sales_tax on create_order. Both were
+	later moved into the app's own namespace, as taxjar_product_tax_category and
+	taxjar_tax_collectable, by namespace_item_tax_fields. The four removed here
+	were written and never read by any server code:
 
 	- taxable_amount was stored on every line and consumed by nothing at all.
 	- taxjar_item_breakdown_json duplicated, per line, a slice of the breakdown

@@ -178,7 +178,7 @@
 					<td class="text-left">
 						{{ item.item_name }}
 						<span class="taxjar-tax-tag">
-							{% if item.product_tax_category == "99999" %}{{ _("Exempt") }}{% else %}{{ _("Taxable") }}{% endif %}
+							{% if item.taxjar_product_tax_category == "99999" %}{{ _("Exempt") }}{% else %}{{ _("Taxable") }}{% endif %}
 						</span>
 					</td>
 					{% if item_naming_by != "Item Code" %}

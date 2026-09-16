@@ -629,33 +629,39 @@ def _item_tax_fields():
 	Only fields the tax engine actually reads live here. Both are inputs to the
 	TaxJar payload, not decoration:
 
-	- product_tax_category feeds product_tax_code on every tax_for_order and
-	  create_order call. It is read_only and fetched from the Item master: the
-	  stored copy is what makes a retried sync (retry_failed_taxjar_syncs, days
-	  after submit) send the category the tax was actually calculated with,
+	- taxjar_product_tax_category feeds product_tax_code on every tax_for_order
+	  and create_order call. It is read_only and fetched from the Item master:
+	  the stored copy is what makes a retried sync (retry_failed_taxjar_syncs,
+	  days after submit) send the category the tax was actually calculated with,
 	  rather than whatever the Item says by then.
-	- tax_collectable is read back as the per-line sales_tax on create_order
-	  once the invoice is submitted (get_line_item_dict).
+	- taxjar_tax_collectable is read back as the per-line sales_tax on
+	  create_order once the invoice is submitted (get_line_item_dict).
+
+	Both carry the taxjar_ prefix every other field this app owns carries. They
+	sit on child tables this app does not own, so an unprefixed name is a name
+	a second tax app can claim for a different meaning. The prefix also tells
+	the two apart from the TaxJar SDK's own tax_collectable response attribute,
+	which set_sales_tax reads two lines away from where it writes ours.
 
 	Both are print_hide: a child field without it becomes a column in the item
 	table of every printed document, which is how core ERPNext treats its own
-	net_amount and item_tax_template. tax_collectable is also no_copy so a
-	quotation's tax cannot ride into a sales order, invoice, or credit note as
+	net_amount and item_tax_template. taxjar_tax_collectable is also no_copy so
+	a quotation's tax cannot ride into a sales order, invoice, or credit note as
 	a stale figure the user cannot edit.
 	"""
 	return [
 		dict(
-			fieldname="product_tax_category",
+			fieldname="taxjar_product_tax_category",
 			fieldtype="Link",
 			insert_after="description",
 			options="Product Tax Category",
 			label="Product Tax Category",
-			fetch_from="item_code.product_tax_category",
+			fetch_from="item_code.taxjar_product_tax_category",
 			read_only=1,
 			print_hide=1,
 		),
 		dict(
-			fieldname="tax_collectable",
+			fieldname="taxjar_tax_collectable",
 			fieldtype="Currency",
 			insert_after="net_amount",
 			label="Tax Collectable",
@@ -719,7 +725,7 @@ def get_custom_fields():
 		"Sales Order Item": _item_tax_fields(),
 		"Item": [
 			dict(
-				fieldname="product_tax_category",
+				fieldname="taxjar_product_tax_category",
 				fieldtype="Link",
 				insert_after="item_group",
 				options="Product Tax Category",

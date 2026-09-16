@@ -122,8 +122,8 @@ class _FakeItem:
 		self.idx = idx
 		self.qty = qty
 		self.rate = rate
-		self.product_tax_category = None
-		self.tax_collectable = 0.0
+		self.taxjar_product_tax_category = None
+		self.taxjar_tax_collectable = 0.0
 		self.price_list_rate = None
 		self.rate_with_margin = None
 		# no discount happened by default - matches _make_item()'s baseline.
@@ -1423,7 +1423,7 @@ class TestSetSalesTaxCache(UnitTestCase):
 
 class TestGetLineItemDict(UnitTestCase):
 
-	def _make_item(self, item_code=None, product_tax_category=None, item_name=None, description=None,
+	def _make_item(self, item_code=None, taxjar_product_tax_category=None, item_name=None, description=None,
 			qty=2, rate=100.0, price_list_rate=None, rate_with_margin=None, net_amount=None):
 		# net_amount defaults to rate * qty (i.e. "no discount happened") so
 		# every test not focused on the discount formula gets a neutral
@@ -1436,7 +1436,7 @@ class TestGetLineItemDict(UnitTestCase):
 			"qty": qty,
 			"rate": rate,
 			"item_code": item_code,
-			"product_tax_category": product_tax_category,
+			"taxjar_product_tax_category": taxjar_product_tax_category,
 			"item_name": item_name,
 			"description": description,
 			"price_list_rate": price_list_rate,
@@ -1456,25 +1456,25 @@ class TestGetLineItemDict(UnitTestCase):
 	# Happy path: field is populated on the line item (Sales Invoice Item via fetch_from)
 
 	def test_uses_line_item_product_tax_category_when_set(self):
-		item = self._make_item(item_code="ITEM-001", product_tax_category="20010")
+		item = self._make_item(item_code="ITEM-001", taxjar_product_tax_category="20010")
 		result = self._call(item)
 		self.assertEqual(result["product_tax_code"], "20010")
 
 	# Fallback: field is empty on line item (Quotation/SO Item, or fetch_from never fired)
 
 	def test_falls_back_to_item_master_when_line_item_field_empty(self):
-		item = self._make_item(item_code="ITEM-001", product_tax_category=None)
+		item = self._make_item(item_code="ITEM-001", taxjar_product_tax_category=None)
 		result = self._call(item, item_master_category="31000")
 		self.assertEqual(result["product_tax_code"], "31000")
 
 	def test_falls_back_to_item_master_when_line_item_field_blank_string(self):
-		item = self._make_item(item_code="ITEM-001", product_tax_category="")
+		item = self._make_item(item_code="ITEM-001", taxjar_product_tax_category="")
 		result = self._call(item, item_master_category="20010")
 		self.assertEqual(result["product_tax_code"], "20010")
 
 	def test_line_item_field_takes_priority_over_item_master(self):
 		"""If line item already has the category, the Item master must not be queried."""
-		item = self._make_item(item_code="ITEM-001", product_tax_category="20010")
+		item = self._make_item(item_code="ITEM-001", taxjar_product_tax_category="20010")
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
 		) as mock_db:
@@ -1484,12 +1484,12 @@ class TestGetLineItemDict(UnitTestCase):
 
 	def test_returns_none_when_no_item_code_and_no_line_item_field(self):
 		"""No item_code means no fallback lookup — product_tax_code should be None."""
-		item = self._make_item(item_code=None, product_tax_category=None)
+		item = self._make_item(item_code=None, taxjar_product_tax_category=None)
 		result = self._call(item)
 		self.assertIsNone(result["product_tax_code"])
 
 	def test_returns_none_when_item_master_has_no_category(self):
-		item = self._make_item(item_code="ITEM-001", product_tax_category=None)
+		item = self._make_item(item_code="ITEM-001", taxjar_product_tax_category=None)
 		result = self._call(item, item_master_category=None)
 		self.assertIsNone(result["product_tax_code"])
 
@@ -1758,7 +1758,7 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 # ── Phase 1: taxjar_state_code custom field on Address ───────────────────────
 
 class TestItemProductTaxCategoryQuickEntry(UnitTestCase):
-	"""product_tax_category should be pickable from Item's Quick Entry dialog
+	"""taxjar_product_tax_category should be pickable from Item's Quick Entry dialog
 	without being made globally mandatory - Frappe's quick_entry.js includes a
 	field when reqd OR allow_in_quick_entry is set (never both needed)."""
 
@@ -1774,7 +1774,7 @@ class TestItemProductTaxCategoryQuickEntry(UnitTestCase):
 		):
 			make_custom_fields()
 
-		return next(f for f in captured["Item"] if f["fieldname"] == "product_tax_category")
+		return next(f for f in captured["Item"] if f["fieldname"] == "taxjar_product_tax_category")
 
 	def test_allowed_in_quick_entry(self):
 		field = self._get_item_field()
@@ -10475,12 +10475,12 @@ class TestClearBreakdownData(UnitTestCase):
 		self.assertIsNone(doc.taxjar_breakdown_json)
 
 	def test_clears_item_tax_collectable(self):
-		"""tax_collectable is read_only - stale per-line tax on a document that
-		now carries none is not something the user can correct by hand."""
+		"""taxjar_tax_collectable is read_only - stale per-line tax on a document
+		that now carries none is not something the user can correct by hand."""
 		doc = _make_doc()
-		doc.items[0].tax_collectable = 91.0
+		doc.items[0].taxjar_tax_collectable = 91.0
 		_clear_breakdown_data(doc)
-		self.assertEqual(doc.items[0].tax_collectable, 0)
+		self.assertEqual(doc.items[0].taxjar_tax_collectable, 0)
 
 	def test_clears_freight_taxable(self):
 		"""A stale "Shipping Taxability: Yes" pill must not survive past the
@@ -10628,7 +10628,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		"""When delivery is outside nexus, breakdown should be cleared."""
 		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Tax", 80.0)])
 		doc.taxjar_breakdown_json = '{"old": "data"}'
-		doc.items[0].tax_collectable = 80.0
+		doc.items[0].taxjar_tax_collectable = 80.0
 		company_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
@@ -10640,7 +10640,7 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 			set_sales_tax(doc, None)
 
 		self.assertIsNone(doc.taxjar_breakdown_json)
-		self.assertEqual(doc.items[0].tax_collectable, 0)
+		self.assertEqual(doc.items[0].taxjar_tax_collectable, 0)
 
 
 # ── Tax Breakdown: Custom field schema tests ────────────────────────────────
@@ -10730,7 +10730,7 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 		fields = _item_tax_fields()
 		self.assertEqual(
 			[f["fieldname"] for f in fields],
-			["product_tax_category", "tax_collectable"],
+			["taxjar_product_tax_category", "taxjar_tax_collectable"],
 		)
 
 	def test_removed_display_fields_are_not_recreated(self):
@@ -10745,9 +10745,9 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 	def test_product_tax_category_is_read_only(self):
 		"""Fetched from the Item master and frozen: the stored copy is what a
 		retried sync sends days after submit, so it must not drift."""
-		field = next(f for f in _item_tax_fields() if f["fieldname"] == "product_tax_category")
+		field = next(f for f in _item_tax_fields() if f["fieldname"] == "taxjar_product_tax_category")
 		self.assertEqual(field["read_only"], 1)
-		self.assertEqual(field["fetch_from"], "item_code.product_tax_category")
+		self.assertEqual(field["fetch_from"], "item_code.taxjar_product_tax_category")
 
 	def test_item_fields_are_print_hidden(self):
 		"""Without print_hide a child field becomes a column in the item table
@@ -10758,7 +10758,7 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 	def test_tax_collectable_is_no_copy(self):
 		"""Stops a quotation's per-line tax riding into a sales order, invoice,
 		or credit note as a stale read-only figure."""
-		field = next(f for f in _item_tax_fields() if f["fieldname"] == "tax_collectable")
+		field = next(f for f in _item_tax_fields() if f["fieldname"] == "taxjar_tax_collectable")
 		self.assertEqual(field["no_copy"], 1)
 
 	def test_breakdown_fields_on_all_transaction_doctypes(self):
@@ -10787,7 +10787,10 @@ class TestTaxBreakdownCustomFields(UnitTestCase):
 				self.assertEqual(f["insert_after"], "other_charges_calculation")
 
 	def test_item_fields_insert_after_core_columns(self):
-		expected = {"product_tax_category": "description", "tax_collectable": "net_amount"}
+		expected = {
+			"taxjar_product_tax_category": "description",
+			"taxjar_tax_collectable": "net_amount",
+		}
 		for f in _item_tax_fields():
 			self.assertEqual(f["insert_after"], expected[f["fieldname"]])
 
@@ -11937,7 +11940,7 @@ class TestComputeProductTaxable(UnitTestCase):
 
 	def test_usd_rate_converts_taxable_amount_back_to_doc_currency(self):
 		"""taxable_amount comes back from TaxJar in USD; dividing by usd_rate
-		mirrors how tax_collectable is converted back to doc currency."""
+		mirrors how taxjar_tax_collectable is converted back to doc currency."""
 		doc = _make_doc()
 		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
 		tax_data = self._make_tax_data([(1, 200.0)])
@@ -16812,3 +16815,508 @@ class TestBulkExemptionDoesNotRunInline(UnitTestCase):
 
 		self.assertEqual(done, ["C1", "C3"])
 		self.assertIn("C2", mock_log.call_args[1]["title"])
+
+
+# ── Item tax field namespacing ──────────────────────────────────────────────
+# product_tax_category and tax_collectable were the only custom fields this app
+# created without its own prefix, on child tables it does not own. They are now
+# taxjar_product_tax_category and taxjar_tax_collectable.
+#
+# The rename has three failure modes and every one of them is silent. Nothing
+# raises, so only a test reports them:
+#
+#   1. Taking the TaxJar SDK's own tax_collectable response attribute with the
+#      rename. flt(None) is 0.0, so every line's tax becomes zero.
+#   2. Leaving the print format's Jinja lookup on the old name. A missing
+#      attribute renders empty, so every line reads "Taxable", exempt included.
+#   3. Renaming the child field without the Item field it fetches from. The
+#      fallback returns None and the payload goes out with no product code.
+
+_ITEM_TAX_DOCTYPES = ("Sales Invoice Item", "Quotation Item", "Sales Order Item")
+
+
+class _SdkLineItem:
+	"""A TaxJar SDK breakdown line item, carrying only the attribute names the
+	SDK actually sends.
+
+	A plain object rather than a MagicMock on purpose: a MagicMock answers any
+	attribute name, so code that read our prefixed name off the SDK object
+	would get a Mock, flt() it to 0.0, and pass. This raises AttributeError
+	instead, which is the whole point of the class.
+	"""
+
+	def __init__(self, tax_collectable, id=1, taxable_amount=100.0):
+		self.id = id
+		self.tax_collectable = tax_collectable
+		self.taxable_amount = taxable_amount
+		self.combined_tax_rate = 0.0975
+
+
+def _item_tax_field(fieldname_suffix):
+	"""Return one of the two shared child fields by the tail of its name."""
+	from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+		_item_tax_fields,
+	)
+
+	return next(f for f in _item_tax_fields() if f["fieldname"].endswith(fieldname_suffix))
+
+
+def _item_master_category_field():
+	from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+		get_custom_fields,
+	)
+
+	return next(
+		f for f in get_custom_fields()["Item"] if f["fieldname"].endswith("product_tax_category")
+	)
+
+
+class TestItemTaxFieldNames(UnitTestCase):
+
+	def test_every_custom_field_carries_the_app_prefix(self):
+		"""A field this app adds to a doctype it does not own needs a name no
+		other app can claim for a different meaning. These two were the last
+		without one."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+
+		unprefixed = [
+			f"{doctype}.{field['fieldname']}"
+			for doctype, fields in get_custom_fields().items()
+			for field in fields
+			if not field["fieldname"].startswith("taxjar_")
+		]
+		self.assertEqual(unprefixed, [])
+
+	def test_child_field_fetches_from_the_item_field(self):
+		"""Failure mode 3. fetch_from names the Item field, so the two names
+		move together or the fetch points at a field that does not exist."""
+		child = _item_tax_field("product_tax_category")
+		self.assertEqual(
+			child["fetch_from"], f"item_code.{_item_master_category_field()['fieldname']}"
+		)
+
+	def test_line_item_read_uses_the_defined_fieldname(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_get_item_product_tax_category,
+		)
+
+		fieldname = _item_tax_field("product_tax_category")["fieldname"]
+		item = {"item_code": "ITEM-001", fieldname: "20010"}
+		self.assertEqual(_get_item_product_tax_category(item), "20010")
+
+	def test_item_master_fallback_uses_the_defined_fieldname(self):
+		"""Failure mode 3, the other half. A stale name here returns None and
+		the TaxJar payload carries no product code, with nothing raised."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_get_item_product_tax_category,
+		)
+
+		fieldname = _item_master_category_field()["fieldname"]
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			return_value="31000",
+		) as mock_get_value:
+			result = _get_item_product_tax_category({"item_code": "ITEM-001"})
+
+		self.assertEqual(result, "31000")
+		self.assertEqual(mock_get_value.call_args[0][2], fieldname)
+
+	def test_submitted_line_sends_the_defined_tax_field_as_sales_tax(self):
+		"""create_order reads the per-line tax back off the child row. A stale
+		name sends sales_tax None for every line."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_line_item_dict
+
+		fieldname = _item_tax_field("tax_collectable")["fieldname"]
+		item = MagicMock()
+		item.get = lambda key, default=None: {
+			"idx": 1, "qty": 1, "rate": 100.0, "net_amount": 100.0, fieldname: 7.25,
+		}.get(key, default)
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
+			side_effect=_scalar_get_value(None),
+		):
+			result = get_line_item_dict(item, docstatus=1)
+
+		self.assertEqual(result["sales_tax"], 7.25)
+
+	def test_print_format_reads_the_renamed_field(self):
+		"""Failure mode 2. A site-level Print Format query cannot see this one:
+		US Sales Tax Invoice is a standard format, so its HTML lives in the app
+		file rather than in the html column."""
+		import os
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"print_format", "us_sales_tax_invoice", "us_sales_tax_invoice.html",
+		))
+		with open(path) as f:
+			html = f.read()
+
+		fieldname = _item_tax_field("product_tax_category")["fieldname"]
+		self.assertIn(f"item.{fieldname} ==", html)
+		self.assertNotIn("item.product_tax_category ==", html)
+
+	def test_settings_form_fieldnames_are_untouched(self):
+		"""These contain the substring and are not the renamed field: three
+		Settings fieldnames and a whitelisted method called by name from the
+		form script and the nexus page."""
+		import os
+
+		base = os.path.dirname(__file__)
+		with open(os.path.join(base, "taxjar_settings.json")) as f:
+			doctype_json = json.load(f)
+		with open(os.path.join(base, "taxjar_settings.js")) as f:
+			js = f.read()
+
+		for fieldname in (
+			"product_tax_category_section",
+			"update_product_tax_category_btn",
+			"product_tax_category_html",
+		):
+			self.assertIn(fieldname, doctype_json["field_order"])
+
+		self.assertIn("get_product_tax_category_summary", js)
+		self.assertTrue(
+			hasattr(frappe.get_single("TaxJar Settings"), "get_product_tax_category_summary")
+		)
+
+	def test_stored_breakdown_keeps_the_sdk_key(self):
+		"""The per-line key inside taxjar_breakdown_json is TaxJar's own name
+		for the figure and is already written on every synced document.
+		Renaming it would mean migrating the stored JSON too, for no gain: the
+		key is read only by this app's own currency converter."""
+		result = _extract_breakdown_data(_make_us_breakdown(), _make_doc())
+		self.assertAlmostEqual(result["line_items"][0]["tax_collectable"], 9.75)
+
+		converted = _convert_breakdown_amounts(result, usd_rate=2.0)
+		self.assertAlmostEqual(converted["line_items"][0]["tax_collectable"], 9.75 / 2.0)
+
+
+class TestPerLineTaxWrite(UnitTestCase):
+	"""Failure mode 1, the sharpest of the three.
+
+	set_sales_tax reads TaxJar's own tax_collectable off the SDK line item and
+	writes ours on the ERPNext child row two lines later. Same word, opposite
+	meaning, adjacent lines.
+	"""
+
+	def _run(self, tax_data, doc):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+	def test_sdk_tax_lands_on_our_field(self):
+		"""The SDK object carries only the SDK's names. Reading our prefixed
+		name off it raises AttributeError here instead of quietly writing 0.0
+		to every line."""
+		tax_data = _make_us_breakdown()
+		tax_data.breakdown.line_items = [_SdkLineItem(9.75)]
+		doc = _make_doc()
+
+		self._run(tax_data, doc)
+
+		fieldname = _item_tax_field("tax_collectable")["fieldname"]
+		self.assertAlmostEqual(getattr(doc.items[0], fieldname), 9.75)
+
+	def test_foreign_currency_line_tax_is_converted(self):
+		"""The same write, divided by the USD rate. Guards the conversion from
+		being dropped along with the rename."""
+		tax_data = _make_us_breakdown()
+		tax_data.breakdown.line_items = [_SdkLineItem(9.75)]
+		doc = _make_doc(currency="EUR")
+
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration._get_usd_exchange_rate",
+			return_value=2.0,
+		):
+			self._run(tax_data, doc)
+
+		fieldname = _item_tax_field("tax_collectable")["fieldname"]
+		self.assertAlmostEqual(getattr(doc.items[0], fieldname), 9.75 / 2.0)
+
+
+class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
+	"""The migration that moves stored values onto the new columns."""
+
+	PATCH = "taxjar_integration.patches.namespace_item_tax_fields"
+	SETTINGS = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def test_patch_is_registered(self):
+		import os
+
+		path = os.path.normpath(
+			os.path.join(os.path.dirname(__file__), "..", "..", "..", "patches.txt")
+		)
+		with open(path) as f:
+			self.assertIn("taxjar_integration.patches.namespace_item_tax_fields", f.read())
+
+	def test_patch_covers_every_renamed_field(self):
+		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL, _RENAMES
+
+		self.assertEqual(
+			sorted(_COPY_SQL), sorted([*_ITEM_TAX_DOCTYPES, "Item"])
+		)
+		for doctype, old, new in _RENAMES:
+			self.assertIn(f"`{new}` = `{old}`", _COPY_SQL[doctype])
+
+	def test_patch_moves_the_names_the_app_now_uses(self):
+		"""The new names come from the field definitions, so a later rename
+		that forgets the patch fails here rather than on a live migrate."""
+		from taxjar_integration.patches.namespace_item_tax_fields import _RENAMES
+
+		expected = {
+			_item_tax_field("product_tax_category")["fieldname"],
+			_item_tax_field("tax_collectable")["fieldname"],
+		}
+		self.assertEqual({new for _dt, _old, new in _RENAMES}, expected)
+
+	def test_patch_creates_the_fields_before_it_copies(self):
+		"""after_migrate runs make_custom_fields, but it runs after every patch.
+		The copy needs the new columns, so the patch creates them itself."""
+		from taxjar_integration.patches.namespace_item_tax_fields import execute
+
+		order = []
+		with patch(f"{self.SETTINGS}.make_custom_fields", side_effect=lambda: order.append("create")), \
+		     patch(f"{self.PATCH}.frappe.db.has_column", return_value=True), \
+		     patch(f"{self.PATCH}.frappe.db.sql", side_effect=lambda *a, **k: order.append("copy")), \
+		     patch(f"{self.PATCH}.frappe.db.exists", return_value=False), \
+		     patch(f"{self.PATCH}.frappe.clear_cache"):
+			execute()
+
+		self.assertEqual(order[0], "create")
+		self.assertEqual(order.count("copy"), 4)
+
+	def test_patch_is_a_no_op_without_the_old_columns(self):
+		"""A site that installed the app but never enabled a TaxJar feature has
+		no such columns; reading one raises MySQLdb (1054)."""
+		from taxjar_integration.patches.namespace_item_tax_fields import execute
+
+		with patch(f"{self.SETTINGS}.make_custom_fields"), \
+		     patch(f"{self.PATCH}.frappe.db.has_column", return_value=False), \
+		     patch(f"{self.PATCH}.frappe.db.sql") as mock_sql, \
+		     patch(f"{self.PATCH}.frappe.db.exists", return_value=False), \
+		     patch(f"{self.PATCH}.frappe.clear_cache"):
+			execute()
+
+		mock_sql.assert_not_called()
+
+	def test_patch_never_drops_a_column(self):
+		"""Deleting a Custom Field does not drop its column, and an unused
+		column is cheaper to keep than a one-way DDL is to get wrong."""
+		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL
+
+		for doctype, sql in _COPY_SQL.items():
+			upper = sql.upper()
+			self.assertNotIn("DROP", upper, doctype)
+			self.assertNotIn("ALTER", upper, doctype)
+			self.assertNotIn("DELETE", upper, doctype)
+
+	def test_patch_deletes_every_old_custom_field(self):
+		"""Removing them from make_custom_fields only stops them being
+		recreated; after_migrate never deletes what it no longer lists."""
+		from taxjar_integration.patches.namespace_item_tax_fields import _RENAMES, execute
+
+		with patch(f"{self.SETTINGS}.make_custom_fields"), \
+		     patch(f"{self.PATCH}.frappe.db.has_column", return_value=False), \
+		     patch(f"{self.PATCH}.frappe.db.exists", return_value=True), \
+		     patch(f"{self.PATCH}.frappe.delete_doc") as mock_delete, \
+		     patch(f"{self.PATCH}.frappe.clear_cache"):
+			execute()
+
+		self.assertEqual(
+			[call.args[1] for call in mock_delete.call_args_list],
+			[f"{doctype}-{old}" for doctype, old, _new in _RENAMES],
+		)
+
+
+class TestNamespaceItemTaxFieldsPatchOnRealRows(UnitTestCase):
+	"""The patch's copy step, run against real rows in every table it touches.
+
+	The audit this work comes from found both development sites carrying zero
+	Sales Order Item and zero Quotation Item rows, so a migrate on either
+	exercises one of the four tables and reports success for all four. This
+	seeds a row in each table itself, so what the suite reports does not depend
+	on what a site happens to hold.
+
+	The old fields are recreated in setUp, which is what makes the copy real:
+	on a fresh site their columns never existed, and the patch would correctly
+	skip every table. Recreating them puts the site into the state an already
+	installed site is actually in.
+	"""
+
+	PATCH = "taxjar_integration.patches.namespace_item_tax_fields"
+
+	# The definitions the old fields had, so the column this test copies out of
+	# is the column an already installed site actually holds.
+	_OLD_FIELDS = {
+		"product_tax_category": dict(
+			fieldtype="Link",
+			options="Product Tax Category",
+			label="Product Tax Category",
+			insert_after="description",
+			read_only=1,
+			print_hide=1,
+		),
+		"tax_collectable": dict(
+			fieldtype="Currency",
+			options="currency",
+			label="Tax Collectable",
+			insert_after="net_amount",
+			read_only=1,
+			no_copy=1,
+			print_hide=1,
+		),
+	}
+
+	# (doctype, seeded name, category value, tax value). None means the table
+	# has no tax_collectable field - the Item master carries only the category.
+	_SEEDS = (
+		("Sales Invoice Item", "TAXJAR-NS-TEST-SII", "20010", 7.25),
+		("Quotation Item", "TAXJAR-NS-TEST-QI", "31000", 3.50),
+		("Sales Order Item", "TAXJAR-NS-TEST-SOI", "99999", 0.00),
+		("Item", "TAXJAR-NS-TEST-ITEM", "40030", None),
+	)
+
+	def setUp(self):
+		from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+
+		for doctype, _name, _category, _tax in self._SEEDS:
+			if not frappe.db.table_exists(doctype):
+				self.skipTest(f"{doctype} is not installed on this site")
+
+		# update=False so a site that still carries the old field is left
+		# exactly as it is; only a site that has already dropped it, or never
+		# had it, gets the record and its column back.
+		for doctype, _name, _category, tax in self._SEEDS:
+			fieldnames = ["product_tax_category"] + (["tax_collectable"] if tax is not None else [])
+			overrides = {"Item": {"insert_after": "item_group"}}.get(doctype, {})
+			create_custom_fields(
+				{doctype: [
+					dict(fieldname=f, **{**self._OLD_FIELDS[f], **overrides}) for f in fieldnames
+				]},
+				update=False,
+			)
+
+		self._delete_seeded_rows()
+		self._insert_seeded_rows()
+
+	def tearDown(self):
+		self._delete_seeded_rows()
+		# Committed because the patch creates Custom Fields, and the DDL behind
+		# that implicitly commits every row seeded before it. Without this the
+		# seeded rows would outlive the test on the site it ran against.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+
+	def _insert_seeded_rows(self):
+		for doctype, name, category, tax in self._SEEDS:
+			if tax is None:
+				frappe.db.sql(
+					"""
+					INSERT INTO `tabItem`
+						(name, creation, modified, owner, modified_by, docstatus, idx,
+						 product_tax_category)
+					VALUES (%s, NOW(), NOW(), 'Administrator', 'Administrator', 0, 1, %s)
+					""",
+					(name, category),
+				)
+				continue
+
+			# Raw SQL because a child row cannot be inserted through the ORM
+			# without a parent document. The table name is a module constant.
+			frappe.db.sql(
+				f"""
+				INSERT INTO `tab{doctype}`
+					(name, creation, modified, owner, modified_by, docstatus, idx,
+					 parent, parentfield, parenttype,
+					 product_tax_category, tax_collectable)
+				VALUES (%s, NOW(), NOW(), 'Administrator', 'Administrator', 0, 1,
+					 'TAXJAR-NS-TEST-PARENT', 'items', %s, %s, %s)
+				""",
+				(name, doctype.replace(" Item", ""), category, tax),
+			)
+
+	def _delete_seeded_rows(self):
+		for doctype, name, _category, _tax in self._SEEDS:
+			# The table name is a module constant; the row name is bound.
+			frappe.db.sql(f"DELETE FROM `tab{doctype}` WHERE name = %s", (name,))
+
+	def _stored(self, doctype, name, fieldname):
+		# Read back through SQL, not the ORM: the point is what the column
+		# holds, not what a Document object reports about it.
+		rows = frappe.db.sql(
+			f"SELECT `{fieldname}` FROM `tab{doctype}` WHERE name = %s", (name,)
+		)
+		return rows[0][0] if rows else None
+
+	def test_copy_moves_every_seeded_row(self):
+		"""All four tables, including the two that are empty on both sites."""
+		from taxjar_integration.patches.namespace_item_tax_fields import execute
+
+		execute()
+
+		category_field = _item_tax_field("product_tax_category")["fieldname"]
+		tax_field = _item_tax_field("tax_collectable")["fieldname"]
+		item_category_field = _item_master_category_field()["fieldname"]
+
+		for doctype, name, category, tax in self._SEEDS:
+			with self.subTest(doctype=doctype):
+				stored_field = item_category_field if tax is None else category_field
+				self.assertEqual(self._stored(doctype, name, stored_field), category)
+				if tax is not None:
+					self.assertAlmostEqual(
+						float(self._stored(doctype, name, tax_field)), tax, places=2
+					)
+
+	def test_copy_leaves_the_old_columns_in_place(self):
+		"""The old column is kept, not dropped: an unused column is cheaper to
+		keep than a one-way DDL is to get wrong, and keeping it is what makes
+		the copy re-runnable."""
+		from taxjar_integration.patches.namespace_item_tax_fields import execute
+
+		execute()
+
+		for doctype, name, category, _tax in self._SEEDS:
+			with self.subTest(doctype=doctype):
+				self.assertTrue(frappe.db.has_column(doctype, "product_tax_category"))
+				self.assertEqual(self._stored(doctype, name, "product_tax_category"), category)
+
+	def test_patch_removes_the_old_custom_fields_from_the_form(self):
+		"""Left behind, the old field shows beside the new one on every row."""
+		from taxjar_integration.patches.namespace_item_tax_fields import execute
+
+		execute()
+
+		for doctype, _name, _category, tax in self._SEEDS:
+			with self.subTest(doctype=doctype):
+				self.assertFalse(
+					frappe.db.exists("Custom Field", f"{doctype}-product_tax_category")
+				)
+				if tax is not None:
+					self.assertFalse(
+						frappe.db.exists("Custom Field", f"{doctype}-tax_collectable")
+					)
+
+	def test_copy_is_re_runnable(self):
+		"""after_migrate re-runs on every migrate and a patch can be replayed on
+		a site restored from a backup. A second run must not change a value."""
+		from taxjar_integration.patches.namespace_item_tax_fields import execute
+
+		execute()
+		execute()
+
+		tax_field = _item_tax_field("tax_collectable")["fieldname"]
+		self.assertAlmostEqual(
+			float(self._stored("Sales Invoice Item", "TAXJAR-NS-TEST-SII", tax_field)),
+			7.25,
+			places=2,
+		)

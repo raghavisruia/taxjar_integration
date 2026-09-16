@@ -1045,9 +1045,13 @@ def _get_item_product_tax_category(item):
 	field, populated by fetch_from off item_code. Fall back to the Item master
 	for programmatically created documents whose rows were never saved through
 	the fetch, and for line items with no item_code at all.
+
+	Both halves read taxjar_product_tax_category. The child field's fetch_from
+	names the Item field, so the two names move together or the fallback
+	returns None and the payload goes out with no product code.
 	"""
-	return item.get("product_tax_category") or (
-		frappe.db.get_value("Item", item.get("item_code"), "product_tax_category", cache=True)
+	return item.get("taxjar_product_tax_category") or (
+		frappe.db.get_value("Item", item.get("item_code"), "taxjar_product_tax_category", cache=True)
 		if item.get("item_code")
 		else None
 	)
@@ -1118,7 +1122,7 @@ def get_line_item_dict(item, docstatus):
 		tax_dict["discount"] = discount
 
 	if docstatus == 1:
-		tax_dict.update({"sales_tax": item.get("tax_collectable")})
+		tax_dict.update({"sales_tax": item.get("taxjar_tax_collectable")})
 
 	return tax_dict
 
@@ -1373,10 +1377,13 @@ def set_sales_tax(doc, method):
 		for item in (tax_data.breakdown.line_items if tax_data.breakdown else []):
 			idx = cint(item.id) - 1
 			if 0 <= idx < len(doc.items):
+				# item is a TaxJar SDK line item, so item.tax_collectable is the
+				# SDK's own response attribute and keeps its name. The row it
+				# writes to is an ERPNext child row and carries ours.
 				tc = flt(item.tax_collectable)
 				if usd_rate:
 					tc = flt(tc / usd_rate)
-				doc.get("items")[idx].tax_collectable = tc
+				doc.get("items")[idx].taxjar_tax_collectable = tc
 
 		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
 
@@ -1508,13 +1515,13 @@ def _clear_breakdown_data(doc):
 		doc.taxjar_breakdown_json = None
 	if hasattr(doc, "taxjar_freight_taxable"):
 		doc.taxjar_freight_taxable = 0
-	# tax_collectable is read back as the per-line sales_tax on create_order, and
-	# is read_only - left behind it shows tax on every line of a document that
-	# now carries none (exempt customer, no nexus, TaxJar switched off) with no
-	# way for the user to correct it.
+	# taxjar_tax_collectable is read back as the per-line sales_tax on
+	# create_order, and is read_only - left behind it shows tax on every line of
+	# a document that now carries none (exempt customer, no nexus, TaxJar
+	# switched off) with no way for the user to correct it.
 	for item in (doc.get("items") or []):
-		if hasattr(item, "tax_collectable"):
-			item.tax_collectable = 0
+		if hasattr(item, "taxjar_tax_collectable"):
+			item.taxjar_tax_collectable = 0
 
 
 def _set_tax_status_fields(doc, *, has_nexus=None, nexus_reason=None,
