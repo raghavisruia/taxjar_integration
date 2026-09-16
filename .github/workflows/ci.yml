@@ -11,6 +11,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The desk scripts decide what TaxJar does for a company on the form itself,
+  # and until this job existed a green server suite said nothing about them -
+  # which is how a company registered outside the United States came to be
+  # asked for a shipping address. Runs on its own: no site, no database, so it
+  # answers in seconds and fails for one reason only.
+  client:
+    runs-on: ubuntu-latest
+    name: Client
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+
+      # 22, not the 20 the server job uses for frappe's asset build: vite 7
+      # requires 20.19 or 22.12 upward, and pinning the major here keeps the
+      # two jobs from having to move together.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Run client tests
+        run: npm test
+
   semgrep:
     runs-on: ubuntu-latest
     name: Static Analysis
