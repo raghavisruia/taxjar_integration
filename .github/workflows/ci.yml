@@ -157,12 +157,20 @@ jobs:
           mysql --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL character_set_server = 'utf8mb4'"
           mysql --host 127.0.0.1 --port 3306 -u root -proot -e "SET GLOBAL collation_server = 'utf8mb4_unicode_ci'"
 
+      # ERPNext comes first because hooks.py names it in required_apps, and
+      # the app reads erpnext for get_region, get_exchange_rate and the
+      # company defaults. Without it, install-app stopped with "No module
+      # named 'erpnext'". --skip-assets leaves the asset build to the single
+      # `bench build` below, rather than running it twice. --branch develop
+      # matches the frappe that bench init cloned.
       - name: Install
         working-directory: /home/runner/frappe-bench
         run: |
+          bench get-app --branch develop --skip-assets erpnext
           bench get-app taxjar_integration $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
+          bench --site test_site install-app erpnext
           bench --site test_site install-app taxjar_integration
           bench build
         env:
