@@ -94,6 +94,11 @@ jobs:
       fail-fast: false
     name: Server
 
+    # bench init writes redis_queue at port 11000 and redis_cache at 13000
+    # into common_site_config.json, and --skip-redis-config-generation means
+    # the bench never starts a redis of its own. ERPNext's install enqueues
+    # background jobs, so without these two the install died with
+    # "Connection refused" on 11000. redis_socketio shares 13000.
     services:
       mariadb:
         image: mariadb:10.6
@@ -102,6 +107,18 @@ jobs:
         ports:
           - 3306:3306
         options: --health-cmd="mysqladmin ping" --health-interval=5s --health-timeout=2s --health-retries=3
+
+      redis-queue:
+        image: redis:alpine
+        ports:
+          - 11000:6379
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=2s --health-retries=3
+
+      redis-cache:
+        image: redis:alpine
+        ports:
+          - 13000:6379
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=2s --health-retries=3
 
     steps:
       - name: Clone
