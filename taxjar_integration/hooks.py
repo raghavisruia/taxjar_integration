@@ -143,6 +143,14 @@ doc_events = {
 		"on_cancel": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_delete",
 	},
 	("Quotation", "Sales Order", "Sales Invoice"): {
+		# before_validate, not validate - this must run before erpnext's own
+		# accounts_controller.validate_tax_account_company(), which throws
+		# and stops the save outright if a tax row's ledger belongs to a
+		# different company. See strip_foreign_company_tax_rows()'s own
+		# docstring for why such a row can show up at all.
+		"before_validate": [
+			"taxjar_integration.taxjar_integration.taxjar_integration.strip_foreign_company_tax_rows",
+		],
 		"validate": ["taxjar_integration.taxjar_integration.taxjar_integration.set_sales_tax"],
 		"onload": "taxjar_integration.taxjar_integration.taxjar_integration.set_taxjar_breakdown_html",
 		"before_print": "taxjar_integration.taxjar_integration.taxjar_integration.set_taxjar_breakdown_html",

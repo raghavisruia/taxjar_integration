@@ -1508,6 +1508,44 @@ def validate_return_against(doc, method):
 		)
 
 
+def strip_foreign_company_tax_rows(doc, method=None):
+	"""before_validate: drop any Sales/Purchase Taxes and Charges row whose
+	ledger belongs to a different company than this document.
+
+	erpnext's own accounts_controller.validate_tax_account_company() throws
+	on exactly this mismatch, stopping the save outright - this runs first,
+	so it can fix the row instead of the user hitting that error.
+
+	How the mismatch gets there in the first place: erpnext fetches this
+	company's default tax template through get_default_taxes_and_charges(),
+	which is company-scoped and correctly returns nothing for a company with
+	no default template of its own (see company_scope().calculates - a
+	company with TaxJar's own "Calculate Sales Tax" switched off is left
+	with none, by design, so this template is never auto-attached to it).
+	erpnext's client script, on getting that empty response back, does not
+	clear the tax rows already on the form - so switching the Company field
+	from one that DOES have a default template leaves that company's rows
+	sitting on the document under the new company. That is an erpnext bug,
+	not a TaxJar one; this only repairs its result before it can throw.
+
+	Every row here is one no company's TaxJar setup could ever call correct
+	- erpnext already refuses to save any document with a tax row like this,
+	so removing it first can only prevent a crash, never drop data a valid
+	save would have kept.
+	"""
+	if not getattr(doc, "company", None):
+		return
+
+	# Direct reassignment, not doc.set() - the same convention
+	# _remove_taxjar_rows() already uses for this exact field.
+	doc.taxes = [
+		row
+		for row in (doc.taxes or [])
+		if not row.account_head
+		or frappe.get_cached_value("Account", row.account_head, "company") == doc.company
+	]
+
+
 def _remove_taxjar_rows(doc, company_config):
 	"""Remove all sales tax rows owned by TaxJar for this company and recalculate totals."""
 	doc.taxes = [

@@ -65,6 +65,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	sanitize_error_response,
 	set_sales_tax,
 	set_taxjar_breakdown_html,
+	strip_foreign_company_tax_rows,
 	sync_customer_to_taxjar,
 	sync_transaction_to_taxjar,
 	validate_return_against,
@@ -7274,6 +7275,95 @@ class TestValidateReturnAgainst(UnitTestCase):
 			message,
 		)
 		self.assertNotIn("\n", message)
+
+
+class TestStripForeignCompanyTaxRows(UnitTestCase):
+	"""erpnext's own client script can leave a tax row from a previously
+	selected company sitting on the document after a company switch, since
+	get_default_taxes_and_charges() correctly returns nothing for a company
+	with no default template of its own, but the client never clears the
+	stale rows on that empty response. accounts_controller.py's
+	validate_tax_account_company() then throws on save. This hook runs
+	before that check and removes the row instead."""
+
+	def _account_company(self, companies):
+		"""side_effect for frappe.get_cached_value("Account", head, "company") -
+		looks up head in a dict rather than returning one fixed value, so a
+		test with rows from two different companies can tell them apart."""
+		def _lookup(doctype, name, fieldname):
+			return companies[name]
+		return _lookup
+
+	def test_drops_a_row_whose_ledger_belongs_to_a_different_company(self):
+		doc = _make_doc(company="Donald Inc", taxes=[
+			_make_tax_row("21400 - Sales Tax Payable - FI", description="Sales Tax"),
+		])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_cached_value",
+			side_effect=self._account_company({"21400 - Sales Tax Payable - FI": "Frappe Inc"}),
+		):
+			strip_foreign_company_tax_rows(doc)
+
+		self.assertEqual(doc.taxes, [])
+
+	def test_keeps_a_row_whose_ledger_belongs_to_this_company(self):
+		row = _make_tax_row("21400 - Sales Tax Payable - DI", description="Sales Tax")
+		doc = _make_doc(company="Donald Inc", taxes=[row])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_cached_value",
+			side_effect=self._account_company({"21400 - Sales Tax Payable - DI": "Donald Inc"}),
+		):
+			strip_foreign_company_tax_rows(doc)
+
+		self.assertEqual(doc.taxes, [row])
+
+	def test_keeps_the_matching_row_and_drops_the_mismatched_one(self):
+		wrong_company_row = _make_tax_row("21400 - Sales Tax Payable - FI", description="Sales Tax")
+		right_company_row = _make_tax_row("41200 - Shipping and Freight Income - DI", description="Shipping")
+		doc = _make_doc(company="Donald Inc", taxes=[wrong_company_row, right_company_row])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_cached_value",
+			side_effect=self._account_company({
+				"21400 - Sales Tax Payable - FI": "Frappe Inc",
+				"41200 - Shipping and Freight Income - DI": "Donald Inc",
+			}),
+		):
+			strip_foreign_company_tax_rows(doc)
+
+		self.assertEqual(doc.taxes, [right_company_row])
+
+	def test_a_row_with_no_account_head_is_left_alone(self):
+		"""Nothing to check a company against - not this hook's problem to flag,
+		and erpnext's own mandatory-field validation is what actually catches
+		a genuinely blank ledger."""
+		row = _make_tax_row("", description="Manual charge")
+		doc = _make_doc(company="Donald Inc", taxes=[row])
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_cached_value",
+		) as mock_get_cached_value:
+			strip_foreign_company_tax_rows(doc)
+			mock_get_cached_value.assert_not_called()
+
+		self.assertEqual(doc.taxes, [row])
+
+	def test_no_taxes_is_a_no_op(self):
+		doc = _make_doc(company="Donald Inc", taxes=[])
+		strip_foreign_company_tax_rows(doc)
+		self.assertEqual(doc.taxes, [])
+
+	def test_a_document_with_no_company_is_left_alone(self):
+		"""Nothing to compare a ledger's company against yet - a half-built
+		doc still picking its company, not this hook's problem to solve."""
+		row = _make_tax_row("21400 - Sales Tax Payable - FI", description="Sales Tax")
+		doc = _make_doc(company="Donald Inc", taxes=[row])
+		doc.company = None
+		with patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_cached_value",
+		) as mock_get_cached_value:
+			strip_foreign_company_tax_rows(doc)
+			mock_get_cached_value.assert_not_called()
+
+		self.assertEqual(doc.taxes, [row])
 
 
 # ── Phase 3: enqueue_taxjar_sync / enqueue_taxjar_delete ─────────────────────

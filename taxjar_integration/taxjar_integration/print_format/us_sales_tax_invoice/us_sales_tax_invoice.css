@@ -160,7 +160,12 @@
 }
 
 .taxjar-in-words-box {
-	margin-top: 20px;
+	/* Padding, not margin - margin-top is absorbed by "clearance" on an
+	   element that clears floats, so it draws no visible gap here. */
+	padding-top: 20px;
+}
+
+.taxjar-in-words-divider {
 	padding-top: 14px;
 	border-top: 1px solid #ededed;
 }
@@ -219,6 +224,7 @@
 /* TaxJar sales tax status panel */
 .taxjar-status-panel {
 	border-radius: 10px;
+	border: 1px solid #ededed;
 	background: #f8f8f8;
 	padding: 6px 16px 12px 16px;
 	margin-top: 12px;
@@ -229,7 +235,12 @@
 .taxjar-status-panel-attached {
 	margin-top: 0;
 	border-radius: 0;
-	border-top: 1px solid #ededed;
+	/*
+		No side/bottom border here - the card wrapper (.taxjar-analysis-card)
+		already draws one around the table + this panel together. Only the
+		top edge needs a line, to mark where the table ends.
+	*/
+	border-width: 1px 0 0 0;
 }
 
 .taxjar-status-panel .taxjar-status-line {

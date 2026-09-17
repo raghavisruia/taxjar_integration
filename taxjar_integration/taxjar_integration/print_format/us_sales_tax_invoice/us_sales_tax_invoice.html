@@ -71,13 +71,13 @@
 					{% if doc.company_address_display %}<div class="info-text">{{ doc.company_address_display }}</div>{% endif %}
 				</td>
 				<td style="width: 45%">
-					{#
-						Invoice Number isn't repeated here - it's already on
-						the letterhead.
-					#}
 					<table style="width: 100%">
 						<tr>
-							<td class="title" style="width: 45%">{{ _("Invoice Date") }}</td>
+							<td class="title" style="width: 45%">{{ _("Invoice Number") }}</td>
+							<td class="info-text text-right">{{ doc.name }}</td>
+						</tr>
+						<tr>
+							<td class="title">{{ _("Invoice Date") }}</td>
 							<td class="info-text text-right">{{ doc.get_formatted("posting_date") }}</td>
 						</tr>
 						{% if (doc.is_return or doc.is_debit_note) and doc.return_against %}
@@ -201,9 +201,18 @@
 			</tbody>
 		</table>
 
-		{% if print_settings.taxjar_show_tax_breakdown or has_tax_data %}
+		{#
+			No nexus means no tax was worked out at all, so the jurisdiction
+			table has nothing real to show - doc.taxjar_breakdown_html falls
+			back to its own "hence no taxes are charged" line in that case,
+			which only duplicates the grey status line below it. Skip the
+			table (and the card that joins it to the status line) whenever
+			there is no nexus, no matter what the print setting says.
+		#}
+		{% set show_breakdown_table = print_settings.taxjar_show_tax_breakdown and doc.taxjar_has_nexus %}
+		{% if show_breakdown_table or has_tax_data %}
 		<div class="taxjar-left-column">
-			{% if print_settings.taxjar_show_tax_breakdown %}
+			{% if show_breakdown_table %}
 			<div class="taxjar-breakdown-section">
 				<h4>{{ _("Tax Analysis") }}</h4>
 			</div>
@@ -217,8 +226,8 @@
 				the panel's bottom corners here, same as it already rounds
 				the table's top corners via its header.
 			#}
-			<div class="{{ 'taxjar-analysis-card' if print_settings.taxjar_show_tax_breakdown else '' }}">
-				{% if print_settings.taxjar_show_tax_breakdown %}
+			<div class="{{ 'taxjar-analysis-card' if show_breakdown_table else '' }}">
+				{% if show_breakdown_table %}
 				{{ doc.taxjar_breakdown_html }}
 				{% endif %}
 
@@ -233,7 +242,7 @@
 				{% else %}
 					{% set tj_source_line = _("Nexus present in {0}").format(state_label) %}
 				{% endif %}
-				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if print_settings.taxjar_show_tax_breakdown else '' }}">
+				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if show_breakdown_table else '' }}">
 					<div class="taxjar-status-line">{{ tj_source_line }}</div>
 					{% if is_exempt %}
 					{% set customer_exemption_type = frappe.db.get_value("Customer", doc.customer, "taxjar_exemption_type") %}
@@ -324,9 +333,18 @@
 		</div>
 
 		{% if doc.in_words %}
+		{#
+			clear: both puts this box's top edge right at the bottom of the
+			taller floated column above it - a box's own margin-top has no
+			effect there ("clearance" absorbs it, a standard CSS quirk), so
+			the gap above the divider line is padding-top on the outer box,
+			and the line itself is a separate inner div's border-top.
+		#}
 		<div class="taxjar-in-words-box" style="clear: both;">
-			<div class="taxjar-in-words-label">{{ _("In Words") }}</div>
-			<div class="in-words">{{ doc.in_words }}</div>
+			<div class="taxjar-in-words-divider">
+				<div class="taxjar-in-words-label">{{ _("In Words") }}</div>
+				<div class="in-words">{{ doc.in_words }}</div>
+			</div>
 		</div>
 		{% endif %}
 
