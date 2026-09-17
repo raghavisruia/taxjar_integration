@@ -24,13 +24,15 @@ jobs:
       - name: Clone
         uses: actions/checkout@v4
 
-      # 22, not the 20 the server job uses for frappe's asset build: vite 7
-      # requires 20.19 or 22.12 upward, and pinning the major here keeps the
-      # two jobs from having to move together.
+      # 24, the same major the server job uses, because frappe's package.json
+      # sets engines.node to >=24 on both develop and version-16. This job
+      # builds nothing of frappe and vitest 3 would run on 20.19 upward, so
+      # the floor here is a choice: one major across the file is one thing to
+      # move when frappe raises the floor again.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Install
@@ -105,15 +107,26 @@ jobs:
       - name: Clone
         uses: actions/checkout@v4
 
+      # 3.14, because this job builds frappe: its pyproject pins
+      # requires-python to >=3.14,<3.15 on both develop and version-16, and
+      # frappe/__init__.py uses PEP 695 `type` aliases that no interpreter
+      # below 3.12 can even parse. On 3.11 the editable install of frappe
+      # died with a SyntaxError and bench init exited 167, so the suite never
+      # ran. The Static Analysis job stays on 3.11 on purpose: it installs
+      # semgrep alone and never builds frappe.
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.14'
 
+      # 24, because this job runs `bench build` over frappe's assets and
+      # frappe's package.json sets engines.node to >=24. The job ran 20 until
+      # now, four majors below that floor; the Python failure in the step
+      # above hid it, because `bench build` never started.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           check-latest: true
 
       - name: Cache pip
