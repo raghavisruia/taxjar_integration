@@ -18,6 +18,11 @@ jobs:
       fail-fast: false
     name: Server
 
+    # bench init writes redis_queue at port 11000 and redis_cache at 13000
+    # into common_site_config.json, and --skip-redis-config-generation means
+    # the bench never starts a redis of its own. ERPNext's install enqueues
+    # background jobs, so without these two the install dies with
+    # "Connection refused" on 11000. redis_socketio shares 13000.
     services:
       mariadb:
         image: mariadb:10.6
@@ -26,6 +31,18 @@ jobs:
         ports:
           - 3306:3306
         options: --health-cmd="mysqladmin ping" --health-interval=5s --health-timeout=2s --health-retries=3
+
+      redis-queue:
+        image: redis:alpine
+        ports:
+          - 11000:6379
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=2s --health-retries=3
+
+      redis-cache:
+        image: redis:alpine
+        ports:
+          - 13000:6379
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=2s --health-retries=3
 
     steps:
       - name: Clone
@@ -79,9 +96,11 @@ jobs:
       - name: Install
         working-directory: /home/runner/frappe-bench
         run: |
+          bench get-app --branch develop --skip-assets erpnext
           bench get-app taxjar_integration $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
+          bench --site test_site install-app erpnext
           bench --site test_site install-app taxjar_integration
           bench build
         env:
