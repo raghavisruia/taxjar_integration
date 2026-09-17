@@ -15,6 +15,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(HERE, "../../..");
 const JS_ROOT = path.join(APP_ROOT, "taxjar_integration/public/js");
 const UTILS_PATH = path.join(JS_ROOT, "taxjar_utils.js");
+const DESK_SIDEBAR_PATH = path.join(JS_ROOT, "desk_sidebar.js");
 const SETTINGS_PATH = path.join(
 	APP_ROOT,
 	"taxjar_integration/taxjar_integration/doctype/taxjar_settings/taxjar_settings.js"
@@ -32,6 +33,7 @@ const FORM_SCRIPTS = {
 // Read once. The source never changes inside a run, and each load evaluates it
 // again in a fresh function scope.
 const UTILS_SOURCE = fs.readFileSync(UTILS_PATH, "utf8");
+const DESK_SIDEBAR_SOURCE = fs.readFileSync(DESK_SIDEBAR_PATH, "utf8");
 const SETTINGS_SOURCE = fs.readFileSync(SETTINGS_PATH, "utf8");
 const FORM_SOURCES = Object.fromEntries(
 	Object.entries(FORM_SCRIPTS).map(([doctype, file]) => [doctype, fs.readFileSync(file, "utf8")])
@@ -232,6 +234,19 @@ export function load_taxjar_utils() {
 	delete globalThis.taxjar_integration;
 	// eslint-disable-next-line no-new-func
 	new Function(UTILS_SOURCE)();
+	return window.taxjar_integration;
+}
+
+/**
+ * Evaluate desk_sidebar.js fresh, and return the app namespace it adds to.
+ *
+ * Loaded the same way as taxjar_utils.js, and for the same reason: it is a
+ * browser script, and its file-level `const`s are scoped to the call, so each
+ * test gets a fresh evaluation against the globals of that test.
+ */
+export function load_desk_sidebar() {
+	// eslint-disable-next-line no-new-func
+	new Function(DESK_SIDEBAR_SOURCE)();
 	return window.taxjar_integration;
 }
 
