@@ -17175,6 +17175,262 @@ class TestExportSalesAreRecordable(TaxJarTestCase):
 		self.assertIn("Canada", doc.taxjar_nexus_reason)
 
 
+class TestExportsAreExcludedNotFailed(TaxJarTestCase):
+	"""An export is a complete document TaxJar has nothing to do with.
+
+	It used to submit, try to file, fail with "No TaxJar payload could be built
+	for this document", and be re-sent by the retry cron every fifteen minutes -
+	a row on the Transaction Sync page reporting a problem that nobody could fix,
+	about an invoice that was correct all along.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _doc(self, company=None):
+		doc = MagicMock()
+		doc.name = "SINV-EXPORT-001"
+		doc.company = company or US_FILE.name
+		doc.taxjar_sync_retry_count = 0
+		return doc
+
+	def test_a_foreign_address_is_an_export(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=US_FILE.name, taxes=[])
+		doc.shipping_address_name = "ADDR-IN"
+
+		with patch.object(module, "_address_country", return_value="India"):
+			self.assertTrue(module.is_export_destination(doc))
+
+	def test_a_united_states_address_is_not_an_export(self):
+		"""A US address with no usable state stops a payload just as an export
+		does, and is not one: it is a gap in the data, and the document goes on
+		saying so rather than being quietly filed nowhere."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=US_FILE.name, taxes=[])
+		doc.shipping_address_name = "ADDR-US"
+
+		with patch.object(module, "_address_country", return_value="United States"):
+			self.assertFalse(module.is_export_destination(doc))
+
+	def test_submitting_an_export_stamps_excluded_with_its_own_reason(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = self._doc()
+		with self.scope_patches(), \
+		     patch.object(module, "is_export_destination", return_value=True), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "_publish_transaction_update"), \
+		     patch.object(module.frappe, "enqueue") as enqueue:
+			module.enqueue_taxjar_sync(doc, None)
+
+		written = doc.db_set.call_args[0][0]
+		self.assertEqual(written["taxjar_sync_status"], "Excluded")
+		self.assertEqual(written["taxjar_exclusion_reason"], module.EXCLUSION_OUTSIDE_COVERAGE)
+		enqueue.assert_not_called()
+
+	def test_cancelling_an_export_sends_no_delete(self):
+		"""Nothing was filed, so there is nothing to remove - and TaxJar answers
+		a delete for an order it never had with a 404, which the worker reads as
+		"already absent" and records as Synced."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = self._doc()
+		with self.scope_patches(), \
+		     patch.object(module, "is_export_destination", return_value=True), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "_publish_transaction_update"), \
+		     patch.object(module.frappe, "enqueue") as enqueue:
+			module.enqueue_taxjar_delete(doc, None)
+
+		enqueue.assert_not_called()
+		doc.db_set.assert_not_called()
+
+	def test_the_worker_excludes_an_export_rather_than_failing_it(self):
+		"""The retry cron and the Sync to TaxJar button both come through here,
+		which is how an invoice submitted before this rule existed clears itself."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = MagicMock()
+		doc.docstatus = 1
+		doc.company = US_FILE.name
+		doc.taxes = []
+
+		with self.scope_patches(), \
+		     patch.object(module, "frappe") as fake_frappe, \
+		     patch.object(module, "is_export_destination", return_value=True), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "get_tax_data", return_value=None), \
+		     patch.object(module, "log_taxjar_call"), \
+		     patch.object(module, "_set_sync_status") as set_status:
+			fake_frappe.get_doc.return_value = doc
+			module.sync_transaction_to_taxjar("SINV-EXPORT-001")
+
+		set_status.assert_called_once_with(
+			"SINV-EXPORT-001", "Excluded", exclusion_reason=module.EXCLUSION_OUTSIDE_COVERAGE
+		)
+
+	def test_a_missing_state_still_fails_and_still_retries(self):
+		"""The other half of the same branch: a United States address with no
+		state is a configuration gap, and the document keeps reporting it."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = MagicMock()
+		doc.docstatus = 1
+		doc.company = US_FILE.name
+		doc.taxes = []
+
+		with self.scope_patches(), \
+		     patch.object(module, "frappe") as fake_frappe, \
+		     patch.object(module, "is_export_destination", return_value=False), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "get_tax_data", return_value=None), \
+		     patch.object(module, "log_taxjar_call"), \
+		     patch.object(module, "_set_sync_status") as set_status:
+			fake_frappe.get_doc.return_value = doc
+			module.sync_transaction_to_taxjar("SINV-US-001")
+
+		self.assertEqual(set_status.call_args[0][1], "Failed")
+		self.assertTrue(set_status.call_args[1]["retryable"])
+
+	def test_the_reason_is_one_of_the_fields_own_options(self):
+		"""taxjar_exclusion_reason is a Select built from this tuple, so a reason
+		missing from it would be written and never displayed."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			EXCLUSION_OUTSIDE_COVERAGE,
+			TRANSACTION_EXCLUSION_REASONS,
+		)
+
+		self.assertIn(EXCLUSION_OUTSIDE_COVERAGE, TRANSACTION_EXCLUSION_REASONS)
+
+
+class TestExportDestinationIsNamedNotNumbered(TaxJarTestCase):
+	"""The form used to report an export as "Nexus not configured for null"."""
+
+	def test_check_nexus_answers_with_the_country(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), \
+		     patch.object(module.frappe.db, "exists", return_value=True), \
+		     patch.object(module.frappe, "has_permission", return_value=True), \
+		     patch.object(module.frappe, "get_doc", return_value=frappe._dict(
+		         country="India", state=None, taxjar_state_code=None)), \
+		     patch.object(module, "export_destination_country", return_value="India"):
+			answer = module.check_nexus("ADDR-IN", US_CALC.name)
+
+		self.assertTrue(answer["outside_coverage"])
+		self.assertEqual(answer["country"], "India")
+
+	def test_check_export_destination_says_nothing_about_a_united_states_address(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with patch.object(module.frappe.db, "exists", return_value=True), \
+		     patch.object(module.frappe, "has_permission", return_value=True), \
+		     patch.object(module, "export_destination_country", return_value=None):
+			self.assertEqual(module.check_export_destination("ADDR-US"), {})
+
+	def test_check_export_destination_refuses_a_name_that_is_not_one(self):
+		"""An empty name reaches the function - frappe's own type check only
+		refuses the wrong type, and "" is a str."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		self.assertEqual(module.check_export_destination(""), {})
+		self.assertEqual(module.check_export_destination("   "), {})
+
+	def test_the_stored_reason_names_the_country(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=US_CALC.name, taxes=[])
+		doc.shipping_address_name = "ADDR-IN"
+
+		with patch.object(module, "_address_country", return_value="India"):
+			self.assertEqual(
+				module._destination_outside_coverage_reason(doc),
+				"Destination is in India, which TaxJar does not price",
+			)
+
+
+class TestExportFormBehaviourJS(UnitTestCase):
+	"""The three things the form does with an export, read off the source."""
+
+	def _js_dir(self):
+		import os
+		return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "public", "js"))
+
+	def _read_js(self, filename):
+		import os
+		with open(os.path.join(self._js_dir(), filename)) as f:
+			return f.read()
+
+	def test_the_strip_names_the_country_and_offers_no_nexus_link(self):
+		"""Nexus is a registration with a United States state. No amount of it
+		makes a sale to Mumbai taxable, so the link would send the reader
+		somewhere that cannot change the outcome."""
+		utils = self._read_js("taxjar_utils.js")
+		self.assertIn(
+			'taxjar_integration._show_outside_coverage_message = function (frm, country) {', utils
+		)
+
+		fn = utils.split(
+			"taxjar_integration._show_outside_coverage_message = function (frm, country) {"
+		)[1].split("\n};")[0]
+		self.assertIn("Destination is in {0}, which TaxJar does not price", fn)
+		self.assertNotIn("TAXJAR_NEXUS_URL", fn)
+
+	def test_the_shipping_address_prompt_is_skipped_for_an_export(self):
+		utils = self._read_js("taxjar_utils.js")
+		self.assertIn("taxjar_integration._prompt_unless_export(frm, party_name)", utils)
+
+		fn = utils.split(
+			"taxjar_integration._prompt_unless_export = function (frm, party_name) {"
+		)[1].split("\n};")[0]
+		self.assertIn("taxjar_integration.export_destination(frm.doc.customer_address)", fn)
+		self.assertIn("if (export_to) return;", fn)
+
+	def test_an_export_is_pre_set_to_exempt_for_other(self):
+		utils = self._read_js("taxjar_utils.js")
+		self.assertIn('taxjar_integration.EXPORT_EXEMPTION_TYPE = "Other";', utils)
+		self.assertIn("apply(taxjar_integration.EXPORT_EXEMPTION_TYPE);", utils)
+
+	def test_the_export_exemption_type_is_one_of_the_fields_own_options(self):
+		"""The Select offers Wholesale, Government and Other. A pre-set value
+		outside that list would be written and never displayed."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			_transaction_exemption_fields,
+		)
+
+		field = next(
+			f for f in _transaction_exemption_fields()
+			if f["fieldname"] == "taxjar_transaction_exemption_type"
+		)
+		self.assertIn("Other", field["options"].split("\n"))
+
+	def test_every_exclusion_reason_has_a_sentence(self):
+		"""exclusion_reason_text renders the stored reason on two screens. A
+		reason with no branch falls through to "" and both screens say nothing."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			TRANSACTION_EXCLUSION_REASONS,
+		)
+
+		fn = self._read_js("taxjar_utils.js").split(
+			"taxjar_integration.exclusion_reason_text = function (reason, is_current) {"
+		)[1].split("\n};")[0]
+
+		for reason in TRANSACTION_EXCLUSION_REASONS:
+			with self.subTest(reason=reason):
+				self.assertIn(f'reason === "{reason}"', fn)
+
+	def test_the_sync_button_is_not_offered_for_an_export(self):
+		"""Every other exclusion is a switch someone can turn on, and the button
+		files the document once they have. This one is not."""
+		js = self._read_js("sales_invoice.js")
+		self.assertIn(
+			'if (frm.doc.taxjar_exclusion_reason === "Destination outside TaxJar coverage") return;',
+			js,
+		)
+
+
 class TestMissingCredentialSaysWhichKind(UnitTestCase):
 	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
 

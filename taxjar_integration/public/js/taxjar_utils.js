@@ -176,6 +176,45 @@ taxjar_integration.when_scoped = function (frm, predicate, fn) {
 	});
 };
 
+// ── Export destinations ──
+// A sale delivered to another country. TaxJar prices United States sales tax,
+// so it prices nothing here: no tax is charged, nothing is filed, and the form
+// says so instead of reporting a state that does not exist. The server asks the
+// same question of the saved document - see is_export_destination() in
+// taxjar_integration.py.
+//
+// Cached per address, the same way scope() is cached per company: three parts
+// of the form need this answer on the same form load, and it is one column of
+// one Address.
+taxjar_integration._export_cache = {};
+
+taxjar_integration.export_destination = function (address) {
+	if (!address) return Promise.resolve(null);
+
+	if (!taxjar_integration._export_cache[address]) {
+		taxjar_integration._export_cache[address] = frappe
+			.xcall(
+				"taxjar_integration.taxjar_integration.taxjar_integration.check_export_destination",
+				{ address }
+			)
+			.then((answer) => (answer && answer.country ? answer : null))
+			.catch(() => {
+				// Same reason scope() clears its own entry on failure: a failed
+				// read must not become a permanent answer.
+				delete taxjar_integration._export_cache[address];
+				return null;
+			});
+	}
+
+	return taxjar_integration._export_cache[address];
+};
+
+// The reason an export is exempt, as one of the Select's own options. TaxJar
+// offers Wholesale, Government and Other, and an export is none of the first
+// two - test_export_exemption_type_is_a_valid_option keeps this in step with
+// the field.
+taxjar_integration.EXPORT_EXEMPTION_TYPE = "Other";
+
 // The TaxJar tab, its exemption section and the breakdown section are created on
 // every Quotation, Sales Order and Sales Invoice at install, so a company TaxJar
 // does not serve carries a tab full of sections that can never say anything.
@@ -382,8 +421,27 @@ taxjar_integration.check_shipping_address = function (frm) {
 	return taxjar_integration.when_scoped(
 		frm,
 		(scope) => scope.uses_taxjar,
-		() => taxjar_integration._prompt_for_shipping_address(frm, party_name)
+		() => taxjar_integration._prompt_unless_export(frm, party_name)
 	);
+};
+
+// An export needs no shipping address of its own. The billing address already
+// names another country, TaxJar prices nothing there, and a second address in
+// the same country would not change that - so the picker used to block the save
+// to collect a destination nothing was ever going to read.
+//
+// Only asked when the document has a billing address to judge: with neither
+// address set there is no country to read, and the picker is exactly what that
+// document needs.
+taxjar_integration._prompt_unless_export = function (frm, party_name) {
+	if (!frm.doc.customer_address) {
+		return taxjar_integration._prompt_for_shipping_address(frm, party_name);
+	}
+
+	return taxjar_integration.export_destination(frm.doc.customer_address).then((export_to) => {
+		if (export_to) return;
+		return taxjar_integration._prompt_for_shipping_address(frm, party_name);
+	});
 };
 
 taxjar_integration._prompt_for_shipping_address = function (frm, party_name) {
@@ -743,17 +801,48 @@ taxjar_integration._show_tax_message = function (frm) {
 		}
 	}
 
-	// Paint what the document itself says first...
-	if (frm.doc.taxjar_nexus_reason && !frm.doc.taxjar_has_nexus) {
-		taxjar_integration._show_no_nexus_message(frm, frm.doc.taxjar_nexus_reason);
-	} else {
-		taxjar_integration._set_tax_message(frm, "");
-	}
+	// An export is answered first and on its own. The saved reason names the
+	// country correctly, but the strip it is painted into ends in "Manage Nexus
+	// in TaxJar", and nexus is a registration with a United States state - no
+	// amount of it makes a sale to Mumbai taxable, so the link would send the
+	// reader somewhere that cannot change the outcome.
+	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
 
-	// ...then correct it from the address actually on the form, which on an
-	// edited document is not the one the saved answer was about. A no-op
-	// unless there is unsaved input.
-	taxjar_integration._check_nexus_for_selected_address(frm);
+	return taxjar_integration.export_destination(address).then((export_to) => {
+		// The pick can change while this is in flight, and a stale answer names
+		// the wrong country - the same guard the nexus check below applies.
+		if ((frm.doc.shipping_address_name || frm.doc.customer_address) !== address) return;
+
+		if (export_to) {
+			taxjar_integration._show_outside_coverage_message(frm, export_to.country);
+			return;
+		}
+
+		// Paint what the document itself says first...
+		if (frm.doc.taxjar_nexus_reason && !frm.doc.taxjar_has_nexus) {
+			taxjar_integration._show_no_nexus_message(frm, frm.doc.taxjar_nexus_reason);
+		} else {
+			taxjar_integration._set_tax_message(frm, "");
+		}
+
+		// ...then correct it from the address actually on the form, which on an
+		// edited document is not the one the saved answer was about. A no-op
+		// unless there is unsaved input.
+		taxjar_integration._check_nexus_for_selected_address(frm);
+	});
+};
+
+// Same strip, same colour, one sentence and no link: the reader is not missing
+// a registration, the sale is simply outside what TaxJar prices. The country is
+// escaped because it is rendered as HTML.
+taxjar_integration._show_outside_coverage_message = function (frm, country) {
+	const text = country
+		? __("Destination is in {0}, which TaxJar does not price, hence no taxes are charged.", [
+				frappe.utils.escape_html(country),
+		  ])
+		: __("Destination is outside the United States, which TaxJar does not price, hence no taxes are charged.");
+
+	taxjar_integration._set_tax_message(frm, text, "yellow");
 };
 
 // Yellow, not blue: no tax on a sale is a caveat about the outcome, not a note
@@ -805,7 +894,13 @@ taxjar_integration._check_nexus_for_selected_address = function (frm) {
 			const current = frm.doc.shipping_address_name || frm.doc.customer_address;
 			if (current !== address) return;
 
-			if (missing) {
+			if (missing && missing.outside_coverage) {
+				// The endpoint answers the export case itself, so a caller that
+				// reaches it without asking about the country first still gets
+				// a sentence about the country rather than "Nexus not
+				// configured for null".
+				taxjar_integration._show_outside_coverage_message(frm, missing.country);
+			} else if (missing) {
 				// The full state name, same as the reason the server stores
 				// once the document is saved - a two-letter code has to be
 				// decoded before the sentence means anything.
@@ -868,30 +963,52 @@ taxjar_integration._apply_region_exemption = function (frm) {
 		return;
 	}
 
+	// Set and locked, whichever of the two reasons applies - the fields say the
+	// same thing either way, and only one owner may write them.
+	const apply = (exemption_type) => {
+		fields.forEach((f) => frm.set_df_property(f, "read_only", 1));
+
+		// Only written on a draft, and only when it would actually change
+		// something - set_value on an unchanged field still marks the form
+		// dirty, which would make merely opening a saved invoice look edited.
+		if (frm.doc.docstatus !== 0) return;
+
+		if (!cint(frm.doc.taxjar_transaction_exempt)) {
+			frm.set_value("taxjar_transaction_exempt", 1);
+		}
+		if (frm.doc.taxjar_transaction_exemption_type !== exemption_type) {
+			frm.set_value("taxjar_transaction_exemption_type", exemption_type);
+		}
+	};
+
 	return frappe
 		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.get_region_exemption", {
 			customer,
 			address,
 		})
 		.then((exemption) => {
-			if (!exemption || !exemption.exemption_type) {
-				unlock();
+			if (exemption && exemption.exemption_type) {
+				apply(exemption.exemption_type);
 				return;
 			}
 
-			fields.forEach((f) => frm.set_df_property(f, "read_only", 1));
-
-			// Only written on a draft, and only when it would actually change
-			// something - set_value on an unchanged field still marks the form
-			// dirty, which would make merely opening a saved invoice look edited.
-			if (frm.doc.docstatus !== 0) return;
-
-			if (!cint(frm.doc.taxjar_transaction_exempt)) {
-				frm.set_value("taxjar_transaction_exempt", 1);
-			}
-			if (frm.doc.taxjar_transaction_exemption_type !== exemption.exemption_type) {
-				frm.set_value("taxjar_transaction_exemption_type", exemption.exemption_type);
-			}
+			// No standing exemption on the customer. An export is exempt all
+			// the same, and for a reason that belongs to the sale rather than
+			// to the customer: TaxJar prices United States sales tax, and this
+			// sale is delivered elsewhere. "Other" because TaxJar's own list
+			// offers Wholesale, Government and Other, and an export is neither
+			// of the first two.
+			//
+			// The customer's own exemption is asked first because TaxJar
+			// applies that one itself, off the matched customer - see
+			// _get_effective_exemption() in taxjar_integration.py.
+			return taxjar_integration.export_destination(address).then((export_to) => {
+				if (!export_to) {
+					unlock();
+					return;
+				}
+				apply(taxjar_integration.EXPORT_EXEMPTION_TYPE);
+			});
 		});
 };
 
@@ -1429,6 +1546,13 @@ taxjar_integration.exclusion_reason_text = function (reason, is_current) {
 
 	if (reason === "Removed from TaxJar") {
 		return __("This transaction was removed from TaxJar.");
+	}
+
+	if (reason === "Destination outside TaxJar coverage") {
+		// No "when this document was submitted" past tense here, and no switch
+		// to go and change: where a sale is delivered is a fact about the
+		// document, and it reads the same today as it did at submit.
+		return __("This sale is delivered outside the United States, so TaxJar does not price or file it.");
 	}
 
 	return "";

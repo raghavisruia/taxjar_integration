@@ -51,6 +51,12 @@ function _add_taxjar_buttons(frm) {
 	const status = frm.doc.taxjar_sync_status;
 	if (status !== "Failed" && status !== "Excluded") return;
 
+	// Every other exclusion is a switch someone can turn on, and the button is
+	// how the document is filed once they have. An export is not: TaxJar prices
+	// United States sales tax, this sale is delivered elsewhere, and the button
+	// would only re-exclude the document it offered to file.
+	if (frm.doc.taxjar_exclusion_reason === "Destination outside TaxJar coverage") return;
+
 	// resync_transaction refuses to file for a company whose "create
 	// transactions" flag is off, so the button is not offered there either -
 	// it would otherwise sit directly beneath a sidebar pill saying this company

@@ -1,0 +1,228 @@
+// An export: a sale delivered to a country TaxJar does not price.
+//
+// The form used to report one as "Nexus not configured for null" - a sentence
+// about a state the address does not have, ending in a link to a page where
+// nexus is declared, which could not have changed the outcome. It also blocked
+// the save to collect a shipping address nothing was going to read.
+//
+// Three behaviours, one fact: the strip, the shipping-address prompt and the
+// exemption override all ask the same endpoint and all agree.
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+	US_CALC,
+	answer_xcall,
+	flush,
+	install_desk,
+	load_taxjar_utils,
+	make_frm,
+	message_html,
+	message_text,
+} from "./helpers/desk.js";
+
+const MOD = "taxjar_integration.taxjar_integration.taxjar_integration";
+const SCOPE_METHOD = `${MOD}.get_company_scope`;
+const EXPORT_METHOD = `${MOD}.check_export_destination`;
+const REGION_METHOD = `${MOD}.get_region_exemption`;
+const NEXUS_METHOD = `${MOD}.check_nexus`;
+const ADDRESSES_METHOD = `${MOD}.get_customer_addresses`;
+
+const EXEMPTION_FIELDS = ["taxjar_transaction_exempt", "taxjar_transaction_exemption_type"];
+
+let frappe;
+let taxjar;
+
+beforeEach(() => {
+	frappe = install_desk();
+	taxjar = load_taxjar_utils();
+});
+
+/** A saved invoice for a calculating company, with one address on it. */
+function open_invoice(doc = {}) {
+	return make_frm({
+		company: US_CALC.company,
+		fields: EXEMPTION_FIELDS,
+		doc: { customer: "Acme Corp", ...doc },
+	});
+}
+
+describe("the message strip", () => {
+	it("names the country of an export", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[EXPORT_METHOD]: { country: "India" },
+		});
+
+		const frm = open_invoice({
+			customer_address: "ADDR-IN",
+			taxjar_has_nexus: 0,
+			taxjar_nexus_reason: "Destination is in India, which TaxJar does not price",
+		});
+		await taxjar.show_no_address_tax_message(frm);
+		await flush();
+
+		expect(message_text(frm)).toContain("India");
+		expect(message_text(frm)).not.toContain("null");
+		expect(message_text(frm)).toContain("no taxes are charged");
+	});
+
+	it("offers no nexus link on an export", () => {
+		// Nexus is a registration with a United States state. No amount of it
+		// makes a sale to Mumbai taxable.
+		const frm = open_invoice({ customer_address: "ADDR-IN" });
+		taxjar._show_outside_coverage_message(frm, "India");
+
+		expect(message_html(frm)).not.toContain(taxjar.TAXJAR_NEXUS_URL);
+	});
+
+	it("still reports a missing nexus for a United States address", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[EXPORT_METHOD]: {},
+			[NEXUS_METHOD]: { state: "New Jersey", state_code: "NJ", country_code: "US" },
+		});
+
+		const frm = make_frm({
+			company: US_CALC.company,
+			is_new: true,
+			fields: EXEMPTION_FIELDS,
+			doc: { customer: "Acme Corp", customer_address: "ADDR-NJ" },
+		});
+		await taxjar.show_no_address_tax_message(frm);
+		await flush();
+
+		expect(message_text(frm)).toContain("New Jersey");
+		expect(message_html(frm)).toContain(taxjar.TAXJAR_NEXUS_URL);
+	});
+});
+
+describe("the shipping address prompt", () => {
+	it("is skipped for an export", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[EXPORT_METHOD]: { country: "India" },
+		});
+		taxjar._prompt_for_shipping_address = vi.fn(() => Promise.resolve());
+
+		const frm = open_invoice({ customer_address: "ADDR-IN" });
+		await taxjar.check_shipping_address(frm);
+		await flush();
+
+		expect(taxjar._prompt_for_shipping_address).not.toHaveBeenCalled();
+		expect(frappe.validated).toBe(true);
+	});
+
+	it("still asks for a United States destination", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[EXPORT_METHOD]: {},
+			[ADDRESSES_METHOD]: [],
+		});
+		taxjar._prompt_for_shipping_address = vi.fn(() => Promise.resolve());
+
+		const frm = open_invoice({ customer_address: "ADDR-NJ" });
+		await taxjar.check_shipping_address(frm);
+		await flush();
+
+		expect(taxjar._prompt_for_shipping_address).toHaveBeenCalled();
+	});
+
+	it("asks when there is no address at all to read a country off", async () => {
+		answer_xcall(frappe, { [SCOPE_METHOD]: US_CALC });
+		taxjar._prompt_for_shipping_address = vi.fn(() => Promise.resolve());
+
+		const frm = open_invoice();
+		await taxjar.check_shipping_address(frm);
+		await flush();
+
+		expect(taxjar._prompt_for_shipping_address).toHaveBeenCalled();
+	});
+});
+
+describe("the exemption override", () => {
+	it("is pre-set to exempt for Other on an export, and locked", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[REGION_METHOD]: {},
+			[EXPORT_METHOD]: { country: "India" },
+		});
+
+		const frm = open_invoice({ customer_address: "ADDR-IN" });
+		await taxjar.apply_region_exemption(frm);
+		await flush();
+
+		expect(frm.doc.taxjar_transaction_exempt).toBe(1);
+		expect(frm.doc.taxjar_transaction_exemption_type).toBe("Other");
+		EXEMPTION_FIELDS.forEach((f) => expect(frm.fields_dict[f].df.read_only).toBe(1));
+	});
+
+	it("leaves a United States sale alone", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[REGION_METHOD]: {},
+			[EXPORT_METHOD]: {},
+		});
+
+		const frm = open_invoice({ customer_address: "ADDR-NJ" });
+		await taxjar.apply_region_exemption(frm);
+		await flush();
+
+		expect(frm.doc.taxjar_transaction_exempt).toBeUndefined();
+		EXEMPTION_FIELDS.forEach((f) => expect(frm.fields_dict[f].df.read_only).toBe(0));
+	});
+
+	it("prefers the customer's own exemption, which TaxJar applies itself", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[REGION_METHOD]: { exemption_type: "Wholesale", state: null },
+			// Answered, but never asked for: the customer's own type wins.
+			[EXPORT_METHOD]: { country: "India" },
+		});
+
+		const frm = open_invoice({ customer_address: "ADDR-IN" });
+		await taxjar.apply_region_exemption(frm);
+		await flush();
+
+		expect(frm.doc.taxjar_transaction_exemption_type).toBe("Wholesale");
+	});
+
+	it("does not write on a submitted document", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[REGION_METHOD]: {},
+			[EXPORT_METHOD]: { country: "India" },
+		});
+
+		const frm = open_invoice({ customer_address: "ADDR-IN" });
+		frm.doc.docstatus = 1;
+		await taxjar.apply_region_exemption(frm);
+		await flush();
+
+		expect(frm.set_value).not.toHaveBeenCalled();
+		EXEMPTION_FIELDS.forEach((f) => expect(frm.fields_dict[f].df.read_only).toBe(1));
+	});
+});
+
+describe("the endpoint is asked once per address", () => {
+	it("caches the answer, the way the company scope is cached", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_CALC,
+			[EXPORT_METHOD]: { country: "India" },
+		});
+
+		await taxjar.export_destination("ADDR-IN");
+		await taxjar.export_destination("ADDR-IN");
+		await flush();
+
+		const calls = frappe.xcall.mock.calls.filter(([method]) => method === EXPORT_METHOD);
+		expect(calls).toHaveLength(1);
+	});
+
+	it("does not ask about a document with no address", async () => {
+		answer_xcall(frappe, { [SCOPE_METHOD]: US_CALC });
+
+		expect(await taxjar.export_destination(undefined)).toBeNull();
+		expect(frappe.xcall).not.toHaveBeenCalled();
+	});
+});

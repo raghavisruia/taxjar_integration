@@ -325,6 +325,11 @@ _NOT_CONFIGURED_ERROR = describe_missing_credential
 EXCLUSION_TAXJAR_DISABLED = "TaxJar Disabled"
 EXCLUSION_SYNC_NOT_ENABLED = "Transaction Sync not enabled for company"
 EXCLUSION_REMOVED_FROM_TAXJAR = "Removed from TaxJar"
+# An export. TaxJar files United States sales tax state by state, and a sale
+# delivered to another country belongs to no state, so there is nowhere to file
+# it. This is the one exclusion reason that is a fact about the document rather
+# than about a switch - see is_export_destination().
+EXCLUSION_OUTSIDE_COVERAGE = "Destination outside TaxJar coverage"
 
 # Drives the Select's options - see make_custom_fields, which re-runs on every
 # migrate, so the field and this list cannot drift apart.
@@ -332,6 +337,7 @@ TRANSACTION_EXCLUSION_REASONS = (
 	EXCLUSION_TAXJAR_DISABLED,
 	EXCLUSION_SYNC_NOT_ENABLED,
 	EXCLUSION_REMOVED_FROM_TAXJAR,
+	EXCLUSION_OUTSIDE_COVERAGE,
 )
 
 
@@ -370,6 +376,22 @@ def enqueue_taxjar_sync(doc, method):
 				"Excluded",
 				exclusion_reason=transaction_exclusion_reason(doc.company),
 			),
+			update_modified=False,
+		)
+		_publish_transaction_update(doc.name, "Excluded")
+		return
+
+	if is_export_destination(doc):
+		# An export is excluded, not failed. TaxJar files state by state, this
+		# sale is delivered to no state, and no payload can be built for it - so
+		# it used to submit, fail with "No TaxJar payload could be built", and be
+		# re-sent by the retry cron every fifteen minutes until it ran out of
+		# attempts, all to report a document that is complete and correct.
+		#
+		# Same doc.db_set reasoning as the branch above: this runs inside the
+		# submit itself.
+		doc.db_set(
+			_sync_status_fields("Excluded", exclusion_reason=EXCLUSION_OUTSIDE_COVERAGE),
 			update_modified=False,
 		)
 		_publish_transaction_update(doc.name, "Excluded")
@@ -420,6 +442,13 @@ def enqueue_taxjar_sync(doc, method):
 def enqueue_taxjar_delete(doc, method):
 	"""on_cancel hook: enqueue background TaxJar transaction deletion."""
 	if not company_scope(doc.company).files:
+		return
+
+	# An export was never filed, so there is nothing in TaxJar to remove. Without
+	# this the delete runs, TaxJar answers 404, and the 404 is read as "already
+	# absent" - which writes status Synced onto a document that never reached
+	# TaxJar at all.
+	if is_export_destination(doc):
 		return
 
 	if not get_client(doc.company):
@@ -554,6 +583,16 @@ def sync_transaction_to_taxjar(invoice_name):
 		return
 
 	if not tax_dict:
+		# The same split enqueue_taxjar_sync makes, applied again here because
+		# this worker is also reached from the retry cron and the Sync to TaxJar
+		# button - including for documents submitted before exports were
+		# excluded, which is how those clear themselves.
+		if is_export_destination(doc):
+			_set_sync_status(invoice_name, "Excluded", exclusion_reason=EXCLUSION_OUTSIDE_COVERAGE)
+			log_taxjar_call(action="create_transaction", status="skipped",
+				error=EXCLUSION_OUTSIDE_COVERAGE, context=ctx)
+			return
+
 		_set_sync_status(
 			invoice_name,
 			"Failed",
@@ -1423,17 +1462,61 @@ def set_sales_tax(doc, method):
 		doc.run_method("set_total_in_words")
 
 
+def _address_country(address_name):
+	"""The country on an Address, or None if it cannot be read.
+
+	The name is checked for being a name at all: this is reached from a document
+	whose address fields may hold anything, and a non-string would otherwise go
+	into a query.
+	"""
+	if not isinstance(address_name, str) or not address_name.strip():
+		return None
+	if not frappe.db.exists("Address", address_name):
+		return None
+	return frappe.db.get_value("Address", address_name, "country")
+
+
+def _destination_country(doc):
+	"""The country this sale is delivered to, or None if it cannot be read."""
+	return _address_country(_destination_address(doc))
+
+
+def export_destination_country(address_name):
+	"""The country of an Address TaxJar does not price, or None.
+
+	None for a United States address, for an address that cannot be read, and
+	for an address with no country - the caller then has no export to report.
+	"""
+	country = _address_country(address_name)
+	return country if country and country != "United States" else None
+
+
+def is_export_destination(doc):
+	"""Whether this document is an export: delivered to a country TaxJar does
+	not price.
+
+	An export and a United States address with no usable state both stop a
+	payload from being built, and they are not the same thing. An export is a
+	complete document that is simply outside TaxJar's remit - it charges no tax,
+	it needs no shipping address of its own, and it is filed nowhere. A missing
+	state is a gap in the data that the reader should go and fill, and the
+	document keeps saying so.
+	"""
+	return bool(export_destination_country(_destination_address(doc)))
+
+
 def _destination_outside_coverage_reason(doc):
 	"""Why no payload could be built, in the destination's own terms.
 
 	Named rather than left as a bare "no tax": a sale to Ontario and a sale to a
 	state with no nexus are both untaxed here, and only one of them is something
 	the reader could change.
+
+	The same two sentences are built in the browser, off the address the form
+	holds before its first save - see _show_outside_coverage_message and
+	_show_no_nexus_message in taxjar_utils.js.
 	"""
-	address_name = _destination_address(doc)
-	country = None
-	if address_name and frappe.db.exists("Address", address_name):
-		country = frappe.db.get_value("Address", address_name, "country")
+	country = _destination_country(doc)
 
 	if country and country != "United States":
 		return f"Destination is in {country}, which TaxJar does not price"
@@ -2205,6 +2288,16 @@ def check_nexus(shipping_address_name: str, company: str):
 
 	try:
 		address = frappe.get_doc("Address", shipping_address_name)
+
+		# Asked before nexus, because nexus is the wrong question here. A sale
+		# to Bavaria is not a state this company has yet to register in - it is
+		# outside what TaxJar prices at all, and the answer used to come back as
+		# "Nexus not configured for null", naming a state the address does not
+		# have.
+		export_country = export_destination_country(shipping_address_name)
+		if export_country:
+			return {"outside_coverage": True, "country": export_country}
+
 		state_code = get_iso_3166_2_state_code(address)
 
 		if not frappe.db.get_value(
@@ -2217,6 +2310,29 @@ def check_nexus(shipping_address_name: str, company: str):
 			return {"state": address.state, "state_code": state_code, "country_code": country_code}
 	except Exception:
 		return
+
+
+@frappe.whitelist()
+def check_export_destination(address: str):
+	"""Whether this address is an export - a country TaxJar does not price.
+
+	The one fact three parts of the form need before the first save: the message
+	strip says so instead of naming a state, the shipping-address prompt stops
+	asking for a destination TaxJar will not read, and the exemption override is
+	pre-set to exempt. check_nexus() answers the same question for the strip, on
+	a call it already makes; this is for the other two, which run at their own
+	moments.
+	"""
+	if not isinstance(address, str) or not address.strip():
+		return {}
+
+	if not frappe.db.exists("Address", address):
+		return {}
+
+	frappe.has_permission("Address", "read", doc=address, throw=True)
+
+	country = export_destination_country(address)
+	return {"country": country} if country else {}
 
 
 @frappe.whitelist()
