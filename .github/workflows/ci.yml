@@ -29,17 +29,23 @@ jobs:
 
     steps:
       - name: Clone
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
+      # 3.14, because this job builds frappe: frappe/__init__.py uses PEP 695
+      # `type` aliases that no interpreter below 3.12 can parse. On 3.10 the
+      # editable install of frappe died with a SyntaxError and bench init
+      # exited 167, so the suite never ran.
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.14'
 
+      # 24, because this job runs `bench build` over frappe's assets and
+      # frappe's package.json sets engines.node to >=24.
       - name: Setup Node
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v4
         with:
-          node-version: 14
+          node-version: 24
           check-latest: true
 
       - name: Cache pip
@@ -53,7 +59,7 @@ jobs:
 
       - name: Get yarn cache directory path
         id: yarn-cache-dir-path
-        run: 'echo "::set-output name=dir::$(yarn cache dir)"'
+        run: 'echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT'
 
       - uses: actions/cache@v4
         id: yarn-cache
