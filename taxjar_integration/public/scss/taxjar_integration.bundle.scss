@@ -241,11 +241,12 @@
 	}
 }
 
-// ── Bulk action button ────────────────────────────────────────────────────
+// ── Disabled page buttons ─────────────────────────────────────────────────
 // Disabled look without pointer-events: none - the title has to survive, and
-// so does tab focus. See bulk_action_button.js.
+// so does tab focus. See bulk_action_button.js and export_button.js.
 
-.es-button.taxjar-bulk-action[data-disabled] {
+.es-button.taxjar-bulk-action[data-disabled],
+.es-button.taxjar-export[data-disabled] {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
@@ -291,6 +292,15 @@
 		justify-content: flex-end;
 		gap: 12px;
 		margin-bottom: 10px;
+	}
+
+	// The selection's own controls, the pair the Transaction Sync page hides on
+	// a tab that offers no selection. Grouped so that hiding them leaves the row
+	// and the Export button in it standing.
+	.taxjar-selection-actions {
+		display: flex;
+		align-items: center;
+		gap: 12px;
 	}
 
 	.taxjar-selection-count {

@@ -5938,7 +5938,12 @@ class TestDeskPageChromeJS(UnitTestCase):
 			"public", "scss", "taxjar_integration.bundle.scss",
 		))
 		with open(scss_path) as f:
-			disabled_rule = f.read().split(".es-button.taxjar-bulk-action[data-disabled] {")[1].split("}")[0]
+			scss = f.read()
+
+		# One rule for two buttons: Bulk Action and Export are disabled the same
+		# way, so they look the same way.
+		self.assertIn(".es-button.taxjar-bulk-action[data-disabled],", scss)
+		disabled_rule = scss.split(".es-button.taxjar-export[data-disabled] {")[1].split("}")[0]
 		self.assertNotIn("pointer-events", disabled_rule)
 
 	def test_bulk_action_labelled_consistently(self):
@@ -8373,13 +8378,16 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		self.assertIn('__("Failed to Cancel")', self._sync_status_cell_fn())
 
 	def test_docstatus_is_available_to_the_status_cell(self):
-		"""The wording above reads row.docstatus, so get_transactions has to
-		select it - a missing column would silently fall back to "Failed"."""
+		"""The wording above reads row.docstatus, so the row fetch has to
+		select it - a missing column would silently fall back to "Failed".
+
+		_fetch_invoices, not get_transactions: the table read and the export
+		share it, so the column is selected once for both."""
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
 			taxjar_transactions as page,
 		)
 		import inspect
-		self.assertIn('"docstatus"', inspect.getsource(page.get_transactions))
+		self.assertIn('"docstatus"', inspect.getsource(page._fetch_invoices))
 
 	def test_sync_status_cell_uses_one_shape_for_every_status(self):
 		"""Failed reads the same as every other status - a pill plus (when
@@ -15720,16 +15728,20 @@ class TestWhitelistedEndpointContract(UnitTestCase):
 		self.assertEqual(offenders, [], f"whitelisted args without type hints: {offenders}")
 
 	def test_read_endpoints_reject_a_user_without_the_doctype(self):
+		"""The exports are read endpoints too - they send the same rows as a
+		file, so they answer to the same permission."""
 		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			export_customers,
 			get_customers,
 		)
 		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			export_transactions,
 			get_transactions,
 		)
 
 		frappe.set_user("Guest")
 		try:
-			for fn in (get_transactions, get_customers):
+			for fn in (get_transactions, get_customers, export_transactions, export_customers):
 				with self.assertRaises(frappe.PermissionError):
 					fn()
 		finally:

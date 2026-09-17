@@ -5,6 +5,14 @@ import frappe
 PAGE_SIZE = 20
 PAGE_SIZES = (20, 50, 100)
 
+# The most rows one export may carry. An export is not paginated - that is the
+# point of it - so this is what stops a whitelisted endpoint being asked for the
+# whole table: every row is read, formatted and written inside one request, and
+# a request has to answer. The page envelope below carries the number to the
+# client, so the button can say why it is out of reach rather than letting the
+# reader press it and meet an error page.
+EXPORT_ROW_LIMIT = 10000
+
 
 def parse_filters(filters):
 	"""Normalise the filters argument from a whitelisted page method."""
@@ -82,6 +90,7 @@ def paginated_response(items_key, items, total, page, page_size=PAGE_SIZE):
 		"page": page,
 		"page_size": page_size,
 		"total_pages": max(1, -(-total // page_size)),
+		"export_limit": EXPORT_ROW_LIMIT,
 	}
 
 

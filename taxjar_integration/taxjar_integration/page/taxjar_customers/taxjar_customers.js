@@ -160,6 +160,10 @@ class TaxJarCustomerConfig {
 	}
 
 	// Built detached; render_table() moves it above the active tab's table.
+	//
+	// Bulk Action acts on the rows the reader ticked; Export acts on the whole
+	// tab, so it needs no selection and is rightmost - the row is right-aligned,
+	// and the one control that never changes keeps the same place.
 	make_tab_actions() {
 		this.$tab_actions = $('<div class="taxjar-tab-actions"></div>');
 		this.$selection_count = $('<span class="taxjar-selection-count"></span>').appendTo(this.$tab_actions);
@@ -167,6 +171,15 @@ class TaxJarCustomerConfig {
 		this.bulk_action = new taxjar_integration.BulkActionButton({
 			$wrapper: this.$tab_actions,
 			label: __("Bulk Action"),
+		});
+
+		this.export_button = new taxjar_integration.ExportButton({
+			$wrapper: this.$tab_actions,
+			method:
+				"taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.export_customers",
+			// get_filters(), not get_scope_filters(): the sync status drill-down
+			// narrows the table, so it narrows the file the table exports to.
+			get_args: () => ({ filters: this.get_filters(), scope: this.active_tab }),
 		});
 	}
 
@@ -259,6 +272,7 @@ class TaxJarCustomerConfig {
 			this.render_summary(summary);
 			this.render_table();
 			this.paginator.render(data);
+			this.export_button.set_state(data);
 			this.update_bulk_state();
 		});
 	}

@@ -227,16 +227,37 @@ class TaxJarTransactionSync {
 		});
 	}
 
-	// Selection count + Bulk Action. Built detached and moved into the active
-	// tab's table wrapper by render_table(), so it sits directly above the rows
-	// it acts on and inherits that wrapper's padding.
+	// Selection count + Bulk Action + Export. Built detached and moved into the
+	// active tab's table wrapper by render_table(), so it sits directly above
+	// the rows it acts on and inherits that wrapper's padding.
+	//
+	// The count and Bulk Action are the selection's own controls, so they come
+	// and go with it - three of the six tabs hold nothing retryable. Export acts
+	// on the whole tab rather than on a selection, so it is on every tab, and it
+	// is rightmost: the row is right-aligned, so the one control that is always
+	// there keeps the same place while the two beside it appear and go.
 	make_tab_actions() {
 		this.$tab_actions = $('<div class="taxjar-tab-actions"></div>');
-		this.$selection_count = $('<span class="taxjar-selection-count"></span>').appendTo(this.$tab_actions);
+
+		this.$selection_actions = $('<div class="taxjar-selection-actions"></div>').appendTo(
+			this.$tab_actions
+		);
+		this.$selection_count = $('<span class="taxjar-selection-count"></span>').appendTo(
+			this.$selection_actions
+		);
 
 		this.bulk_action = new taxjar_integration.BulkActionButton({
-			$wrapper: this.$tab_actions,
+			$wrapper: this.$selection_actions,
 			label: __("Bulk Action"),
+		});
+
+		this.export_button = new taxjar_integration.ExportButton({
+			$wrapper: this.$tab_actions,
+			method:
+				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.export_transactions",
+			// The page's filters and the open tab, exactly as refresh() sends
+			// them - so the file is the table, without the page boundary.
+			get_args: () => ({ filters: this.get_scope_filters(), scope: this.active_tab }),
 		});
 	}
 
@@ -330,6 +351,7 @@ class TaxJarTransactionSync {
 			this.render_summary(summary);
 			this.render_table();
 			this.paginator.render(data);
+			this.export_button.set_state(data);
 			this.update_bulk_state();
 		});
 	}
@@ -636,10 +658,12 @@ class TaxJarTransactionSync {
 	// disabled and explaining itself - see BulkActionButton.
 	update_bulk_state() {
 		if (!this.tab_offers_selection()) {
-			this.$tab_actions.hide();
+			// Only the selection's own controls go - the row itself stays, since
+			// Export sits in it on every tab.
+			this.$selection_actions.hide();
 			return;
 		}
-		this.$tab_actions.show();
+		this.$selection_actions.show();
 
 		const checked = this.get_checked();
 		const retryable = checked.filter((row) => row.taxjar_sync_status === "Failed");

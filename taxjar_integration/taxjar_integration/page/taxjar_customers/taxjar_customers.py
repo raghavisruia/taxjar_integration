@@ -1,6 +1,7 @@
 import frappe
 from frappe import _
 
+from taxjar_integration.taxjar_integration.exporting import send_xlsx
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
 	parse_document_names,
@@ -45,6 +46,17 @@ _SCOPE_CONDITIONS = {
 	EXEMPT_SCOPE: {"taxjar_exemption_type": _EXEMPT},
 	NON_EXEMPT_SCOPE: {"taxjar_exemption_type": _NON_EXEMPT},
 	NOT_CONFIGURED_SCOPE: {"taxjar_exemption_type": _NOT_SET},
+}
+
+# What each tab is called on screen. Used to name an export after the tab it
+# came from, so two files in a downloads folder say which is which. Stored
+# untranslated and passed through _() at the point of use: a module-level _()
+# resolves once, in whatever language the first request happened to use.
+_SCOPE_LABELS = {
+	ALL_SCOPE: "All",
+	EXEMPT_SCOPE: "Exempted",
+	NON_EXEMPT_SCOPE: "Non-Exempted",
+	NOT_CONFIGURED_SCOPE: "Not Configured",
 }
 
 
@@ -112,7 +124,17 @@ def get_customers(
 	conditions = _build_conditions(filters, scope)
 
 	total = permitted_count("Customer", conditions)
+	customers = _fetch_customers(conditions, (page - 1) * page_size, page_size)
 
+	return paginated_response("customers", customers, total, page, page_size)
+
+
+def _fetch_customers(conditions, start, page_size):
+	"""One window of the table, with everything the table adds to a raw row.
+
+	Shared by the paginated read and the export, so the sheet holds the same
+	rows, in the same order, saying the same things as the page it came from.
+	"""
 	# get_list, not get_all - see the note in the Transaction Sync page.
 	customers = frappe.get_list(
 		"Customer",
@@ -123,7 +145,7 @@ def get_customers(
 			"taxjar_customer_sync_status", "taxjar_customer_sync_error",
 		],
 		order_by="customer_name asc",
-		start=(page - 1) * page_size,
+		start=start,
 		limit_page_length=page_size,
 	)
 
@@ -156,7 +178,7 @@ def get_customers(
 		c["exempt_regions"] = regions
 		c["exempt_region_count"] = len(regions)
 
-	return paginated_response("customers", customers, total, page, page_size)
+	return customers
 
 
 @frappe.whitelist()
@@ -214,6 +236,88 @@ def get_exempt_regions(customer: str):
 		fields=["country", "state"],
 	)
 	return regions
+
+
+# The statuses the page draws a coloured pill for. Anything else means no
+# TaxJar customer was ever created to sync, which the table names rather than
+# leaving blank - see render_sync_status_cell in taxjar_customers.js.
+_PILL_STATUSES = ("Synced", "Queued", "Failed")
+
+
+def _sync_status_label(row):
+	"""What the Sync Status column shows for this row, in words.
+
+	The twin of render_sync_status_cell in taxjar_customers.js. An export is the
+	table the reader is looking at, so a state is not called one thing on the
+	page and another in the file.
+	"""
+	status = row.get("taxjar_customer_sync_status")
+	return _(status) if status in _PILL_STATUSES else _("NA")
+
+
+def _region_codes(row):
+	"""The exempt regions as codes, one cell: "US-CA, US-NY, CA-ON".
+
+	The table names them in full inside a hover card. A cell has no hover, and a
+	list of fifty full names would not be read in one either, so the file carries
+	the codes - short enough to sit in a column and exact enough to look up.
+	"""
+	return ", ".join(
+		"{0}-{1}".format(region["country"], region["state"])
+		for region in (row.get("exempt_regions") or [])
+	)
+
+
+def _export_columns():
+	"""The sheet's columns, in the table's own order.
+
+	The Customer ID is here and not in the table: on screen the customer name
+	links to the document, and a file carries no link. The region codes sit
+	beside their count for the same reason - the count is a hover trigger on the
+	page, and a cell cannot be hovered.
+	"""
+	return [
+		{"label": _("Customer ID"), "fieldname": "name"},
+		{"label": _("Customer Name"), "fieldname": "customer_name"},
+		{"label": _("Customer Group"), "fieldname": "customer_group"},
+		{"label": _("TaxJar Customer ID"), "fieldname": "taxjar_customer_id"},
+		{"label": _("Exemption Type"), "fieldname": "taxjar_exemption_type"},
+		{"label": _("Exempted Regions"), "fieldname": "exempt_region_count"},
+		{"label": _("Exempted Region Codes"), "value": _region_codes},
+		{"label": _("Sync Status"), "value": _sync_status_label},
+		{"label": _("Sync Error"), "fieldname": "taxjar_customer_sync_error"},
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def export_customers(filters: dict | str | None = None, scope: str = ALL_SCOPE):
+	"""Every customer the open tab holds, under the page's own filters, as one xlsx.
+
+	The same filters and the same scope as get_customers, with the page boundary
+	taken off - so the file is the whole tab rather than the twenty rows on
+	screen. The sync status drill-down is part of those filters, because the
+	table honours it too.
+
+	Answered with a file rather than JSON, so the client reaches it with a form
+	POST rather than frappe.xcall.
+	"""
+	frappe.has_permission("Customer", "read", throw=True)
+	_ensure_taxjar_customer_fields()
+
+	filters = parse_filters(filters)
+	conditions = _build_conditions(filters, scope)
+	total = permitted_count("Customer", conditions)
+
+	send_xlsx(
+		doctype="Customer",
+		filename="{0} - {1}".format(
+			_("TaxJar Customers"), _(_SCOPE_LABELS.get(scope, _SCOPE_LABELS[ALL_SCOPE]))
+		),
+		columns=_export_columns(),
+		fetch_rows=lambda start, page_size: _fetch_customers(conditions, start, page_size),
+		total=total,
+		filters=filters,
+	)
 
 
 def _check_each(customers):

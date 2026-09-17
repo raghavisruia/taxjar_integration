@@ -1,6 +1,7 @@
 import frappe
 from frappe import _
 
+from taxjar_integration.taxjar_integration.exporting import send_xlsx
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
 	not_configured_response,
@@ -62,6 +63,19 @@ _SCOPE_CONDITIONS = {
 	SUBMITTED_SCOPE: {"docstatus": _SUBMITTED},
 }
 
+# What each tab is called on screen. Used to name an export after the tab it
+# came from, so two files in a downloads folder say which is which. Stored
+# untranslated and passed through _() at the point of use: a module-level _()
+# resolves once, in whatever language the first request happened to use.
+_SCOPE_LABELS = {
+	ALL_SCOPE: "All Transactions",
+	FAILED_SCOPE: "Failed",
+	QUEUED_SCOPE: "Queued",
+	NOT_APPLICABLE_SCOPE: "Excluded",
+	DRAFT_SCOPE: "Draft",
+	SYNCED_SCOPE: "Synced",
+}
+
 
 def _taxjar_invoice_fields_ready():
 	return frappe.db.has_column("Sales Invoice", _TAXJAR_INVOICE_COLUMN)
@@ -85,7 +99,17 @@ def get_transactions(
 	conditions = _build_conditions(filters, scope)
 
 	total = permitted_count("Sales Invoice", conditions)
+	invoices = _fetch_invoices(conditions, scope, (page - 1) * page_size, page_size)
 
+	return paginated_response("invoices", invoices, total, page, page_size)
+
+
+def _fetch_invoices(conditions, scope, start, page_size, truncate_errors=True):
+	"""One window of the table, with everything the table adds to a raw row.
+
+	Shared by the paginated read and the export, so the sheet holds the same
+	rows, in the same order, saying the same things as the page it came from.
+	"""
 	# get_list, not get_all: get_all defaults to ignore_permissions=True, which
 	# would show this page every company's invoices regardless of the caller's
 	# User Permissions.
@@ -99,7 +123,7 @@ def get_transactions(
 			"taxjar_exclusion_reason",
 		],
 		order_by="posting_date desc, name desc",
-		start=(page - 1) * page_size,
+		start=start,
 		limit_page_length=page_size,
 	)
 
@@ -115,8 +139,10 @@ def get_transactions(
 
 		# Shown in full inside a popover, not a table cell, so the cap is only
 		# there to keep a runaway message out of the response. 100 used to cut
-		# the sentence before the part that says what to do about it.
-		if row.taxjar_sync_error and len(row.taxjar_sync_error) > 300:
+		# the sentence before the part that says what to do about it. The export
+		# carries the whole message: a spreadsheet cell holds it, and there is no
+		# popover there to open.
+		if truncate_errors and row.taxjar_sync_error and len(row.taxjar_sync_error) > 300:
 			row["taxjar_sync_error"] = row.taxjar_sync_error[:300] + "..."
 
 	if scope == NOT_APPLICABLE_SCOPE:
@@ -128,7 +154,7 @@ def get_transactions(
 		# on the other. Only those rows: every other state explains itself.
 		_explain_exclusions([row for row in invoices if _is_not_applicable(row)])
 
-	return paginated_response("invoices", invoices, total, page, page_size)
+	return invoices
 
 
 def _is_not_applicable(row):
@@ -208,6 +234,109 @@ def get_summary(filters: dict | str | None = None):
 			"total": permitted_count("Sales Invoice", _build_conditions(filters, DRAFT_SCOPE)),
 		},
 	}
+
+
+def _sync_status_label(row):
+	"""What the Sync Status column shows for this row, in words.
+
+	The twin of render_sync_status_cell in taxjar_transactions.js. An export is
+	the table the reader is looking at, so a state is not called one thing on
+	the page and another in the file.
+	"""
+	# Nothing syncs before submit, so whatever a draft holds in the field - by
+	# its own default, "Excluded" - is not a report about the document.
+	if row.get("docstatus") == 0:
+		return _("Submit to Sync")
+
+	status = row.get("taxjar_sync_status")
+	if not status:
+		return ""
+
+	# On a cancelled row, Failed means the cancellation never reached TaxJar -
+	# the order is still filed there, which is the opposite of what "Failed"
+	# beside a cancelled transaction reads as.
+	if row.get("docstatus") == 2 and status == "Failed":
+		return _("Failed to Cancel")
+
+	return _(status)
+
+
+def _exclusion_reason_label(row):
+	"""Why this row was kept out of TaxJar, and whether that is history or now.
+
+	_explain_exclusions marks a reason it read from today's configuration rather
+	than from the document itself. The page says that difference with a tense;
+	a spreadsheet cell has no room for a sentence, so it says it in a suffix.
+	"""
+	reason = row.get("taxjar_exclusion_reason")
+	if not reason:
+		return ""
+
+	if row.get("taxjar_exclusion_reason_is_current"):
+		return _("{0} (current setting)").format(_(reason))
+
+	return _(reason)
+
+
+def _export_columns():
+	"""The sheet's columns, in the table's own order.
+
+	Company is here and not in the table: on screen it is a filter above the
+	rows, and a file that leaves the site carries no filter row with it. The
+	error and the exclusion reason each get a column of their own, because in a
+	spreadsheet they are two fields to sort and filter on rather than one
+	popover that opens on whichever applies.
+	"""
+	return [
+		{"label": _("Posting Date"), "fieldname": "posting_date"},
+		{"label": _("Transaction ID"), "fieldname": "name"},
+		{"label": _("Customer"), "fieldname": "customer_name"},
+		{"label": _("Type"), "fieldname": "transaction_type"},
+		{"label": _("Company"), "fieldname": "company"},
+		{"label": _("Grand Total"), "fieldname": "grand_total"},
+		{"label": _("Transaction Status"), "fieldname": "doc_status"},
+		{"label": _("Sync Status"), "value": _sync_status_label},
+		{"label": _("Last Synced"), "fieldname": "taxjar_last_synced"},
+		{"label": _("Sync Error"), "fieldname": "taxjar_sync_error"},
+		{"label": _("Exclusion Reason"), "value": _exclusion_reason_label},
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def export_transactions(filters: dict | str | None = None, scope: str = ALL_SCOPE):
+	"""Every transaction the open tab holds, under the page's own filters, as one xlsx.
+
+	The same filters and the same scope as get_transactions, with the page
+	boundary taken off - so the file is the whole tab rather than the twenty
+	rows on screen.
+
+	Answered with a file rather than JSON, so the client reaches it with a form
+	POST rather than frappe.xcall.
+	"""
+	frappe.has_permission("Sales Invoice", "read", throw=True)
+	if not _taxjar_invoice_fields_ready():
+		frappe.throw(
+			_("TaxJar is not set up yet. Enable a TaxJar feature in TaxJar Settings first."),
+			title=_("TaxJar Not Configured"),
+		)
+
+	filters = parse_filters(filters)
+	conditions = _build_conditions(filters, scope)
+	total = permitted_count("Sales Invoice", conditions)
+
+	send_xlsx(
+		doctype="Sales Invoice",
+		filename="{0} - {1}".format(
+			_("TaxJar Transactions"), _(_SCOPE_LABELS.get(scope, _SCOPE_LABELS[ALL_SCOPE]))
+		),
+		columns=_export_columns(),
+		# The whole error message, not the 300 characters the popover shows.
+		fetch_rows=lambda start, page_size: _fetch_invoices(
+			conditions, scope, start, page_size, truncate_errors=False
+		),
+		total=total,
+		filters=filters,
+	)
 
 
 @frappe.whitelist(methods=["POST"])
