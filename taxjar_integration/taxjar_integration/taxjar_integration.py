@@ -3044,14 +3044,14 @@ def _publish_customer_update(customer_name, status):
 	)
 
 
-def _set_customer_sync_status(customer_name, status, error=None, retryable=False):
-	"""Update TaxJar sync status fields on a Customer, then notify any open
-	form via realtime - same reasoning as _set_sync_status's docstring.
-	Reached from on_customer_update (fires on ordinary Customer saves, not
-	just a submit/cancel event), the 15-min cron retry, and the Customers
-	page's bulk sync. ``retryable`` gates the 15-min cron the same way it does
-	for invoices, and so does taxjar_customer_sync_retry_count - see
-	_set_sync_status().
+def _customer_sync_status_fields(status, error=None, retryable=False, prior_retry_count=0):
+	"""The complete set of customer sync fields one status change writes.
+
+	Shared by _set_customer_sync_status below, which writes straight to the
+	database from the async paths, and by on_customer_update, which writes
+	through the document because it runs inside the save itself. One
+	definition, so a Queued row looks the same however it was reached - see
+	_sync_status_fields() for the same arrangement on the invoice side.
 	"""
 	if error and retryable:
 		error = f"{error} Automatic retry is scheduled."
@@ -3060,12 +3060,43 @@ def _set_customer_sync_status(customer_name, status, error=None, retryable=False
 		"taxjar_customer_sync_status": status,
 		"taxjar_customer_sync_error": error or "",
 		"taxjar_customer_sync_retryable": 1 if status == "Failed" and retryable else 0,
+		"taxjar_customer_sync_retry_count": prior_retry_count + 1 if status == "Failed" else 0,
 	}
+
+	# When this row entered the queue, and nothing else. recover_stuck_customer_syncs()
+	# reads it to tell a sync that is in flight apart from one whose job died
+	# or was never created - the two look identical in taxjar_customer_sync_status
+	# alone, and telling them apart is the whole point of the field. Cleared on
+	# every other status so a row that recovers does not keep claiming a queue
+	# it already left.
+	fields["taxjar_customer_sync_queued_at"] = frappe.utils.now() if status == "Queued" else None
+
+	return fields
+
+
+def _set_customer_sync_status(customer_name, status, error=None, retryable=False, extra=None):
+	"""Update TaxJar sync status fields on a Customer, then notify any open
+	form via realtime - same reasoning as _set_sync_status's docstring.
+	Reached from on_customer_update (fires on ordinary Customer saves, not
+	just a submit/cancel event), the 15-min cron retry, and the Customers
+	page's bulk sync. ``retryable`` gates the 15-min cron the same way it does
+	for invoices, and so does taxjar_customer_sync_retry_count - see
+	_set_sync_status().
+
+	``extra`` carries the fields a successful sync writes beside the status -
+	taxjar_customer_id and taxjar_last_synced. They used to be two more
+	frappe.db.set_value calls after this one, which meant a sync could record
+	its id and its timestamp and still leave the status behind if a write
+	between them threw. One statement, one outcome.
+	"""
+	prior_count = 0
 	if status == "Failed":
 		prior_count = cint(frappe.db.get_value("Customer", customer_name, "taxjar_customer_sync_retry_count"))
-		fields["taxjar_customer_sync_retry_count"] = prior_count + 1
-	else:
-		fields["taxjar_customer_sync_retry_count"] = 0
+
+	fields = _customer_sync_status_fields(
+		status, error=error, retryable=retryable, prior_retry_count=prior_count
+	)
+	fields.update(extra or {})
 
 	frappe.db.set_value(
 		"Customer", customer_name,
@@ -3145,6 +3176,8 @@ def sync_customer_to_taxjar(customer_name, company=None):
 
 	ctx = {"doctype": "Customer", "name": customer_name, "company": company}
 
+	_release_read_transaction()
+
 	try:
 		if existing_customer_id:
 			response = _update_taxjar_customer(client, safe_id, customer_data, ctx)
@@ -3157,9 +3190,87 @@ def sync_customer_to_taxjar(customer_name, company=None):
 	if response is None:
 		return
 
-	_set_customer_sync_status(customer_name, "Synced")
-	frappe.db.set_value("Customer", customer_name, "taxjar_customer_id", safe_id, update_modified=False)
-	frappe.db.set_value("Customer", customer_name, "taxjar_last_synced", frappe.utils.now(), update_modified=False)
+	_record_customer_sync_success(customer_name, safe_id, customer_data, ctx)
+
+
+def _release_read_transaction():
+	"""Close the read that built the payload, before the call that takes a second.
+
+	Holding it open across that call used to make the status write that follows
+	collide with any Customer save committing meanwhile: under REPEATABLE READ,
+	MariaDB answers a write to a row this transaction has already read, and
+	someone else has since changed, with error 1020 - "Record has changed since
+	last read". The job died on it, and because the write sat outside any try,
+	no status was recorded at all. The customer kept "Queued" for good.
+
+	Nothing has been written at this point, so there is nothing to lose by
+	committing, and it also stops the job holding row locks through a network
+	call.
+
+	Only in a background job. The inline path - resync_customer, behind the
+	Customer form's Sync button - runs inside a web request whose transaction is
+	not this function's to commit. That path is covered instead by the retry in
+	_record_customer_sync_success().
+	"""
+	if getattr(frappe.local, "job", None):
+		frappe.db.commit()
+
+
+# How many times a sync writes its own result before giving up on it. The
+# collision _release_read_transaction() guards against is narrow
+# but not impossible - a save can still commit inside the few milliseconds the
+# write itself takes - and it clears on the very next attempt, because the
+# retry re-runs against the row as it now stands.
+TAXJAR_STATUS_WRITE_ATTEMPTS = 3
+
+
+def _record_customer_sync_success(customer_name, safe_id, customer_data, ctx):
+	"""Write the result of a sync TaxJar has already accepted.
+
+	The point of this function is that it always records something. A write
+	that throws here used to end the job with the customer still reading
+	"Queued", which is the one status nothing recovers: the Customers page
+	offers Resync on a Failed row only, and
+	retry_failed_taxjar_customer_syncs() filters on Failed too. So the row sat
+	there, already synced, claiming to be waiting, for good.
+
+	A failed write is reported as Failed and retryable rather than left alone.
+	TaxJar has the data by now, so the retry is one idempotent PUT of a row
+	that already matches - the cheaper mistake than a status nobody can trust.
+	"""
+	extra = {"taxjar_customer_id": safe_id, "taxjar_last_synced": frappe.utils.now()}
+
+	for attempt in range(TAXJAR_STATUS_WRITE_ATTEMPTS):
+		try:
+			_set_customer_sync_status(customer_name, "Synced", extra=extra)
+			return
+		except Exception:
+			# A collision leaves the transaction aborted, so the next attempt -
+			# and the Failed write below - need a clean one to run in.
+			frappe.db.rollback()
+			last_error = frappe.get_traceback()
+			if attempt == TAXJAR_STATUS_WRITE_ATTEMPTS - 1:
+				_get_taxjar_logger().error(last_error)
+
+	log_taxjar_call(
+		action="sync_customer",
+		status="error",
+		payload=customer_data,
+		error=f"TaxJar accepted the change but the sync status could not be saved.\n{last_error}",
+		context=ctx,
+	)
+	try:
+		_set_customer_sync_status(
+			customer_name,
+			"Failed",
+			error=_("TaxJar accepted the change, but the sync status could not be saved."),
+			retryable=True,
+		)
+	except Exception:
+		# Both writes are gone. recover_stuck_customer_syncs() is the last
+		# line here: it finds the row still sitting at Queued and hands it to
+		# the retry cron, which is capped at TAXJAR_MAX_SYNC_RETRIES.
+		_get_taxjar_logger().error(frappe.get_traceback())
 
 
 def _create_taxjar_customer(client, customer_data, ctx):
@@ -3286,6 +3397,7 @@ _CUSTOMER_SYNC_MANAGED_FIELDS = (
 	"taxjar_customer_id",
 	"taxjar_customer_sync_status",
 	"taxjar_customer_sync_error",
+	"taxjar_customer_sync_queued_at",
 	"taxjar_last_synced",
 )
 
@@ -3391,11 +3503,14 @@ def on_customer_update(doc, method):
 	silently doing nothing - "I changed/cleared the exemption and the status
 	didn't move" should never be unexplained.
 
-	A third case - master switch on but no company actually configured -
-	needs no equivalent handling here: _is_taxjar_enabled() already requires
-	at least one company to have calculate/create on (the exact predicate the
-	loop below uses to decide what to enqueue), so reaching the loop at all
-	guarantees at least one enqueue.
+	A third case - master switch on but no company TaxJar can actually serve -
+	is handled the same way, and used to be dismissed here as impossible. It
+	is not. _is_taxjar_enabled() asks only whether some company has calculate
+	or create switched on. _customer_sync_companies() also requires the
+	company to be registered in the United States, which is the predicate that
+	decides what gets enqueued. A site whose only configured company sits
+	outside the United States passes the first test and fails the second, so
+	this wrote "Queued" and then enqueued nothing at all.
 	"""
 	if not _has_taxjar_fields_changed(doc):
 		return
@@ -3418,27 +3533,137 @@ def on_customer_update(doc, method):
 			_set_customer_sync_status(doc.name, "")
 		return
 
-	doc.db_set("taxjar_customer_sync_status", "Queued", update_modified=False)
+	companies = _customer_sync_companies()
+	if not companies:
+		if doc.get("taxjar_customer_sync_status"):
+			_set_customer_sync_status(doc.name, "")
+		frappe.msgprint(
+			_("No company on this site is set up for TaxJar, so this customer's "
+			  "exemption details were saved but not sent to TaxJar."),
+			indicator="orange",
+			alert=True,
+		)
+		return
+
+	# Written only once a company is known to be waiting for it. "Queued" with
+	# nothing queued is the worst status this app can leave behind: the
+	# Customers page shows Resync on Failed rows only, and
+	# retry_failed_taxjar_customer_syncs() filters on Failed too, so no cron
+	# and no button would ever move it again.
+	doc.db_set(_customer_sync_status_fields("Queued"), update_modified=False)
 	_publish_customer_update(doc.name, "Queued")
 
-	taxjar_settings = frappe.get_single("TaxJar Settings")
-	for config in taxjar_settings.company_config or []:
-		if not company_scope(config.company, config=config).uses_taxjar:
-			continue
-		frappe.enqueue(
-			"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
-			customer_name=doc.name,
-			company=config.company,
-			queue="short",
-			deduplicate=True,
-			job_id=f"sync_customer_taxjar_{doc.name}_{config.company}",
-			# This runs inside the customer's own save, so the exemption the worker
-			# is being sent to push is not committed yet. Without this the job can
-			# start first, re-read the Customer, and send TaxJar the pre-edit
-			# exemption - then mark it Synced, so nothing ever corrects it.
-			enqueue_after_commit=True,
-			now=frappe.flags.in_test,
+	for company in companies:
+		_enqueue_customer_sync(doc.name, company)
+
+
+def _customer_sync_companies(settings=None):
+	"""Every company a customer sync has to be sent to.
+
+	One definition for the save hook, the Customers page's Resync and the
+	15-min cron. The three used to ask this question in two different ways -
+	company_scope(...).uses_taxjar in the first two, the raw feature flags in
+	the cron - so the cron could pick a company the save hook would not.
+	"""
+	settings = settings or frappe.get_single("TaxJar Settings")
+	return [
+		config.company
+		for config in (settings.company_config or [])
+		if company_scope(config.company, config=config).uses_taxjar
+	]
+
+
+def _enqueue_customer_sync(customer_name, company):
+	"""Queue one customer sync job, for one company.
+
+	Deliberately without deduplicate=True, and with a job id that is unique
+	per call. frappe.enqueue() answers a duplicate job id by returning None
+	and creating nothing, and it decides that when it is called - which is
+	before the save that called it commits. A second save inside the second
+	the first save's job spends talking to TaxJar therefore lost its own job
+	while still writing "Queued". The running job then finished and wrote
+	"Synced", the second save committed its "Queued" over the top, and the
+	customer sat at "Queued" with no job left to move it.
+
+	Dropping the job dropped the edit too: TaxJar kept the exemption from
+	before it, because the only job that ran had read the row first. A
+	duplicate job costs one idempotent PUT of the customer's current row, so
+	running both is the cheaper mistake.
+
+	The unique suffix matters once deduplicate is off: RQ keys a job by its
+	id, so two jobs enqueued under one id share a single record, and the
+	second can overwrite or delete the first.
+	"""
+	frappe.enqueue(
+		"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
+		customer_name=customer_name,
+		company=company,
+		queue="short",
+		job_id=f"sync_customer_taxjar_{customer_name}_{company}_{frappe.generate_hash(length=8)}",
+		# This runs inside the customer's own save, so the exemption the worker
+		# is being sent to push is not committed yet. Without this the job can
+		# start first, re-read the Customer, and send TaxJar the pre-edit
+		# exemption - then mark it Synced, so nothing ever corrects it.
+		enqueue_after_commit=True,
+		now=frappe.flags.in_test,
+	)
+
+
+# How long a customer may sit at "Queued" before it is treated as stranded
+# rather than in flight. A sync takes about a second, so this is generous by
+# three orders of magnitude - it only has to be longer than the longest queue
+# backlog a site realistically builds up.
+TAXJAR_QUEUED_STUCK_MINUTES = 15
+
+
+def recover_stuck_customer_syncs():
+	"""Turn a customer stranded at "Queued" into a Failed row the retry cron owns.
+
+	"Queued" means a job is coming. When that stops being true - the worker
+	died, the site lost its queue, an enqueue was dropped - nothing else in
+	this app ever looks at the row again, because every recovery path filters
+	on "Failed".
+
+	Rewriting the status rather than re-enqueueing directly is deliberate. The
+	existing retry cron already re-checks the company scope, already skips a
+	customer TaxJar keeps rejecting, and already stops at
+	TAXJAR_MAX_SYNC_RETRIES. Handing these rows to it keeps one capped path
+	instead of adding a second uncapped one.
+	"""
+	cutoff = frappe.utils.add_to_date(frappe.utils.now(), minutes=-TAXJAR_QUEUED_STUCK_MINUTES)
+
+	stuck = frappe.get_all(
+		"Customer",
+		filters={"taxjar_customer_sync_status": "Queued"},
+		# filters are ANDed, or_filters are ORed, and the two groups are ANDed
+		# together - so the age test belongs here in full rather than split
+		# across both, which would ask for a row that is old *and* has no
+		# timestamp and match nothing. A row queued before this field existed
+		# has no timestamp to judge, and has certainly waited longer than the
+		# cutoff.
+		or_filters=[
+			["taxjar_customer_sync_queued_at", "<", cutoff],
+			["taxjar_customer_sync_queued_at", "is", "not set"],
+		],
+		pluck="name",
+		limit=50,
+	)
+
+	for customer_name in stuck:
+		log_taxjar_call(
+			action="sync_customer",
+			status="error",
+			error=f"Queued for more than {TAXJAR_QUEUED_STUCK_MINUTES} minutes with no job to finish it",
+			context={"doctype": "Customer", "name": customer_name},
 		)
+		_set_customer_sync_status(
+			customer_name,
+			"Failed",
+			error=_("This sync never reached TaxJar."),
+			retryable=True,
+		)
+
+	return stuck
 
 
 def on_customer_delete(doc, method):

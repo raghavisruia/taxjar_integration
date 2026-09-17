@@ -12,8 +12,10 @@ from taxjar_integration.taxjar_integration.pagination import (
 	permitted_count,
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import (
+	_customer_sync_companies,
+	_customer_sync_status_fields,
+	_enqueue_customer_sync,
 	_publish_customer_update,
-	company_scope,
 )
 
 # A representative TaxJar custom field; if this column is absent the fields were
@@ -451,11 +453,15 @@ def bulk_sync_to_taxjar(customers: list | str):
 	# tables on every call, and this used to sit inside the loop - a hundred
 	# selected customers meant a hundred rebuilds of a list that cannot change
 	# during the request.
-	taxjar_settings = frappe.get_single("TaxJar Settings")
-	companies = [
-		config for config in (taxjar_settings.company_config or [])
-		if company_scope(config.company, config=config).uses_taxjar
-	]
+	companies = _customer_sync_companies()
+	if not companies:
+		# Nothing to queue for, so nothing may be marked Queued. Writing the
+		# status anyway left every selected customer waiting on a job that was
+		# never created, and still reported them as queued to the caller.
+		frappe.throw(
+			_("No company on this site is set up for TaxJar, so there is nothing to sync to."),
+			title=_("TaxJar Not Configured"),
+		)
 
 	queued = 0
 	for name in customers:
@@ -467,19 +473,16 @@ def bulk_sync_to_taxjar(customers: list | str):
 		if not fields.get("taxjar_customer_id") and not fields.get("taxjar_exemption_type"):
 			continue
 
-		frappe.db.set_value("Customer", name, "taxjar_customer_sync_status", "Queued", update_modified=False)
+		frappe.db.set_value(
+			"Customer", name, _customer_sync_status_fields("Queued"), update_modified=False
+		)
 		_publish_customer_update(name, "Queued")
-		for config in companies:
-			frappe.enqueue(
-				"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
-				customer_name=name,
-				company=config.company,
-				queue="short",
-				deduplicate=True,
-				job_id=f"sync_customer_taxjar_{name}_{config.company}",
-				# The "Queued" status written just above is not committed yet.
-				enqueue_after_commit=True,
-			)
+		for company in companies:
+			# No deduplicate here, for the reason spelled out in
+			# _enqueue_customer_sync(): a dropped enqueue leaves the "Queued"
+			# written just above with no job to clear it, and this button is
+			# the very thing a stuck customer is supposed to be rescued by.
+			_enqueue_customer_sync(name, company)
 		queued += 1
 
 	return {"queued": queued}

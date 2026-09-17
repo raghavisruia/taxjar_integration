@@ -907,11 +907,29 @@ def get_custom_fields():
 				read_only=1,
 				depends_on="eval: doc.taxjar_customer_sync_status == 'Failed'",
 			),
+			dict(
+				# When this customer entered the sync queue, set by
+				# _customer_sync_status_fields() and cleared on any other
+				# status. recover_stuck_customer_syncs() reads it to tell a
+				# sync that is in flight apart from one whose job never ran -
+				# taxjar_customer_sync_status says "Queued" for both, and
+				# before this field existed, the second kind sat there for
+				# good. Hidden for the same reason as the retry fields on
+				# Sales Invoice: it is machinery, not an answer.
+				fieldname="taxjar_customer_sync_queued_at",
+				fieldtype="Datetime",
+				insert_after="taxjar_customer_sync_error",
+				label="TaxJar Queued At",
+				search_index=1,
+				read_only=1,
+				hidden=1,
+				no_copy=1,
+			),
 			# ── TaxJar Tax Exemption Sync Details (collapsed by default) ───
 			dict(
 				fieldname="taxjar_sync_details_section",
 				fieldtype="Section Break",
-				insert_after="taxjar_customer_sync_error",
+				insert_after="taxjar_customer_sync_queued_at",
 				label="TaxJar Sync Details",
 				collapsible=1,
 			),

@@ -3857,9 +3857,11 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		payload = mock_client.create_customer.call_args[0][0]
 		self.assertEqual(payload["customer_id"], "Denna-Jaina")
 		self.assertEqual(payload["name"], "Denna Jaina")
-		# taxjar_customer_id stored as the safe ID
-		id_set_calls = [c for c in mock_set.call_args_list if len(c[0]) >= 4 and c[0][2] == "taxjar_customer_id"]
-		self.assertEqual(id_set_calls[0][0][3], "Denna-Jaina")
+		# taxjar_customer_id stored as the safe ID, in the one write that also
+		# records the status - see _set_customer_sync_status's `extra`.
+		written = mock_set.call_args[0][2]
+		self.assertEqual(written["taxjar_customer_id"], "Denna-Jaina")
+		self.assertEqual(written["taxjar_customer_sync_status"], "Synced")
 
 	def test_existing_customer_uses_update(self):
 		"""When taxjar_customer_id is set, should call update_customer with the stored safe ID."""
@@ -3900,8 +3902,11 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 
 		mock_client.create_customer.assert_called_once()
 		# taxjar_customer_id must NOT be cleared — prevents permanent broken state if create also fails
-		clear_calls = [c for c in mock_set.call_args_list if len(c[0]) >= 4 and c[0][2] == "taxjar_customer_id" and c[0][3] == ""]
-		self.assertEqual(len(clear_calls), 0)
+		cleared = [
+			c for c in mock_set.call_args_list
+			if isinstance(c[0][2], dict) and c[0][2].get("taxjar_customer_id") == ""
+		]
+		self.assertEqual(cleared, [])
 
 	def _patched_sync(self, customer_doc, mock_client):
 		"""The five patches every sync test in this class shares."""
@@ -3937,7 +3942,7 @@ class TestSyncCustomerToTaxJar(UnitTestCase):
 		mock_client.show_customer.assert_called_once_with("CUST-001")
 		mock_client.update_customer.assert_called_once()
 		self.assertEqual(mock_client.update_customer.call_args[0][0], "CUST-001")
-		mock_status.assert_called_once_with("CUST-001", "Synced")
+		self.assertEqual(mock_status.call_args[0], ("CUST-001", "Synced"))
 
 	def test_create_reports_the_original_error_when_the_id_is_free(self):
 		"""TaxJar answers 422 for a bad payload too. The id is free, so the
@@ -4247,7 +4252,10 @@ class TestOnCustomerUpdate(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.enqueue") as mock_enqueue:
 			on_customer_update(doc, None)
 		mock_enqueue.assert_called_once()
-		doc.db_set.assert_called_once_with("taxjar_customer_sync_status", "Queued", update_modified=False)
+		doc.db_set.assert_called_once()
+		self.assertEqual(
+			doc.db_set.call_args[0][0]["taxjar_customer_sync_status"], "Queued"
+		)
 
 	def test_syncs_when_exempt_regions_changed(self):
 		"""Adding exempt regions should trigger sync even if exemption_type didn't change."""
@@ -4288,7 +4296,7 @@ class TestOnCustomerUpdate(UnitTestCase):
 		self.assertIn("Company A", companies_synced)
 		self.assertIn("Company B", companies_synced)
 
-	def test_enqueue_uses_short_queue_and_deduplicate(self):
+	def test_enqueue_uses_short_queue_and_is_never_deduplicated(self):
 		doc = self._make_customer_doc(exemption_type="Government")
 		config = MagicMock(company="Test Co")
 		settings = MagicMock()
@@ -4302,7 +4310,10 @@ class TestOnCustomerUpdate(UnitTestCase):
 
 		call_kwargs = mock_enqueue.call_args[1]
 		self.assertEqual(call_kwargs["queue"], "short")
-		self.assertTrue(call_kwargs["deduplicate"])
+		# deduplicate=True let frappe answer a duplicate job id by creating
+		# nothing and returning None - while this hook had already written
+		# "Queued". See _enqueue_customer_sync().
+		self.assertNotIn("deduplicate", call_kwargs)
 		self.assertIn("job_id", call_kwargs)
 		self.assertIn("CUST-001", call_kwargs["job_id"])
 
@@ -4385,7 +4396,7 @@ class TestCustomerCustomFields(UnitTestCase):
 		section = fields["taxjar_sync_details_section"]
 		self.assertEqual(section["fieldtype"], "Section Break")
 		self.assertEqual(section["label"], "TaxJar Sync Details")
-		self.assertEqual(section["insert_after"], "taxjar_customer_sync_error")
+		self.assertEqual(section["insert_after"], "taxjar_customer_sync_queued_at")
 		self.assertTrue(section.get("collapsible"))
 		self.assertFalse(section.get("collapsible_depends_on"))
 		self.assertFalse(section.get("depends_on"))
@@ -5002,9 +5013,8 @@ class TestCustomersPageRealtime(UnitTestCase):
 		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
 			bulk_sync_to_taxjar,
 		)
-		settings = MagicMock()
-		settings.company_config = []
-
+		# A company has to be in scope now: queueing for none of them left every
+		# selected customer waiting on a job that was never created.
 		with patch(f"{page_mod}.frappe.has_permission"), \
 		     patch(f"{page_mod}._ensure_taxjar_customer_fields"), \
 		     patch(
@@ -5014,7 +5024,8 @@ class TestCustomersPageRealtime(UnitTestCase):
 		         return_value=frappe._dict(taxjar_customer_id="cust_1", taxjar_exemption_type=""),
 		     ), \
 		     patch(f"{page_mod}.frappe.db.set_value"), \
-		     patch(f"{page_mod}.frappe.get_single", return_value=settings), \
+		     patch(f"{page_mod}._customer_sync_companies", return_value=["Test Co"]), \
+		     patch(f"{page_mod}._enqueue_customer_sync"), \
 		     patch(f"{self.MOD}.frappe.publish_realtime") as mock_publish:
 			bulk_sync_to_taxjar(["CUST-0001"])
 
@@ -6272,8 +6283,9 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		self.assertIn('__("Clear Exemption")', bulk_fn)
 		self.assertIn('__("Resync with TaxJar")', bulk_fn)
 		# Distinct from a blanket "sync everything" action: this one is offered
-		# only when the selection contains Failed rows.
-		self.assertIn('failed.length', bulk_fn)
+		# only when the selection contains rows worth resending - Failed, and
+		# Queued, which is the status a stranded customer sits at.
+		self.assertIn('resyncable.length', bulk_fn)
 
 	def test_clear_exemption_hidden_on_the_not_configured_tab(self):
 		"""It would be a no-op on every row there."""
@@ -8602,7 +8614,12 @@ class TestCustomerSyncStatusTracking(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._set_customer_sync_status") as mock_status:
 			sync_customer_to_taxjar("CUST-001", company="Test Co")
 
-		mock_status.assert_called_once_with("CUST-001", "Synced")
+		# One call, not a status write followed by two more set_values. The row
+		# could otherwise end up carrying an id and a timestamp while its status
+		# still said "Queued".
+		mock_status.assert_called_once()
+		self.assertEqual(mock_status.call_args[0], ("CUST-001", "Synced"))
+		self.assertEqual(mock_status.call_args[1]["extra"]["taxjar_customer_id"], "CUST-001")
 
 	def test_sync_sets_failed_status_on_api_error(self):
 		import taxjar.exceptions
@@ -8692,13 +8709,10 @@ class TestRetryFailedCustomerSyncs(UnitTestCase):
 	def test_enqueues_failed_customers(self):
 		from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
 
-		config = MagicMock(company="Test Co")
-		settings = MagicMock()
-		settings.company_config = [config]
-
 		with patch("taxjar_integration.taxjar_integration.tasks._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.tasks.recover_stuck_customer_syncs", return_value=[]), \
+		     patch("taxjar_integration.taxjar_integration.tasks._customer_sync_companies", return_value=["Test Co"]), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=["CUST-001", "CUST-002"]), \
-		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_single", return_value=settings), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_customer_syncs()
 
@@ -9198,7 +9212,8 @@ class TestHasTaxjarFieldsChangedCustomerName(UnitTestCase):
 
 class TestOnCustomerValidate(UnitTestCase):
 
-	def _make_doc(self, customer_id="", sync_status="", sync_error="", last_synced=""):
+	def _make_doc(self, customer_id="", sync_status="", sync_error="", last_synced="",
+	              queued_at=""):
 		doc = MagicMock()
 		doc.name = "CUST-001"
 		doc.is_new.return_value = False
@@ -9206,6 +9221,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			"taxjar_customer_id": customer_id,
 			"taxjar_customer_sync_status": sync_status,
 			"taxjar_customer_sync_error": sync_error,
+			"taxjar_customer_sync_queued_at": queued_at,
 			"taxjar_last_synced": last_synced,
 		}
 		doc.get.side_effect = lambda f, d=None: _values.get(f, d)
@@ -9216,7 +9232,7 @@ class TestOnCustomerValidate(UnitTestCase):
 		doc = self._make_doc(customer_id="")
 		db_values = frappe._dict(
 			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
-			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
+			taxjar_customer_sync_error="", taxjar_customer_sync_queued_at="", taxjar_last_synced="2026-06-20 10:00:00",
 		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
@@ -9229,7 +9245,7 @@ class TestOnCustomerValidate(UnitTestCase):
 		doc = self._make_doc(sync_status="")
 		db_values = frappe._dict(
 			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
-			taxjar_customer_sync_error="", taxjar_last_synced="",
+			taxjar_customer_sync_error="", taxjar_customer_sync_queued_at="", taxjar_last_synced="",
 		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
@@ -9246,7 +9262,7 @@ class TestOnCustomerValidate(UnitTestCase):
 		doc = self._make_doc(sync_status="Queued")
 		db_values = frappe._dict(
 			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
-			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
+			taxjar_customer_sync_error="", taxjar_customer_sync_queued_at="", taxjar_last_synced="2026-06-20 10:00:00",
 		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
@@ -9260,7 +9276,7 @@ class TestOnCustomerValidate(UnitTestCase):
 		doc = self._make_doc(sync_error="Old connection timeout")
 		db_values = frappe._dict(
 			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
-			taxjar_customer_sync_error="", taxjar_last_synced="2026-06-20 10:00:00",
+			taxjar_customer_sync_error="", taxjar_customer_sync_queued_at="", taxjar_last_synced="2026-06-20 10:00:00",
 		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
@@ -9273,7 +9289,7 @@ class TestOnCustomerValidate(UnitTestCase):
 		doc = self._make_doc(customer_id="CUST-001", sync_status="Synced")
 		db_values = frappe._dict(
 			taxjar_customer_id="CUST-001", taxjar_customer_sync_status="Synced",
-			taxjar_customer_sync_error="", taxjar_last_synced="",
+			taxjar_customer_sync_error="", taxjar_customer_sync_queued_at="", taxjar_last_synced="",
 		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
@@ -9296,7 +9312,7 @@ class TestOnCustomerValidate(UnitTestCase):
 		doc = self._make_doc(customer_id="")
 		db_values = frappe._dict(
 			taxjar_customer_id="", taxjar_customer_sync_status="",
-			taxjar_customer_sync_error="", taxjar_last_synced="",
+			taxjar_customer_sync_error="", taxjar_customer_sync_queued_at="", taxjar_last_synced="",
 		)
 
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(db_values)):
@@ -17743,3 +17759,666 @@ class TestNamespaceItemTaxFieldsPatchOnRealRows(UnitTestCase):
 			7.25,
 			places=2,
 		)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A customer stranded at "Queued"
+#
+# The bug these cover, end to end: a customer whose exemption was configured
+# sat at "Queued" for good, while the TaxJar API Log showed the sync had
+# already succeeded. "Queued" is the one status with no way out - the Customers
+# page offered Resync on Failed rows only, and
+# retry_failed_taxjar_customer_syncs() filters on Failed too - so nothing ever
+# moved the row again.
+#
+# Two independent causes produced it, and each class below owns one:
+#
+#   * the enqueue was dropped. frappe.enqueue(deduplicate=True) answers a
+#     duplicate job id by returning None and creating nothing, and it decides
+#     that before the save that called it commits. A second save inside the
+#     second the first save's job spends talking to TaxJar lost its own job
+#     while still writing "Queued" - and that "Queued" then committed over the
+#     "Synced" the running job had just written.
+#
+#   * the worker's own status write threw. Under REPEATABLE READ, MariaDB
+#     answers a write to a row this transaction read and someone else has since
+#     changed with error 1020. The write sat outside any try, so the job died
+#     with no status recorded at all.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TJ = "taxjar_integration.taxjar_integration.taxjar_integration"
+_TJ_TASKS = "taxjar_integration.taxjar_integration.tasks"
+_TJ_PAGE = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
+
+
+class TestCustomerSyncStatusFields(UnitTestCase):
+	"""_customer_sync_status_fields() - one definition of what a status change
+	writes, shared by the save hook and the background writer. They used to
+	write different subsets of the same row."""
+
+	def _fields(self, *args, **kwargs):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _customer_sync_status_fields
+		return _customer_sync_status_fields(*args, **kwargs)
+
+	def test_queued_records_when_it_was_queued(self):
+		"""Without this timestamp, a sync in flight and a sync whose job never
+		ran are the same row - which is why the second kind used to sit there
+		for good."""
+		fields = self._fields("Queued")
+		self.assertEqual(fields["taxjar_customer_sync_status"], "Queued")
+		self.assertIsNotNone(fields["taxjar_customer_sync_queued_at"])
+
+	def test_every_other_status_clears_the_queued_timestamp(self):
+		"""A row that leaves the queue must not go on claiming it, or
+		recover_stuck_customer_syncs() would judge it on a stale timestamp."""
+		for status in ("Synced", "Failed", ""):
+			with self.subTest(status=status):
+				self.assertIsNone(self._fields(status)["taxjar_customer_sync_queued_at"])
+
+	def test_failed_and_retryable_marks_the_row_for_the_cron(self):
+		fields = self._fields("Failed", error="TaxJar timed out.", retryable=True, prior_retry_count=2)
+		self.assertEqual(fields["taxjar_customer_sync_retryable"], 1)
+		self.assertEqual(fields["taxjar_customer_sync_retry_count"], 3)
+		self.assertIn("Automatic retry is scheduled.", fields["taxjar_customer_sync_error"])
+
+	def test_failed_but_not_retryable_is_left_for_the_button(self):
+		fields = self._fields("Failed", error="TaxJar rejected it.", retryable=False, prior_retry_count=2)
+		self.assertEqual(fields["taxjar_customer_sync_retryable"], 0)
+		self.assertEqual(fields["taxjar_customer_sync_retry_count"], 3)
+
+	def test_any_recovery_resets_the_retry_count(self):
+		for status in ("Synced", "Queued", ""):
+			with self.subTest(status=status):
+				fields = self._fields(status, prior_retry_count=4)
+				self.assertEqual(fields["taxjar_customer_sync_retry_count"], 0)
+				self.assertEqual(fields["taxjar_customer_sync_retryable"], 0)
+
+	def test_a_recovered_row_stops_showing_the_old_error(self):
+		self.assertEqual(self._fields("Synced")["taxjar_customer_sync_error"], "")
+
+
+class TestSetCustomerSyncStatusIsOneWrite(UnitTestCase):
+	"""A successful sync used to write its status, then its TaxJar id, then its
+	timestamp, in three separate statements. The row could therefore end up
+	carrying an id and a last-synced time while its status still said
+	"Queued" - which is exactly the state the live site was found in."""
+
+	def test_success_writes_status_id_and_timestamp_together(self):
+		with patch(f"{_TJ}.frappe.db.set_value") as mock_set, \
+		     patch(f"{_TJ}.frappe.publish_realtime"), \
+		     patch(f"{_TJ}._publish_customer_update"):
+			from taxjar_integration.taxjar_integration.taxjar_integration import _set_customer_sync_status
+			_set_customer_sync_status(
+				"CUST-001", "Synced",
+				extra={"taxjar_customer_id": "CUST-001", "taxjar_last_synced": "2026-01-01 00:00:00"},
+			)
+
+		mock_set.assert_called_once()
+		written = mock_set.call_args[0][2]
+		self.assertEqual(written["taxjar_customer_sync_status"], "Synced")
+		self.assertEqual(written["taxjar_customer_id"], "CUST-001")
+		self.assertEqual(written["taxjar_last_synced"], "2026-01-01 00:00:00")
+		self.assertIsNone(written["taxjar_customer_sync_queued_at"])
+
+	def test_failed_reads_the_prior_count_and_bumps_it(self):
+		with patch(f"{_TJ}.frappe.db.set_value") as mock_set, \
+		     patch(f"{_TJ}.frappe.db.get_value", return_value=2), \
+		     patch(f"{_TJ}.frappe.publish_realtime"), \
+		     patch(f"{_TJ}._publish_customer_update"):
+			from taxjar_integration.taxjar_integration.taxjar_integration import _set_customer_sync_status
+			_set_customer_sync_status("CUST-001", "Failed", error="boom", retryable=True)
+
+		written = mock_set.call_args[0][2]
+		self.assertEqual(written["taxjar_customer_sync_retry_count"], 3)
+		self.assertEqual(written["taxjar_customer_sync_retryable"], 1)
+
+
+class TestSyncCustomerAlwaysRecordsAnOutcome(UnitTestCase):
+	"""sync_customer_to_taxjar() must never return with the customer still at
+	"Queued". Every path out of it writes a terminal status."""
+
+	def _customer_doc(self, customer_id="CUST-001"):
+		doc = MagicMock()
+		doc.customer_name = "Acme Corp"
+		doc.get.side_effect = lambda field, default=None: {
+			"taxjar_exemption_type": "Wholesale",
+			"taxjar_exempt_regions": [],
+			"taxjar_customer_id": customer_id,
+		}.get(field, default)
+		return doc
+
+	def _run(self, mock_client, status_side_effect=None, doc=None):
+		"""Run one sync with everything below the function mocked out, and hand
+		back the recorded status writes."""
+		recorded = []
+
+		def _status(name, status, error=None, retryable=False, extra=None):
+			recorded.append({"name": name, "status": status, "error": error,
+			                 "retryable": retryable, "extra": extra})
+			if status_side_effect:
+				status_side_effect(status, len([r for r in recorded if r["status"] == status]))
+
+		with patch(f"{_TJ}.company_scope", return_value=_files_scope(True)), \
+		     patch(f"{_TJ}.get_client", return_value=mock_client), \
+		     patch(f"{_TJ}.frappe.get_doc", return_value=doc or self._customer_doc()), \
+		     patch(f"{_TJ}.log_taxjar_call") as mock_log, \
+		     patch(f"{_TJ}.frappe.db.commit"), \
+		     patch(f"{_TJ}.frappe.db.rollback") as mock_rollback, \
+		     patch(f"{_TJ}._get_taxjar_logger"), \
+		     patch(f"{_TJ}._set_customer_sync_status", side_effect=_status):
+			from taxjar_integration.taxjar_integration.taxjar_integration import sync_customer_to_taxjar
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		return recorded, mock_rollback, mock_log
+
+	def test_happy_path_records_synced_once(self):
+		client = MagicMock()
+		client.update_customer.return_value = MagicMock()
+		recorded, _rollback, _log = self._run(client)
+
+		self.assertEqual([r["status"] for r in recorded], ["Synced"])
+		self.assertEqual(recorded[0]["extra"]["taxjar_customer_id"], "CUST-001")
+		self.assertIn("taxjar_last_synced", recorded[0]["extra"])
+
+	def test_the_read_is_released_before_the_taxjar_call(self):
+		"""The one-second call used to sit inside the transaction that had just
+		read the Customer. Any save committing in that second made the status
+		write below collide (MariaDB 1020) and killed the job."""
+		order = []
+		client = MagicMock()
+		client.update_customer.side_effect = lambda *a, **k: order.append("taxjar") or MagicMock()
+
+		doc = self._customer_doc()
+		with patch(f"{_TJ}.company_scope", return_value=_files_scope(True)), \
+		     patch(f"{_TJ}.get_client", return_value=client), \
+		     patch(f"{_TJ}.frappe.get_doc", side_effect=lambda *a, **k: order.append("read") or doc), \
+		     patch(f"{_TJ}.log_taxjar_call"), \
+		     patch(f"{_TJ}._release_read_transaction", side_effect=lambda: order.append("release")), \
+		     patch(f"{_TJ}._set_customer_sync_status", side_effect=lambda *a, **k: order.append("status")):
+			from taxjar_integration.taxjar_integration.taxjar_integration import sync_customer_to_taxjar
+			sync_customer_to_taxjar("CUST-001", company="Test Co")
+
+		self.assertEqual(order, ["read", "release", "taxjar", "status"])
+
+	def test_a_colliding_status_write_is_retried_and_then_succeeds(self):
+		"""1020 clears on the next attempt, because the retry re-runs against
+		the row as it now stands. The customer must end up Synced, not Failed."""
+		client = MagicMock()
+		client.update_customer.return_value = MagicMock()
+
+		def _first_synced_throws(status, nth):
+			if status == "Synced" and nth == 1:
+				raise RuntimeError("(1020, 'Record has changed since last read')")
+
+		recorded, mock_rollback, _log = self._run(client, status_side_effect=_first_synced_throws)
+
+		self.assertEqual([r["status"] for r in recorded], ["Synced", "Synced"])
+		mock_rollback.assert_called_once()
+
+	def test_a_status_write_that_never_succeeds_ends_failed_not_queued(self):
+		"""The regression this whole class exists for. The write used to sit
+		outside any try: it threw, the job died, and the customer kept
+		"Queued" - which no cron and no button ever looks at again."""
+		client = MagicMock()
+		client.update_customer.return_value = MagicMock()
+
+		def _synced_always_throws(status, nth):
+			if status == "Synced":
+				raise RuntimeError("(1020, 'Record has changed since last read')")
+
+		recorded, mock_rollback, mock_log = self._run(client, status_side_effect=_synced_always_throws)
+
+		statuses = [r["status"] for r in recorded]
+		self.assertEqual(statuses.count("Synced"), 3)
+		self.assertEqual(statuses[-1], "Failed")
+		self.assertTrue(recorded[-1]["retryable"], "the cron has to be able to pick this up")
+		self.assertEqual(mock_rollback.call_count, 3)
+
+		errors = [c for c in mock_log.call_args_list if c[1].get("status") == "error"]
+		self.assertTrue(errors, "giving up has to leave a record of why")
+
+	def test_the_job_survives_even_when_the_failed_write_also_throws(self):
+		"""Last line of defence. Raising here would kill the job and leave the
+		row at Queued again - recover_stuck_customer_syncs() owns it instead."""
+		client = MagicMock()
+		client.update_customer.return_value = MagicMock()
+
+		def _everything_throws(status, nth):
+			raise RuntimeError("(1020, 'Record has changed since last read')")
+
+		try:
+			self._run(client, status_side_effect=_everything_throws)
+		except Exception as err:  # noqa: BLE001 - the assertion is that there is none
+			self.fail(f"sync_customer_to_taxjar must not raise: {err}")
+
+	# The API-failure paths already had a terminal status, and keep it.
+	def test_a_rejected_call_still_ends_failed(self):
+		import taxjar.exceptions
+
+		client = MagicMock()
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 400, "detail": "nope"}
+		client.update_customer.side_effect = err
+
+		recorded, _rollback, _log = self._run(client)
+		self.assertEqual([r["status"] for r in recorded], ["Failed"])
+
+
+class TestCustomerSyncEnqueueIsNeverDropped(UnitTestCase):
+	"""on_customer_update() used to enqueue with deduplicate=True under a job id
+	fixed per customer and company. frappe.enqueue() answers a duplicate id by
+	returning None and creating nothing - so a second save inside the first
+	save's sync window wrote "Queued" and queued nothing."""
+
+	def _doc(self, sync_status=""):
+		doc = MagicMock()
+		doc.name = "CUST-001"
+		doc.db_set = MagicMock()
+		doc.get.side_effect = lambda field, default=None: {
+			"taxjar_exemption_type": "Wholesale",
+			"taxjar_customer_id": "CUST-001",
+			"taxjar_exempt_regions": [],
+			"taxjar_customer_sync_status": sync_status,
+		}.get(field, default)
+		doc.has_value_changed.return_value = True
+		doc.get_doc_before_save.return_value = None
+		return doc
+
+	def _settings(self, companies=("Test Co",)):
+		return MagicMock(company_config=[
+			MagicMock(company=c, taxjar_calculate_tax=1, taxjar_create_transactions=1)
+			for c in companies
+		])
+
+	def _run(self, doc, region="United States", companies=("Test Co",)):
+		with patch(f"{_TJ}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{_TJ}.frappe.get_single", return_value=self._settings(companies)), \
+		     patch(f"{_TJ}.get_region", return_value=region), \
+		     patch(f"{_TJ}.get_company_config", side_effect=lambda c: MagicMock(
+		         taxjar_calculate_tax=1, taxjar_create_transactions=1)), \
+		     patch(f"{_TJ}._set_customer_sync_status") as mock_status, \
+		     patch(f"{_TJ}._publish_customer_update"), \
+		     patch(f"{_TJ}.frappe.msgprint") as mock_msgprint, \
+		     patch(f"{_TJ}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.taxjar_integration import on_customer_update
+			on_customer_update(doc, None)
+		return mock_enqueue, mock_status, mock_msgprint
+
+	def test_enqueue_does_not_ask_for_deduplication(self):
+		mock_enqueue, _status, _msg = self._run(self._doc())
+		mock_enqueue.assert_called_once()
+		self.assertNotIn(
+			"deduplicate", mock_enqueue.call_args[1],
+			"deduplicate=True lets frappe drop this job and leave the row at Queued",
+		)
+
+	def test_two_saves_get_two_different_job_ids(self):
+		"""Without deduplicate, the job id is only a label - but RQ keys a job by
+		it, so a shared id lets the second job overwrite or delete the first."""
+		job_ids = set()
+		for _ in range(2):
+			mock_enqueue, _status, _msg = self._run(self._doc())
+			job_ids.add(mock_enqueue.call_args[1]["job_id"])
+		self.assertEqual(len(job_ids), 2)
+
+	def test_the_job_still_waits_for_the_save_to_commit(self):
+		"""Without this the worker can re-read the Customer before the edit
+		lands and push the exemption from before it."""
+		mock_enqueue, _status, _msg = self._run(self._doc())
+		self.assertTrue(mock_enqueue.call_args[1]["enqueue_after_commit"])
+
+	def test_queued_is_written_through_the_shared_field_set(self):
+		"""So the row carries taxjar_customer_sync_queued_at and
+		recover_stuck_customer_syncs() can judge its age."""
+		doc = self._doc()
+		self._run(doc)
+		doc.db_set.assert_called_once()
+		written = doc.db_set.call_args[0][0]
+		self.assertEqual(written["taxjar_customer_sync_status"], "Queued")
+		self.assertIsNotNone(written["taxjar_customer_sync_queued_at"])
+
+	def test_a_fresh_queue_clears_the_previous_error(self):
+		doc = self._doc(sync_status="Failed")
+		self._run(doc)
+		written = doc.db_set.call_args[0][0]
+		self.assertEqual(written["taxjar_customer_sync_error"], "")
+		self.assertEqual(written["taxjar_customer_sync_retryable"], 0)
+
+	def test_one_job_per_company_in_scope(self):
+		mock_enqueue, _status, _msg = self._run(self._doc(), companies=("Test Co", "Other Co"))
+		self.assertEqual(mock_enqueue.call_count, 2)
+
+
+class TestCustomerSyncSkipsWhenNoCompanyIsInScope(UnitTestCase):
+	"""_is_taxjar_enabled() asks only whether some company has a feature switched
+	on. company_scope() also requires the company to be registered in the United
+	States. The two disagreeing used to write "Queued" and then enqueue nothing
+	at all - and on_customer_update's own docstring said that could not happen."""
+
+	def _doc(self, sync_status="Failed"):
+		doc = MagicMock()
+		doc.name = "CUST-001"
+		doc.db_set = MagicMock()
+		doc.get.side_effect = lambda field, default=None: {
+			"taxjar_exemption_type": "Wholesale",
+			"taxjar_customer_id": "CUST-001",
+			"taxjar_exempt_regions": [],
+			"taxjar_customer_sync_status": sync_status,
+		}.get(field, default)
+		doc.has_value_changed.return_value = True
+		doc.get_doc_before_save.return_value = None
+		return doc
+
+	def _run(self, doc):
+		settings = MagicMock(company_config=[
+			MagicMock(company="Maple Co", taxjar_calculate_tax=1, taxjar_create_transactions=1)
+		])
+		with patch(f"{_TJ}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{_TJ}.frappe.get_single", return_value=settings), \
+		     patch(f"{_TJ}.get_region", return_value="Canada"), \
+		     patch(f"{_TJ}._set_customer_sync_status") as mock_status, \
+		     patch(f"{_TJ}._publish_customer_update"), \
+		     patch(f"{_TJ}.frappe.msgprint") as mock_msgprint, \
+		     patch(f"{_TJ}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.taxjar_integration import on_customer_update
+			on_customer_update(doc, None)
+		return mock_enqueue, mock_status, mock_msgprint
+
+	def test_nothing_is_queued_and_nothing_claims_to_be(self):
+		doc = self._doc()
+		mock_enqueue, mock_status, mock_msgprint = self._run(doc)
+
+		mock_enqueue.assert_not_called()
+		doc.db_set.assert_not_called()
+		mock_status.assert_called_once_with("CUST-001", "")
+		mock_msgprint.assert_called_once()
+
+	def test_the_user_is_told_why_nothing_was_sent(self):
+		_enqueue, _status, mock_msgprint = self._run(self._doc())
+		message = str(mock_msgprint.call_args[0][0])
+		self.assertIn("TaxJar", message)
+
+	def test_a_never_synced_customer_needs_no_status_reset(self):
+		_enqueue, mock_status, mock_msgprint = self._run(self._doc(sync_status=""))
+		mock_status.assert_not_called()
+		mock_msgprint.assert_called_once()
+
+
+class TestRecoverStuckCustomerSyncs(UnitTestCase):
+	"""The safety net. Whatever strands a customer at "Queued", this hands it to
+	the retry cron, which is already capped at TAXJAR_MAX_SYNC_RETRIES."""
+
+	def _run(self, stuck_names):
+		captured = {}
+
+		def _get_all(doctype, **kwargs):
+			captured.update(kwargs)
+			captured["doctype"] = doctype
+			return list(stuck_names)
+
+		with patch(f"{_TJ}.frappe.get_all", side_effect=_get_all), \
+		     patch(f"{_TJ}.log_taxjar_call") as mock_log, \
+		     patch(f"{_TJ}._set_customer_sync_status") as mock_status:
+			from taxjar_integration.taxjar_integration.taxjar_integration import recover_stuck_customer_syncs
+			recovered = recover_stuck_customer_syncs()
+
+		return recovered, captured, mock_status, mock_log
+
+	def test_only_queued_rows_are_considered(self):
+		_recovered, captured, _status, _log = self._run([])
+		self.assertEqual(captured["doctype"], "Customer")
+		self.assertEqual(captured["filters"]["taxjar_customer_sync_status"], "Queued")
+
+	def test_age_is_asked_as_one_or_not_split_across_two_and_groups(self):
+		"""frappe ANDs `filters` and ORs `or_filters`, then ANDs the two groups.
+		Putting half the age test in each would ask for a row that is both old
+		and has no timestamp, which matches nothing."""
+		_recovered, captured, _status, _log = self._run([])
+
+		self.assertNotIn("taxjar_customer_sync_queued_at", captured["filters"])
+		or_fields = [f[0] for f in captured["or_filters"]]
+		self.assertEqual(or_fields, ["taxjar_customer_sync_queued_at"] * 2)
+
+		operators = sorted(f[1] for f in captured["or_filters"])
+		self.assertEqual(operators, ["<", "is"])
+
+	def test_the_cutoff_is_in_the_past(self):
+		_recovered, captured, _status, _log = self._run([])
+		cutoff = next(f[2] for f in captured["or_filters"] if f[1] == "<")
+		self.assertLess(str(cutoff), frappe.utils.now())
+
+	def test_a_row_with_no_timestamp_is_swept_too(self):
+		"""A customer queued before this field existed has nothing to judge, and
+		has certainly waited longer than the cutoff."""
+		_recovered, captured, _status, _log = self._run([])
+		null_clause = [f for f in captured["or_filters"] if f[1] == "is"]
+		self.assertEqual(null_clause, [["taxjar_customer_sync_queued_at", "is", "not set"]])
+
+	def test_a_stuck_row_becomes_failed_and_retryable(self):
+		recovered, _captured, mock_status, _log = self._run(["CUST-001", "CUST-002"])
+
+		self.assertEqual(recovered, ["CUST-001", "CUST-002"])
+		self.assertEqual(mock_status.call_count, 2)
+		for call_args in mock_status.call_args_list:
+			self.assertEqual(call_args[0][1], "Failed")
+			self.assertTrue(call_args[1]["retryable"])
+
+	def test_sweeping_leaves_a_record(self):
+		_recovered, _captured, _status, mock_log = self._run(["CUST-001"])
+		mock_log.assert_called_once()
+		self.assertEqual(mock_log.call_args[1]["status"], "error")
+
+	def test_nothing_stuck_writes_nothing(self):
+		_recovered, _captured, mock_status, mock_log = self._run([])
+		mock_status.assert_not_called()
+		mock_log.assert_not_called()
+
+
+class TestCustomerRetryCronSweepsFirst(UnitTestCase):
+	"""A row recovered on this tick has to be retried on this tick, not fifteen
+	minutes later - so the sweep runs before the Failed rows are read."""
+
+	def _run(self, stuck=(), failed=()):
+		order = []
+
+		def _sweep():
+			order.append("sweep")
+			return list(stuck)
+
+		def _get_all(doctype, **kwargs):
+			order.append("read failed")
+			return list(failed)
+
+		with patch(f"{_TJ_TASKS}._is_taxjar_enabled", return_value=True), \
+		     patch(f"{_TJ_TASKS}.recover_stuck_customer_syncs", side_effect=_sweep), \
+		     patch(f"{_TJ_TASKS}._customer_sync_companies", return_value=["Test Co"]), \
+		     patch(f"{_TJ_TASKS}.frappe.get_all", side_effect=_get_all), \
+		     patch(f"{_TJ_TASKS}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+			retry_failed_taxjar_customer_syncs()
+
+		return order, mock_enqueue
+
+	def test_sweep_runs_before_the_failed_rows_are_read(self):
+		order, _enqueue = self._run(stuck=["CUST-001"], failed=["CUST-001"])
+		self.assertEqual(order, ["sweep", "read failed"])
+
+	def test_a_swept_row_is_retried_on_the_same_tick(self):
+		_order, mock_enqueue = self._run(stuck=["CUST-001"], failed=["CUST-001"])
+		mock_enqueue.assert_called_once()
+		self.assertEqual(mock_enqueue.call_args[1]["customer_name"], "CUST-001")
+
+	def test_the_cron_uses_the_shared_company_rule(self):
+		"""It used to read the two feature flags directly, which skips the
+		United-States test the save hook applies - so it could re-send a
+		customer for a company the hook would never have queued."""
+		with patch(f"{_TJ_TASKS}._is_taxjar_enabled", return_value=True), \
+		     patch(f"{_TJ_TASKS}.recover_stuck_customer_syncs", return_value=[]), \
+		     patch(f"{_TJ_TASKS}._customer_sync_companies", return_value=[]) as mock_companies, \
+		     patch(f"{_TJ_TASKS}.frappe.get_all", return_value=["CUST-001"]), \
+		     patch(f"{_TJ_TASKS}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+			retry_failed_taxjar_customer_syncs()
+
+		mock_companies.assert_called_once()
+		mock_enqueue.assert_not_called()
+
+	def test_the_cron_is_skipped_when_taxjar_is_off(self):
+		with patch(f"{_TJ_TASKS}._is_taxjar_enabled", return_value=False), \
+		     patch(f"{_TJ_TASKS}.recover_stuck_customer_syncs") as mock_sweep:
+			from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+			retry_failed_taxjar_customer_syncs()
+		mock_sweep.assert_not_called()
+
+
+class TestCustomerSyncCompanies(UnitTestCase):
+	"""One definition of "a company a customer sync goes to", for the save hook,
+	the Customers page and the cron."""
+
+	def _companies(self, region):
+		settings = MagicMock(company_config=[
+			MagicMock(company="Test Co", taxjar_calculate_tax=1, taxjar_create_transactions=0)
+		])
+		with patch(f"{_TJ}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{_TJ}.get_region", return_value=region):
+			from taxjar_integration.taxjar_integration.taxjar_integration import _customer_sync_companies
+			return _customer_sync_companies(settings=settings)
+
+	def test_a_us_company_with_one_feature_on_is_included(self):
+		self.assertEqual(self._companies("United States"), ["Test Co"])
+
+	def test_a_company_outside_the_united_states_is_excluded(self):
+		self.assertEqual(self._companies("Canada"), [])
+
+
+class TestBulkSyncToTaxJarQueuesOnlyWhatItSends(UnitTestCase):
+	"""The page's Resync button had the same dropped-enqueue defect as the save
+	hook - and it is the very action a stranded customer is rescued by."""
+
+	def _run(self, companies=("Test Co",), row=None):
+		row = row if row is not None else {"taxjar_customer_id": "CUST-001", "taxjar_exemption_type": "Wholesale"}
+		with patch(f"{_TJ_PAGE}.frappe.has_permission", return_value=True), \
+		     patch(f"{_TJ_PAGE}._ensure_taxjar_customer_fields"), \
+		     patch(f"{_TJ_PAGE}._check_each"), \
+		     patch(f"{_TJ_PAGE}._customer_sync_companies", return_value=list(companies)), \
+		     patch(f"{_TJ_PAGE}.frappe.db.get_value", return_value=row), \
+		     patch(f"{_TJ_PAGE}.frappe.db.set_value") as mock_set, \
+		     patch(f"{_TJ_PAGE}._publish_customer_update"), \
+		     patch(f"{_TJ_PAGE}._enqueue_customer_sync") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+				bulk_sync_to_taxjar,
+			)
+			result = bulk_sync_to_taxjar(["CUST-001"])
+		return result, mock_set, mock_enqueue
+
+	def test_it_goes_through_the_shared_enqueue(self):
+		"""Which is the one that does not ask for deduplication."""
+		result, _set, mock_enqueue = self._run()
+		self.assertEqual(result["queued"], 1)
+		mock_enqueue.assert_called_once_with("CUST-001", "Test Co")
+
+	def test_queued_is_written_with_its_timestamp(self):
+		_result, mock_set, _enqueue = self._run()
+		written = mock_set.call_args[0][2]
+		self.assertEqual(written["taxjar_customer_sync_status"], "Queued")
+		self.assertIsNotNone(written["taxjar_customer_sync_queued_at"])
+
+	def test_no_company_in_scope_refuses_instead_of_queueing(self):
+		"""It used to mark every selected customer Queued, queue nothing, and
+		report them as queued anyway."""
+		with self.assertRaises(frappe.ValidationError):
+			self._run(companies=())
+
+	def test_a_customer_with_nothing_to_send_is_left_alone(self):
+		result, mock_set, mock_enqueue = self._run(row={"taxjar_customer_id": "", "taxjar_exemption_type": ""})
+		self.assertEqual(result["queued"], 0)
+		mock_set.assert_not_called()
+		mock_enqueue.assert_not_called()
+
+
+class TestCustomerQueuedAtCustomField(UnitTestCase):
+	"""recover_stuck_customer_syncs() reads this column, so it has to exist and
+	be indexed."""
+
+	def _field(self):
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+		fields = get_custom_fields()["Customer"]
+		return next(f for f in fields if f["fieldname"] == "taxjar_customer_sync_queued_at")
+
+	def test_it_is_declared_on_customer(self):
+		self.assertEqual(self._field()["fieldtype"], "Datetime")
+
+	def test_it_is_indexed_because_the_cron_filters_on_it(self):
+		self.assertEqual(self._field()["search_index"], 1)
+
+	def test_it_is_machinery_not_an_answer(self):
+		field = self._field()
+		self.assertEqual(field["read_only"], 1)
+		self.assertEqual(field["hidden"], 1)
+		self.assertEqual(field["no_copy"], 1)
+
+	def test_the_validate_hook_protects_it_from_a_stale_form(self):
+		"""Every read-only field a background job writes raw has to be restored
+		from the database on save, or an open form writes its stale copy back."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_CUSTOMER_SYNC_MANAGED_FIELDS,
+		)
+		self.assertIn("taxjar_customer_sync_queued_at", _CUSTOMER_SYNC_MANAGED_FIELDS)
+
+
+class TestCustomersPageOffersResyncOnQueued(UnitTestCase):
+	"""Resync used to be offered on Failed rows only, which left "Queued" - the
+	one status that could strand a customer - with no way out of it by hand."""
+
+	def _js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_customers", "taxjar_customers.js"
+		))
+		with open(path) as f:
+			return f.read()
+
+	def test_both_failed_and_queued_rows_can_be_resent(self):
+		js = self._js()
+		self.assertIn('["Failed", "Queued"].includes(row.taxjar_customer_sync_status)', js)
+
+	def test_the_action_reads_the_widened_selection(self):
+		js = self._js()
+		self.assertIn("this.retry_failed(resyncable)", js)
+		self.assertNotIn("this.retry_failed(failed)", js)
+
+
+class TestReleaseReadTransaction(UnitTestCase):
+	"""Committing the read that built the payload is a background job's business
+	only. The inline Sync button (resync_customer) runs inside a web request
+	whose transaction is not this function's to commit."""
+
+	def _run(self, job):
+		# frappe.local is a werkzeug Local, which mock.patch cannot introspect -
+		# so the flag is set and restored by hand rather than patched.
+		had_job = hasattr(frappe.local, "job")
+		previous = getattr(frappe.local, "job", None)
+		frappe.local.job = job
+		try:
+			with patch(f"{_TJ}.frappe.db.commit") as mock_commit:
+				from taxjar_integration.taxjar_integration.taxjar_integration import (
+					_release_read_transaction,
+				)
+				_release_read_transaction()
+			return mock_commit
+		finally:
+			if had_job:
+				frappe.local.job = previous
+			else:
+				try:
+					del frappe.local.job
+				except AttributeError:
+					pass
+
+	def test_a_background_job_commits_its_read(self):
+		self._run(job=frappe._dict(method="sync_customer_to_taxjar")).assert_called_once()
+
+	def test_a_web_request_does_not(self):
+		self._run(job=None).assert_not_called()

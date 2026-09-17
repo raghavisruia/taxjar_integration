@@ -2,9 +2,11 @@ import frappe
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_MAX_SYNC_RETRIES,
+	_customer_sync_companies,
 	_is_taxjar_enabled,
 	company_scope,
 	get_catalogue_client,
+	recover_stuck_customer_syncs,
 )
 from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
 	fetch_and_insert_categories,
@@ -105,9 +107,16 @@ def retry_failed_taxjar_syncs():
 def retry_failed_taxjar_customer_syncs():
 	"""Every 15 min: re-enqueue Customers whose last TaxJar sync failed in a way a
 	retry could clear - see retry_failed_taxjar_syncs() for why the rest are left
-	alone, and for the same TAXJAR_MAX_SYNC_RETRIES cap on consecutive failures."""
+	alone, and for the same TAXJAR_MAX_SYNC_RETRIES cap on consecutive failures.
+
+	Customers stranded at "Queued" are swept into that same set first, before
+	the query below reads it, so a row recovered on this tick is also retried
+	on this tick rather than waiting another fifteen minutes.
+	"""
 	if not _is_taxjar_enabled():
 		return
+
+	recover_stuck_customer_syncs()
 
 	failed_customers = frappe.get_all(
 		"Customer",
@@ -120,17 +129,25 @@ def retry_failed_taxjar_customer_syncs():
 		limit=50,
 	)
 
-	taxjar_settings = frappe.get_single("TaxJar Settings")
+	# One shared definition of "a company a customer sync goes to". This loop
+	# used to read the two feature flags directly, which skips the
+	# United-States test company_scope() applies - so the cron could re-send a
+	# customer for a company the save hook itself would never have queued.
+	companies = _customer_sync_companies()
+
 	for customer_name in failed_customers:
-		for config in taxjar_settings.company_config or []:
-			if not (config.taxjar_calculate_tax or config.taxjar_create_transactions):
-				continue
+		for company in companies:
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
 				customer_name=customer_name,
-				company=config.company,
+				company=company,
 				queue="short",
-				job_id=f"taxjar_customer_retry_{customer_name}_{config.company}",
+				# deduplicate is safe here, unlike on the save path: this cron
+				# re-reads the Failed rows every fifteen minutes, so an enqueue
+				# dropped now is simply made again on the next tick. The status
+				# it would leave behind is Failed, which is a state something
+				# still looks at.
+				job_id=f"taxjar_customer_retry_{customer_name}_{company}",
 				deduplicate=True,
 				enqueue_after_commit=True,
 			)

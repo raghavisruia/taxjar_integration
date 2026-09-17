@@ -646,7 +646,15 @@ class TaxJarCustomerConfig {
 
 	update_bulk_state() {
 		const checked = this.get_checked();
-		const failed = checked.filter((row) => row.taxjar_customer_sync_status === "Failed");
+		// Queued belongs here beside Failed. A customer stranded at Queued -
+		// its job never created, or gone with the worker that was running it -
+		// is exactly the row a human wants to resend, and offering the action
+		// on Failed alone left the one status with no way out of it. The
+		// server re-sends an idempotent PUT, so asking for it while a sync is
+		// genuinely in flight costs one call and changes nothing.
+		const resyncable = checked.filter((row) =>
+			["Failed", "Queued"].includes(row.taxjar_customer_sync_status)
+		);
 
 		this.$selection_count.text(checked.length ? __("{0} selected", [checked.length]) : "");
 
@@ -668,11 +676,11 @@ class TaxJarCustomerConfig {
 			items.push({ label: __("Clear Exemption"), action: () => this.clear_exemption(checked) });
 		}
 
-		if (failed.length) {
+		if (resyncable.length) {
 			items.push({ divider: true });
 			items.push({
 				label: __("Resync with TaxJar"),
-				action: () => this.retry_failed(failed),
+				action: () => this.retry_failed(resyncable),
 			});
 		}
 
