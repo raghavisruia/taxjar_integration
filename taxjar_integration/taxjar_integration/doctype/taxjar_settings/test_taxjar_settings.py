@@ -213,6 +213,21 @@ class _FakeDoc:
 _FRAMEWORK_DOCTYPES = frozenset({"DocType", "DocField", "Custom Field", "Property Setter", "DocPerm"})
 
 
+def _thrown_html():
+	"""The message the desk dialog renders, for a frappe.throw() just caught.
+
+	Read this rather than str(exception) whenever the assertion is about
+	markup. frappe's msgprint() strips every tag from the exception it raises
+	when sys.stdin is a TTY, so str(exception) keeps the markup under CI and a
+	backgrounded run, and loses it in an interactive terminal - the same test
+	passes or fails on where it was started from.
+
+	The message log entry is the one the dialog shows, and it is clean_html()'d
+	instead of stripped, so <b>, <strong>, <br> and <a> all survive there.
+	"""
+	return frappe.message_log[-1].message
+
+
 def _files_scope(files=True, calculates=False, in_scope=True, reason=None, config=None):
 	"""A CompanyScope for tests whose subject is a hook's branching, not the
 	predicate itself.
@@ -6764,10 +6779,10 @@ class TestAddressAtFaultAttribution(UnitTestCase):
 
 		with patch(f"{self.MOD}.get_client", return_value=mock_client), \
 		     patch(f"{self.MOD}.log_taxjar_call"):
-			with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+			with self.assertRaises(frappe.exceptions.ValidationError):
 				validate_tax_request({"dummy": True}, address_context=address_context)
 
-		return str(cm.exception)
+		return _thrown_html()
 
 	def test_origin_rejection_names_the_company_address(self):
 		message = self._throws_with(
@@ -7223,10 +7238,10 @@ class TestValidateReturnAgainst(UnitTestCase):
 			"taxjar_integration.taxjar_integration.taxjar_integration.company_scope",
 			return_value=_files_scope(True),
 		):
-			with self.assertRaises(frappe.ValidationError) as caught:
+			with self.assertRaises(frappe.ValidationError):
 				validate_return_against(doc, None)
 
-		message = str(caught.exception)
+		message = _thrown_html()
 		self.assertIn(
 			"<b>Go to:</b> Sales Invoice<b> \u2192 </b>Create"
 			"<b> \u2192 </b>Return / Credit Note",
