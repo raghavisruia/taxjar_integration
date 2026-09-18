@@ -9860,8 +9860,7 @@ class TestInstallSetup(UnitTestCase):
 
 		# frappe.db.exists is patched on the real frappe.db object (not a local
 		# copy), so a blanket return_value would also answer every other
-		# frappe.db.exists() call sync_taxjar_workspace_sidebar() makes further
-		# down setup_taxjar() (e.g. checking the Workspace Sidebar leftover) -
+		# frappe.db.exists() call setup_taxjar() makes further down -
 		# defeating delete_doc's ignore_missing safety net with a lie and turning
 		# it into a real DoesNotExistError. Only fake the one check this is
 		# actually testing; let everything else hit the real frappe.db.exists.
@@ -9926,8 +9925,8 @@ class TestGuidedSetupAlert(UnitTestCase):
 		# desk workspace permanently missing its guided-setup banner block
 		# (a real incident: the workspace page rendered "undefined" where
 		# the banner should have been, and every other test that calls the
-		# real sync_taxjar_workspace_sidebar()/setup_taxjar() afterward
-		# failed with a LinkValidationError against the now-missing block).
+		# real setup_taxjar() afterward failed with a LinkValidationError
+		# against the now-missing block).
 		# add_guided_setup_alert() is idempotent (see
 		# test_idempotent_on_repeated_calls below), so calling it once more
 		# here unconditionally restores the same valid state a real
@@ -10441,6 +10440,128 @@ class TestWorkspaceBranding(UnitTestCase):
 		self.assertEqual(ws["name"], "TaxJar Integration")
 		self.assertEqual(frappe.get_hooks("app_home", app_name="taxjar_integration"), ["/app/taxjar-integration"])
 
+	# The app ships one Sidebar and no Dock.
+	#
+	# A Sidebar is the panel of links. A Dock is an app's rail, the strip of
+	# icons left of the panel, and each of its rows picks a panel. One module
+	# needs one panel, so a rail would be a strip with a single icon on it.
+	#
+	# Three panels were tried first, one per rail icon, and dropped:
+	# `Sidebar.title` is unique across the whole site and the panel header is
+	# derived from it, so a "Setup" panel could only be headed "Setup" by taking
+	# the title erpnext already holds.
+	GROUPS = [
+		("Setup", "settings", [
+			("TaxJar Setup", "Page", "taxjar-setup"),
+			("Customer Tax Exemption", "Page", "taxjar-customers"),
+			("Nexus & Product Category", "Page", "taxjar-nexus"),
+		]),
+		("Reports", "file-text", [
+			("TaxJar Transaction Sync", "Page", "taxjar-transactions"),
+		]),
+		("Other", "ellipsis", [
+			("TaxJar API Logs", "DocType", "TaxJar API Log"),
+			("TaxJar API Settings", "DocType", "TaxJar Settings"),
+		]),
+	]
+
+	def _sidebar(self):
+		"""The Sidebar the app ships, read from the file rather than the site.
+
+		frappe builds the desk's left panel from the `Sidebar` doctype. An app
+		ships one as a standard fixture, and `bench migrate` imports it. The file
+		is the source of truth, so the tests read the file.
+		"""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..",
+			"taxjar_integration", "sidebar", "taxjar", "taxjar.json",
+		))
+		with open(path) as f:
+			return json.load(f)
+
+	def test_the_app_ships_no_dock(self):
+		"""One module needs one panel, and a rail for one panel is a strip with a
+		single icon on it.
+
+		frappe supports the dock-less shape: `Sidebar.dock_enabled` draws no rail
+		for an app that resolves to no dock entries, the user button moves back
+		into the panel, and the panel's header carries the app switcher instead.
+		"""
+		import os
+		dock_dir = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "dock",
+		))
+		self.assertFalse(os.path.exists(dock_dir), "the app ships a Dock again")
+
+	def test_the_panel_ships_as_a_standard_fixture(self):
+		"""`standard` is what makes bench migrate import the file. Without it the
+		record is an orphan, and migrate deletes it on the next run."""
+		doc = self._sidebar()
+		self.assertEqual(doc["doctype"], "Sidebar")
+		self.assertEqual(doc["standard"], 1)
+		# A Sidebar is named by its title, so the record name and the exported
+		# path both follow it.
+		self.assertEqual(doc["title"], "TaxJar")
+		self.assertEqual(doc["name"], "TaxJar")
+		self.assertEqual(doc["app"], "taxjar_integration")
+		self.assertEqual(doc["module"], "TaxJar Integration")
+
+	def test_the_workspace_is_the_first_row(self):
+		"""Regression guard: a sidebar resolves by membership first - frappe's own
+		rule is "membership holds you, ownership decides when nothing does".
+
+		While the workspace was reached from a rail row instead of from a panel
+		row, no panel listed it, so opening it fell through to ownership and
+		landed somewhere else."""
+		first = self._sidebar()["items"][0]
+		self.assertEqual(first["label"], "Home")
+		self.assertEqual(first["link_type"], "Workspace")
+		self.assertEqual(first["link_to"], "TaxJar Integration")
+
+	def test_the_panel_holds_the_whole_app_grouped(self):
+		"""The panel groups by how often a page is opened; the workspace's cards
+		group by what a thing is. They are grouped, ordered and labelled
+		differently on purpose, so renaming a card must not move a page."""
+		structure = []
+		current = None
+		for item in self._sidebar()["items"][1:]:
+			if item["type"] == "Section Break":
+				current = (item["label"], item["icon"], [])
+				structure.append(current)
+			else:
+				self.assertTrue(item["child"], item["label"])
+				current[2].append((item["label"], item["link_type"], item["link_to"]))
+
+		self.assertEqual(structure, self.GROUPS)
+
+	def test_only_the_reference_group_starts_closed(self):
+		"""Everything under Other is reference material reached occasionally - it
+		opens on request rather than pushing the day-to-day pages down."""
+		breaks = [i for i in self._sidebar()["items"] if i["type"] == "Section Break"]
+		self.assertEqual({i["label"] for i in breaks if i["keep_closed"]}, {"Other"})
+		# Every group still opens and closes - only the starting state differs.
+		for item in breaks:
+			self.assertTrue(item["collapsible"], item["label"])
+
+	def test_every_icon_exists_in_the_bundled_lucide_sprite(self):
+		"""An icon name frappe's sprite does not define resolves to nothing and
+		renders blank rather than failing loudly - "home" was never in that
+		sprite, only "house" is."""
+		import os
+
+		sprite = os.path.join(
+			frappe.get_app_path("frappe"), "public", "icons", "lucide", "icons.svg"
+		)
+		with open(sprite) as f:
+			svg = f.read()
+
+		doc = self._sidebar()
+		names = [doc["header_icon"]] + [i["icon"] for i in doc["items"] if i.get("icon")]
+		for name in names:
+			with self.subTest(icon=name):
+				self.assertIn(f'id="icon-{name}"', svg)
+
 	def test_old_workspace_removed_by_patch(self):
 		import os
 		patches = os.path.normpath(os.path.join(
@@ -10467,49 +10588,6 @@ class TestWorkspaceBranding(UnitTestCase):
 	def test_icon_is_valid_not_dollar_sign(self):
 		ws = self._workspace()
 		self.assertEqual(ws["icon"], "coins")
-
-	def test_sidebar_is_built_from_its_own_structure_not_the_cards(self):
-		"""The sidebar is a standing navigation list; the workspace's cards group
-		by kind. They are grouped, ordered and labelled differently on purpose,
-		so renaming a card must not rename a sidebar group.
-
-		The sidebar lives on ``Workspace.sidebar_items`` - a child table on the
-		workspace itself - not the standalone ``Workspace Sidebar`` doctype, which
-		was merged into ``Workspace`` earlier in v16 and is no longer read by
-		frappe.boot.get_sidebar_items."""
-		from taxjar_integration.install import SIDEBAR_GROUPS, sync_taxjar_workspace_sidebar
-
-		sync_taxjar_workspace_sidebar()
-		doc = frappe.get_doc("Workspace", "TaxJar Integration")
-
-		structure = []
-		current = None
-		for item in doc.sidebar_items:
-			if item.type == "Section Break":
-				current = {"group": item.label, "children": []}
-				structure.append(current)
-			elif item.type == "Link" and current is not None:
-				self.assertTrue(item.child)
-				current["children"].append((item.label, item.link_to))
-
-		self.assertEqual(
-			structure,
-			[
-				{
-					"group": group["label"],
-					"children": [(label, link_to) for label, link_to, _ in group["links"]],
-				}
-				for group in SIDEBAR_GROUPS
-			],
-		)
-
-		self.assertEqual([g["group"] for g in structure], ["Setup", "Reports", "Other"])
-		groups = {g["group"]: [link_to for _, link_to in g["children"]] for g in structure}
-		self.assertEqual(
-			groups["Setup"], ["taxjar-setup", "taxjar-customers", "taxjar-nexus"]
-		)
-		self.assertEqual(groups["Reports"], ["taxjar-transactions"])
-		self.assertEqual(groups["Other"], ["TaxJar API Log", "TaxJar Settings"])
 
 	def test_the_workspace_cards_keep_their_own_grouping(self):
 		"""Restructuring the sidebar must leave the workspace page alone - the
@@ -10543,59 +10621,6 @@ class TestWorkspaceBranding(UnitTestCase):
 			],
 			["Manage", "Report", "Other"],
 		)
-
-	def test_only_the_reference_group_starts_closed(self):
-		"""Everything under Other is reference material reached occasionally -
-		it opens on request rather than pushing the day-to-day pages down."""
-		from taxjar_integration.install import SIDEBAR_GROUPS, sync_taxjar_workspace_sidebar
-
-		sync_taxjar_workspace_sidebar()
-		doc = frappe.get_doc("Workspace", "TaxJar Integration")
-
-		closed = {
-			item.label for item in doc.sidebar_items
-			if item.type == "Section Break" and item.keep_closed
-		}
-		self.assertEqual(closed, {"Other"})
-		self.assertEqual(
-			closed, {g["label"] for g in SIDEBAR_GROUPS if g.get("keep_closed")}
-		)
-
-		# Every group still opens and closes - only the starting state differs.
-		for item in doc.sidebar_items:
-			if item.type == "Section Break":
-				self.assertTrue(item.collapsible, item.label)
-
-	def test_group_icons_exist_in_the_bundled_lucide_sprite(self):
-		"""An icon name frappe's sprite does not define resolves to nothing and
-		renders blank rather than failing loudly - see the Home entry's own
-		regression below."""
-		import os
-		from taxjar_integration.install import SIDEBAR_GROUPS
-
-		sprite = os.path.join(
-			frappe.get_app_path("frappe"), "public", "icons", "lucide", "icons.svg"
-		)
-		with open(sprite) as f:
-			svg = f.read()
-
-		for group in SIDEBAR_GROUPS:
-			with self.subTest(group=group["label"]):
-				self.assertIn(f'id="icon-{group["icon"]}"', svg)
-
-	def test_home_entry_uses_an_icon_that_exists_in_the_bundled_lucide_sprite(self):
-		"""Regression guard: the desk sidebar resolves an icon name straight to
-		#icon-<name> in frappe's bundled lucide sprite (frappe/public/icons/lucide/
-		icons.svg) with no fallback - "home" was never in that sprite (only
-		"house" is), so the Home entry silently rendered no icon at all."""
-		from taxjar_integration.install import sync_taxjar_workspace_sidebar
-
-		sync_taxjar_workspace_sidebar()
-		doc = frappe.get_doc("Workspace", "TaxJar Integration")
-
-		home_items = [item for item in doc.sidebar_items if item.label == "Home"]
-		self.assertEqual(len(home_items), 1)
-		self.assertEqual(home_items[0].icon, "house")
 
 	def test_link_cards(self):
 		ws = self._workspace()

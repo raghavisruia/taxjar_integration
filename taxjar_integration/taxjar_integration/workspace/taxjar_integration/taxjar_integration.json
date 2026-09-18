@@ -1,5 +1,4 @@
 {
- "app": "taxjar_integration",
  "charts": [],
  "content": "[{\"id\":\"card_manage\",\"type\":\"card\",\"data\":{\"card_name\":\"Manage\",\"col\":4}},{\"id\":\"card_report\",\"type\":\"card\",\"data\":{\"card_name\":\"Report\",\"col\":4}},{\"id\":\"card_other\",\"type\":\"card\",\"data\":{\"card_name\":\"Other\",\"col\":4}}]",
  "creation": "2026-06-29 12:27:26.227691",

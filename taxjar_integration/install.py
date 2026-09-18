@@ -13,47 +13,6 @@ from taxjar_integration.taxjar_integration.regional.united_states import (
 
 WORKSPACE = "TaxJar Integration"
 
-# Lucide icon names shown next to each sidebar card group. Cards without an entry
-# fall back to no icon.
-# The desk left sidebar, authored here rather than derived from the workspace's
-# own cards. The two answer different questions: the workspace page groups by
-# what a thing IS (Setup / Manage / Sync), while the sidebar is a standing
-# navigation list ordered by how often each page is opened - so a link can sit
-# in one group on the page and another in the sidebar, and renaming a card must
-# not silently rename a sidebar group.
-#
-# `icon` must be a symbol id in frappe's bundled lucide sprite
-# (frappe/public/icons/lucide/icons.svg): an unknown name resolves to nothing
-# and renders blank rather than failing loudly. `keep_closed` renders the group
-# collapsed - everything under Other is reference material, reached
-# occasionally and as often from a link elsewhere as from here, so it opens on
-# request rather than pushing the day-to-day pages down the list.
-SIDEBAR_GROUPS = [
-	{
-		"label": "Setup",
-		"icon": "settings",
-		"links": [
-			("TaxJar Setup", "taxjar-setup", "Page"),
-			("Customer Tax Exemption", "taxjar-customers", "Page"),
-			("Nexus & Product Category", "taxjar-nexus", "Page"),
-		],
-	},
-	{
-		"label": "Reports",
-		"icon": "file-text",
-		"links": [("TaxJar Transaction Sync", "taxjar-transactions", "Page")],
-	},
-	{
-		"label": "Other",
-		"icon": "ellipsis",
-		"keep_closed": True,
-		"links": [
-			("TaxJar API Logs", "TaxJar API Log", "DocType"),
-			("TaxJar API Settings", "TaxJar Settings", "DocType"),
-		],
-	},
-]
-
 GUIDED_SETUP_ALERT_BLOCK = "TaxJar Guided Setup Alert"
 
 # Blue/subtle styling mirrors the Frappe UI Alert component's look
@@ -216,8 +175,6 @@ def setup_taxjar():
 
 	add_guided_setup_alert()
 
-	sync_taxjar_workspace_sidebar()
-
 
 def add_guided_setup_alert():
 	"""Subtle banner at the top of the workspace, blue while the guided setup has
@@ -329,62 +286,3 @@ def keep_guided_setup_alert(doc, method):
 		return
 	_ensure_guided_setup_alert_block()
 	_splice_guided_setup_alert_into_content(doc)
-
-
-def sync_taxjar_workspace_sidebar():
-	"""(Re)build the desk left sidebar from SIDEBAR_GROUPS.
-
-	The grouped sidebar lives on ``Workspace.sidebar_items`` (a child table on the
-	workspace itself): each group becomes a collapsible Section Break and its
-	links become nested child items. This is NOT the standalone
-	``Workspace Sidebar`` doctype - that was merged into ``Workspace`` earlier in
-	v16 (see ``frappe.patches.v16_0.migrate_workspace_sidebar_to_workspace`` and
-	``frappe.boot.get_sidebar_items``, which explicitly says "the legacy Workspace
-	Sidebar doctype is no longer read here").
-
-	SIDEBAR_GROUPS is the source of truth, not the workspace's own cards: the
-	sidebar is a standing navigation list and the cards group by kind, so the two
-	are grouped, ordered and labelled differently on purpose. This runs on every
-	install/migrate, so an edit up there reaches already-migrated sites too.
-	"""
-	if not frappe.db.exists("Workspace", WORKSPACE):
-		return
-
-	ws = frappe.get_doc("Workspace", WORKSPACE)
-
-	# A Home entry routes back to the workspace itself, mirroring core desk sidebars.
-	items = [{
-		"type": "Link",
-		"label": "Home",
-		"link_to": WORKSPACE,
-		"link_type": "Workspace",
-		"icon": "house",
-	}]
-	for group in SIDEBAR_GROUPS:
-		items.append({
-			"type": "Section Break",
-			"label": group["label"],
-			"icon": group.get("icon"),
-			"collapsible": 1,
-			"keep_closed": 1 if group.get("keep_closed") else 0,
-			"indent": 1,
-		})
-		for label, link_to, link_type in group["links"]:
-			items.append({
-				"type": "Link",
-				"label": label,
-				"link_to": link_to,
-				"link_type": link_type,
-				"child": 1,
-				"collapsible": 1,
-			})
-
-	ws.set("sidebar_items", [])
-	for item in items:
-		ws.append("sidebar_items", item)
-	ws.save(ignore_permissions=True)
-
-	# Drop the pre-merge standalone record left over from older v16 builds; it's
-	# no longer read by frappe.boot.get_sidebar_items.
-	if frappe.db.exists("DocType", "Workspace Sidebar"):
-		frappe.delete_doc("Workspace Sidebar", WORKSPACE, ignore_missing=True, force=True)
