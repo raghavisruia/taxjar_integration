@@ -5,6 +5,7 @@
 import json
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -35,11 +36,39 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 BASE_DIR = Path(__file__).resolve().parent
 PRODUCT_TAX_CATEGORY_DATA_FILE = (BASE_DIR / "product_tax_category_data.json").resolve()
 
-# Three callers rewrite the same `nexus` table on the same Single: the nightly
-# sync_nexus_list job, the auto-fetch enqueued when a company is first
-# configured, and the manual Fetch button on the guided setup / settings form.
+# One writer at a time on the TaxJar Settings Single. A Single is saved as a
+# delete of all its rows in `tabSingles` followed by an insert of all of them
+# again, so two saves in flight at once deadlock in the database rather than
+# queue behind each other - the browser then shows "Deadlock Occurred".
+#
+# Two groups of callers meet here. The nexus sync rewrites the `nexus` table
+# from the nightly sync_nexus_list job, from the auto-fetch enqueued when a
+# company is first configured, and from the Fetch button on the guided setup /
+# settings form. The guided setup writes the same Single on every step, and its
+# Activate button (finish_setup) used to land on top of a running nexus fetch.
+#
 # Held per site, so a web worker and an RQ worker contend for the same lock.
-NEXUS_SYNC_LOCK = "taxjar_nexus_sync"
+SETTINGS_WRITE_LOCK = "taxjar_settings_write"
+
+
+@contextmanager
+def settings_write_lock():
+	"""Serialise writes to TaxJar Settings. See SETTINGS_WRITE_LOCK.
+
+	Read the document inside this lock, not before it. A writer that reads
+	first and waits second saves a copy the winner has already replaced, and
+	frappe then refuses that save on the modified timestamp - one error traded
+	for another.
+	"""
+	try:
+		with filelock(SETTINGS_WRITE_LOCK, timeout=60):
+			yield
+	except LockTimeoutError:
+		frappe.throw(
+			frappe._("Another TaxJar Settings update is already running. Please try again in a moment."),
+			title=frappe._("TaxJar Settings Busy"),
+		)
+
 
 # Statuses that mean "this credential will not work", as opposed to a request
 # TaxJar disliked. Both send the reader to the same place: the Connect step.
@@ -249,19 +278,14 @@ class TaxJarSettings(Document):
 				title=frappe._("Company Configuration Required"),
 			)
 
-		# One sync at a time. Two of them clear and re-insert the same child rows
+		# One writer at a time. Two syncs clear and re-insert the same child rows
 		# under the same parent, in whatever order each transaction happens to
 		# reach them, which is a deadlock waiting for the timing to line up - and
 		# it did, for anyone who pressed Fetch while the background sync was
-		# still running.
-		try:
-			with filelock(NEXUS_SYNC_LOCK, timeout=60):
-				self._sync_nexus_from_taxjar()
-		except LockTimeoutError:
-			frappe.throw(
-				frappe._("A nexus sync is already running. Please try again in a moment."),
-				title=frappe._("Nexus Sync In Progress"),
-			)
+		# still running. This sync is the slow writer the guided setup's own
+		# saves queue behind, so the lock is the doctype's, not this table's.
+		with settings_write_lock():
+			self._sync_nexus_from_taxjar()
 
 	def _sync_nexus_from_taxjar(self):
 		"""Replace `nexus` with what TaxJar reports for every configured company.

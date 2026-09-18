@@ -264,6 +264,11 @@ class TaxJarSetup {
 			return;
 		}
 
+		// One press at a time. The wait below lasts as long as a nexus fetch
+		// does, and a second press inside it would send a second save.
+		if (this._nextBusy) return;
+		this._nextBusy = true;
+
 		// Steps with a save API collect -> save -> reload state -> advance;
 		// steps without one (Welcome, Nexus — which persists via its own Fetch
 		// action) just advance. The last step activates rather than advances:
@@ -271,8 +276,22 @@ class TaxJarSetup {
 		const step = SETUP_STEPS[this.cur];
 		const done = () => (this.cur === LAST_WIZARD_STEP ? this._finish() : this._advance());
 		const saver = this[`_save_${step.key}`];
-		if (!saver) return done();
-		Promise.resolve(saver.call(this)).then((ok) => { if (ok) done(); });
+
+		// Then wait for a running nexus fetch before sending anything. The
+		// fetch and every saver here write the same TaxJar Settings record, and
+		// the database answers the second writer with "Deadlock Occurred"
+		// rather than queueing it. The two meet on the Nexus step, which starts
+		// a fetch as it opens and carries the Activate button: a user who
+		// presses Activate straight away used to get that error instead of an
+		// activated setup.
+		const $btn = this.$root.find(".ts-next");
+		if (this._nexus_fetching) $btn.attr("aria-busy", "true");
+
+		Promise.resolve(this._nexus_fetch).then(() => {
+			$btn.removeAttr("aria-busy");
+			if (!saver) return done();
+			return Promise.resolve(saver.call(this)).then((ok) => { if (ok) done(); });
+		}).finally(() => { this._nextBusy = false; });
 	}
 
 	// ── editing ──────────────────────────────────────────────────────
@@ -1864,19 +1883,24 @@ class TaxJarSetup {
 		this.$body.find(".ts-lastsync").text(__("Syncing…"));
 	}
 
+	// Returns the running fetch, so a press of Activate can wait for it rather
+	// than send a second writer at the same record (see _on_next).
 	_fetch_nexus() {
 		// Every fetch clears and re-inserts the same nexus rows server-side, so
 		// two of them in flight at once are two writers on the same table. The
 		// server serialises them as well, but a second request that only ever
 		// waits for the first one's answer is not worth sending.
-		if (this._nexus_fetching) return;
+		if (this._nexus_fetching) return this._nexus_fetch;
 		this._nexus_fetching = true;
 
 		const $status = this.$body.find(".ts-fetchstatus").empty();
 		const $btn = this.$body.find(".ts-fetch-mount .es-button").attr("aria-busy", "true");
 		this._render_syncing();
 
-		this._call("fetch_nexus", {}).then((res) => {
+		// The stored chain ends after the catch below, so it settles rather
+		// than rejects - a wait on it never turns one failed fetch into a
+		// second unhandled error somewhere else.
+		this._nexus_fetch = this._call("fetch_nexus", {}).then((res) => {
 			this._nexus_answered = true;
 			this.state.nexus_by_company = res.nexus_by_company;
 			this._render_nexus_groups(res.nexus_by_company);
@@ -1893,6 +1917,8 @@ class TaxJarSetup {
 			this._nexus_fetching = false;
 			$btn.removeAttr("aria-busy");
 		});
+
+		return this._nexus_fetch;
 	}
 
 	// ── Step 7: the configuration record ────────────────────────────

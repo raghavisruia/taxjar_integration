@@ -31,6 +31,9 @@ from frappe import _
 from frappe.utils import cint
 from frappe.utils.password import get_decrypted_password
 
+from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+	settings_write_lock,
+)
 from taxjar_integration.taxjar_integration.taxjar_integration import company_address_names
 
 SETTINGS = "TaxJar Settings"
@@ -203,46 +206,50 @@ def save_connection(
 
 	credentials = frappe.parse_json(credentials) if isinstance(credentials, str) else (credentials or [])
 
-	settings = frappe.get_single(SETTINGS)
+	# Read and save inside the lock: two writers of this Single at once deadlock
+	# in the database rather than queue (see SETTINGS_WRITE_LOCK).
+	with settings_write_lock():
+		settings = frappe.get_single(SETTINGS)
 
-	# Measured before anything is written. With no stored credential this is the
-	# first Connect save, and there is nothing downstream to invalidate - every
-	# company is new only in the sense that the wizard has not run yet.
-	known = {cred.company for cred in (settings.table_hvjw or []) if cred.company}
-	mode_changed = bool(known) and settings.api_mode != mode
-	company_added = bool(known) and any(
-		row.get("company") and row.get("company") not in known for row in credentials
-	)
+		# Measured before anything is written. With no stored credential this is the
+		# first Connect save, and there is nothing downstream to invalidate - every
+		# company is new only in the sense that the wizard has not run yet.
+		known = {cred.company for cred in (settings.table_hvjw or []) if cred.company}
+		mode_changed = bool(known) and settings.api_mode != mode
+		company_added = bool(known) and any(
+			row.get("company") and row.get("company") not in known for row in credentials
+		)
 
-	settings.api_mode = mode
-	if enable_taxjar_logging is not None:
-		settings.enable_taxjar_logging = cint(enable_taxjar_logging)
-	if log_retention_days is not None:
-		settings.log_retention_days = cint(log_retention_days)
+		settings.api_mode = mode
+		if enable_taxjar_logging is not None:
+			settings.enable_taxjar_logging = cint(enable_taxjar_logging)
+		if log_retention_days is not None:
+			settings.log_retention_days = cint(log_retention_days)
 
-	token_field = "sandbox_token" if mode == "Sandbox" else "live_token"
-	existing = {cred.company: cred for cred in (settings.table_hvjw or [])}
+		token_field = "sandbox_token" if mode == "Sandbox" else "live_token"
+		existing = {cred.company: cred for cred in (settings.table_hvjw or [])}
 
-	for row in credentials:
-		company = row.get("company")
-		token = row.get("token")
-		if not company:
-			continue
-		cred = existing.get(company)
-		if not cred:
-			cred = settings.append("table_hvjw", {"company": company})
-		if token:
-			cred.set(token_field, token)
+		for row in credentials:
+			company = row.get("company")
+			token = row.get("token")
+			if not company:
+				continue
+			cred = existing.get(company)
+			if not cred:
+				cred = settings.append("table_hvjw", {"company": company})
+			if token:
+				cred.set(token_field, token)
 
-	# Both changes leave `nexus` holding regions that belong to a TaxJar account,
-	# or a company set, that no longer matches. Clearing the stamp re-arms
-	# on_update's own auto-fetch, which is gated on nexus_last_synced being empty
-	# - without this it never fires again after the very first sync, and a mode
-	# switch keeps the old account's regions for ever.
-	if mode_changed or company_added:
-		settings.nexus_last_synced = None
+		# Both changes leave `nexus` holding regions that belong to a TaxJar account,
+		# or a company set, that no longer matches. Clearing the stamp re-arms
+		# on_update's own auto-fetch, which is gated on nexus_last_synced being empty
+		# - without this it never fires again after the very first sync, and a mode
+		# switch keeps the old account's regions for ever.
+		if mode_changed or company_added:
+			settings.nexus_last_synced = None
 
-	settings.save()
+		settings.save()
+
 	return {"ok": True}
 
 
@@ -268,20 +275,24 @@ def save_company_accounts(rows: list | str):
 
 	rows = frappe.parse_json(rows) if isinstance(rows, str) else (rows or [])
 
-	settings = frappe.get_single(SETTINGS)
-	existing = {cfg.company: cfg for cfg in (settings.company_config or [])}
+	# Read and save inside the lock: two writers of this Single at once deadlock
+	# in the database rather than queue (see SETTINGS_WRITE_LOCK).
+	with settings_write_lock():
+		settings = frappe.get_single(SETTINGS)
+		existing = {cfg.company: cfg for cfg in (settings.company_config or [])}
 
-	for row in rows:
-		company = row.get("company")
-		if not company:
-			continue
-		cfg = existing.get(company)
-		if not cfg:
-			cfg = settings.append("company_config", {"company": company})
-		cfg.tax_account_head = row.get("tax_account_head")
-		cfg.shipping_account_head = row.get("shipping_account_head")
+		for row in rows:
+			company = row.get("company")
+			if not company:
+				continue
+			cfg = existing.get(company)
+			if not cfg:
+				cfg = settings.append("company_config", {"company": company})
+			cfg.tax_account_head = row.get("tax_account_head")
+			cfg.shipping_account_head = row.get("shipping_account_head")
 
-	settings.save()
+		settings.save()
+
 	return {"ok": True}
 
 
@@ -576,22 +587,26 @@ def save_features(company_flags: list | str | None = None):
 		frappe.parse_json(company_flags) if isinstance(company_flags, str) else (company_flags or [])
 	)
 
-	settings = frappe.get_single(SETTINGS)
-	existing = {cfg.company: cfg for cfg in (settings.company_config or [])}
-	for row in company_flags:
-		cfg = existing.get(row.get("company"))
-		if not cfg:
-			continue
-		cfg.taxjar_calculate_tax = cint(row.get("calculate"))
-		cfg.taxjar_create_transactions = cint(row.get("file"))
+	# Read and save inside the lock: two writers of this Single at once deadlock
+	# in the database rather than queue (see SETTINGS_WRITE_LOCK).
+	with settings_write_lock():
+		settings = frappe.get_single(SETTINGS)
+		existing = {cfg.company: cfg for cfg in (settings.company_config or [])}
+		for row in company_flags:
+			cfg = existing.get(row.get("company"))
+			if not cfg:
+				continue
+			cfg.taxjar_calculate_tax = cint(row.get("calculate"))
+			cfg.taxjar_create_transactions = cint(row.get("file"))
 
-	if any(
-		cfg.taxjar_calculate_tax or cfg.taxjar_create_transactions
-		for cfg in (settings.company_config or [])
-	):
-		settings.taxjar_enabled = 1
+		if any(
+			cfg.taxjar_calculate_tax or cfg.taxjar_create_transactions
+			for cfg in (settings.company_config or [])
+		):
+			settings.taxjar_enabled = 1
 
-	settings.save()
+		settings.save()
+
 	return {"ok": True}
 
 
@@ -603,14 +618,17 @@ def remove_company(company: str):
 	it."""
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
-	settings = frappe.get_single(SETTINGS)
-	settings.set("table_hvjw", [c for c in (settings.table_hvjw or []) if c.company != company])
-	settings.set("company_config", [c for c in (settings.company_config or []) if c.company != company])
-	# `nexus` is keyed by company too. Left behind, its rows kept reporting
-	# regions for a company the wizard no longer lists anywhere else, because
-	# nothing re-reads that table until the next full sync.
-	settings.set("nexus", [n for n in (settings.nexus or []) if n.company != company])
-	settings.save()
+	# Read and save inside the lock: two writers of this Single at once deadlock
+	# in the database rather than queue (see SETTINGS_WRITE_LOCK).
+	with settings_write_lock():
+		settings = frappe.get_single(SETTINGS)
+		settings.set("table_hvjw", [c for c in (settings.table_hvjw or []) if c.company != company])
+		settings.set("company_config", [c for c in (settings.company_config or []) if c.company != company])
+		# `nexus` is keyed by company too. Left behind, its rows kept reporting
+		# regions for a company the wizard no longer lists anywhere else, because
+		# nothing re-reads that table until the next full sync.
+		settings.set("nexus", [n for n in (settings.nexus or []) if n.company != company])
+		settings.save()
 
 	return {"ok": True}
 
@@ -645,8 +663,13 @@ def finish_setup():
 	"""
 	frappe.has_permission(SETTINGS, "write", throw=True)
 
-	settings = frappe.get_single(SETTINGS)
-	settings.setup_complete = 1
-	settings.save()
+	# The Activate button reaches here. The Nexus step it sits on starts a nexus
+	# sync as it opens, and that sync rewrites the same record this save
+	# rewrites - pressing Activate while it ran used to answer "Deadlock
+	# Occurred". Under the lock this save waits for the sync instead.
+	with settings_write_lock():
+		settings = frappe.get_single(SETTINGS)
+		settings.setup_complete = 1
+		settings.save()
 
 	return {"ok": True, "setup_complete": True}

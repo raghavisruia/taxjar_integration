@@ -3203,10 +3203,12 @@ class TestUpdateNexusListAuthError(UnitTestCase):
 		mock_client.nexus_regions.assert_called_once()
 
 
-# ── update_nexus_list(): one sync at a time ─────────────────────────────────
+# ── update_nexus_list(): one writer at a time ───────────────────────────────
 # Bug report: "Deadlock Occurred - Server failed to process this request because
 # of a concurrent conflicting request", raised by pressing Fetch on the guided
 # setup's Nexus step while a background sync of the same table was in flight.
+# The lock is the whole doctype's now, not the nexus table's alone - see
+# TestGuidedSetupWritesAreSerialised for the second half of the same bug.
 
 class TestUpdateNexusListSerialisation(UnitTestCase):
 	MODULE = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
@@ -3238,7 +3240,7 @@ class TestUpdateNexusListSerialisation(UnitTestCase):
 			self.settings.update_nexus_list()
 
 		self.assertEqual(calls, ["lock", "fetch", "save", "unlock"])
-		self.assertEqual(lock.call_args[0][0], "taxjar_nexus_sync")
+		self.assertEqual(lock.call_args[0][0], "taxjar_settings_write")
 
 	def test_lock_held_elsewhere_is_a_message_not_a_traceback(self):
 		"""LockTimeoutError is a plain Exception - left to escape it reaches the
@@ -13430,6 +13432,128 @@ class TestGuidedSetupFinish(UnitTestCase):
 		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import finish_setup
 		with patch(_SETUP_MODULE + ".frappe.has_permission", side_effect=frappe.PermissionError):
 			self.assertRaises(frappe.PermissionError, finish_setup)
+
+
+# ── Activate on top of a running nexus fetch ───────────────────────────────
+# Bug report: "Deadlock Occurred - Server failed to process this request because
+# of a concurrent conflicting request", raised by pressing Activate on the
+# guided setup while the Nexus step's own fetch was still running.
+#
+# A Single is saved as a delete of every one of its rows in `tabSingles`
+# followed by an insert of them all again, so two savers in flight at once
+# deadlock rather than queue. The nexus fetch holds that window open for as long
+# as TaxJar takes to answer for every company, and Activate sits on the very
+# step that starts one. Two halves to the fix: the page waits for its own fetch
+# (TestGuidedSetupActivateWaitsForNexusJS), and the server serialises every
+# writer of this Single, including a background sync no page can see.
+
+class TestGuidedSetupWritesAreSerialised(UnitTestCase):
+	"""Every setup endpoint that saves TaxJar Settings reads it and saves it
+	inside the lock."""
+
+	# Each endpoint with arguments that write nothing, so the trace below is the
+	# lock, the read and the save and nothing else.
+	WRITERS = (
+		("save_connection", {"mode": "Live", "credentials": []}),
+		("save_company_accounts", {"rows": []}),
+		("save_features", {"company_flags": []}),
+		("remove_company", {"company": "_Test Company"}),
+		("finish_setup", {}),
+	)
+
+	def _trace(self, name, kwargs):
+		"""Run one endpoint with the lock, the read and the save recorded in the
+		order they happen."""
+		import importlib
+
+		module = importlib.import_module(_SETUP_MODULE)
+
+		calls = []
+		lock = MagicMock()
+		lock.return_value.__enter__.side_effect = lambda: calls.append("lock")
+		lock.return_value.__exit__.side_effect = lambda *a: calls.append("unlock")
+
+		doc = MagicMock(table_hvjw=[], company_config=[], nexus=[])
+		doc.save.side_effect = lambda: calls.append("save")
+
+		with patch(_SETUP_MODULE + ".frappe.has_permission"), \
+		     patch(_SETUP_MODULE + ".settings_write_lock", lock), \
+		     patch(
+			     _SETUP_MODULE + ".frappe.get_single",
+			     side_effect=lambda *a: calls.append("read") or doc,
+		     ):
+			getattr(module, name)(**kwargs)
+
+		return calls
+
+	def test_every_saver_reads_and_saves_inside_the_lock(self):
+		"""The read belongs inside the lock too. An endpoint that reads first and
+		waits second saves a copy the winner has already replaced, and frappe
+		refuses that save on the modified timestamp - one error for another."""
+		for name, kwargs in self.WRITERS:
+			with self.subTest(endpoint=name):
+				self.assertEqual(self._trace(name, kwargs), ["lock", "read", "save", "unlock"])
+
+	def test_the_lock_is_the_one_the_nexus_sync_takes(self):
+		"""Two locks would serialise nothing. Both writers must queue on one."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			settings_write_lock as doctype_lock,
+		)
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import (
+			settings_write_lock as page_lock,
+		)
+
+		self.assertIs(page_lock, doctype_lock)
+
+	def test_fetch_nexus_does_not_take_the_lock_twice(self):
+		"""update_nexus_list() takes it already, and a file lock is not
+		re-entrant - taking it here again would hang the request until the
+		timeout and then report a lock nobody else was holding."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration.page.taxjar_setup.taxjar_setup import fetch_nexus
+
+		self.assertNotIn("settings_write_lock", inspect.getsource(fetch_nexus))
+
+
+class TestGuidedSetupActivateWaitsForNexusJS(UnitTestCase):
+	"""The page's own half: Activate waits for the fetch it started."""
+
+	def _js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"))
+		return open(path).read()
+
+	def _fn(self, signature):
+		return self._js().split(signature)[1].split("\n\t}\n")[0]
+
+	def test_a_press_waits_for_a_running_fetch(self):
+		on_next = self._fn("_on_next() {")
+		self.assertIn("Promise.resolve(this._nexus_fetch).then(", on_next)
+		# The save runs inside that wait, not beside it.
+		self.assertLess(
+			on_next.index("Promise.resolve(this._nexus_fetch)"),
+			on_next.index("Promise.resolve(saver.call(this))"),
+		)
+
+	def test_one_press_at_a_time(self):
+		"""The wait lasts as long as a fetch, and a second press inside it would
+		send a second save at the record the first press is already writing."""
+		on_next = self._fn("_on_next() {")
+		self.assertIn("if (this._nextBusy) return;", on_next)
+		self.assertIn("this._nextBusy = false;", on_next)
+
+	def test_the_fetch_is_what_a_press_can_wait_on(self):
+		"""The waiter needs the promise, so the fetch stores it and hands the
+		running one back rather than nothing."""
+		fetch = self._fn("_fetch_nexus() {")
+		self.assertIn('this._nexus_fetch = this._call("fetch_nexus", {})', fetch)
+		self.assertIn("if (this._nexus_fetching) return this._nexus_fetch;", fetch)
+		self.assertTrue(fetch.rstrip().endswith("return this._nexus_fetch;"))
+		# The stored chain ends after the catch, so a wait on a failed fetch
+		# still settles instead of raising somewhere else.
+		self.assertLess(fetch.index(".catch("), fetch.rindex("return this._nexus_fetch;"))
 
 
 class TestGuidedSetupSchemaAndEntry(UnitTestCase):
