@@ -6000,6 +6000,18 @@ class TestDeskPageChromeJS(UnitTestCase):
 		disabled_rule = scss.split(".es-button.taxjar-export[data-disabled] {")[1].split("}")[0]
 		self.assertNotIn("pointer-events", disabled_rule)
 
+	def test_a_divider_is_a_section_border_not_a_menu_row(self):
+		"""frappe.ui.Dropdown has no divider row, so { divider: true } reached
+		the menu as a row with no label - an empty band that took the pointer
+		highlight and read as something you could press. A divider now ends one
+		section and starts the next, and the menu draws the border itself."""
+		button = self._read_component("bulk_action_button")
+		set_items = button.split("set_items(items) {")[1].split("\n\t}\n")[0]
+		self.assertIn('{ group: "", hide_label: true, options: [] }', set_items)
+		self.assertIn("this.dropdown.set_options(sections)", set_items)
+		# The shape the menu never understood.
+		self.assertNotIn("{ divider: true }", set_items)
+
 	def test_bulk_action_labelled_for_what_it_does(self):
 		"""Customers offers three bulk actions, so its trigger names the group.
 		Transaction Sync offers one, so its button names that one action."""

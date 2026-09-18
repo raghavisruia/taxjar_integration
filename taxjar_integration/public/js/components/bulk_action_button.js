@@ -53,14 +53,33 @@ taxjar_integration.BulkActionButton = class BulkActionButton {
 
 	// items: [{ label, action }] or { divider: true }. An empty list disables
 	// the button - there is nothing meaningful to offer.
+	//
+	// frappe.ui.Dropdown has no divider row. A line between two actions is a
+	// section border, which .es-menu__group + .es-menu__group draws for the
+	// second section onwards. An unknown { divider: true } item reached the
+	// menu as a row with no label: an empty band that took the pointer
+	// highlight and read as something you could press. So a divider ends one
+	// section and starts the next, each with its heading hidden. The menu
+	// drops an empty section, so a divider at either end costs nothing.
 	set_items(items) {
 		this.items = items || [];
-		this.dropdown.set_options(
-			this.items.map((item) =>
-				item.divider ? { divider: true } : { label: item.label, onclick: item.action }
-			)
-		);
-		this.toggle_disabled(!this.items.some((item) => !item.divider));
+
+		const sections = [];
+		let section = null;
+		for (const item of this.items) {
+			if (item.divider) {
+				section = null;
+				continue;
+			}
+			if (!section) {
+				section = { group: "", hide_label: true, options: [] };
+				sections.push(section);
+			}
+			section.options.push({ label: item.label, onclick: item.action });
+		}
+
+		this.dropdown.set_options(sections);
+		this.toggle_disabled(!sections.length);
 	}
 
 	toggle_disabled(disabled) {
