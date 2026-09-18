@@ -2684,16 +2684,28 @@ class TestNexusPage(UnitTestCase):
 		self.assertEqual(fn.count("appendTo($link)"), 2)
 		self.assertNotIn("flex", fn)
 
-	def test_the_count_link_is_marked_with_a_dotted_underline(self):
+	def test_the_count_link_is_marked_with_a_dotted_rule(self):
 		"""The card has no other affordance saying it can be clicked, and the
-		two halves keep their own ink rather than turning link blue."""
+		two halves keep their own ink rather than turning link blue.
+
+		A background, not text-decoration: underline. The browser paints a text
+		decoration once per inline box, so across a 26px number and base-size
+		words the dots restarted at the join and the first came out long. One
+		background paints once for the whole anchor."""
 		css = self._read("taxjar_nexus.css")
-		rule = re.search(r"\.taxjar-nexus-count \{([^}]+)\}", css).group(1)
-		self.assertIn("underline dotted", rule)
-		# The hover restates the shorthand - the desk's own a:hover sets
-		# text-decoration, which would reset the style to solid.
-		hover = re.search(r"\.taxjar-nexus-count:hover \{([^}]+)\}", css).group(1)
-		self.assertIn("underline dotted", hover)
+		rule = re.search(r"\.taxjar-nexus-count \{([^}]+)\}", css, re.S).group(1)
+		self.assertIn("repeating-linear-gradient", rule)
+		self.assertIn("background-size: 100% 1px", rule)
+		self.assertIn("--taxjar-count-rule: var(--outline-gray-3)", rule)
+		# Vertical padding moves the background clear of the descenders
+		# without moving the text.
+		self.assertIn("padding-bottom", rule)
+		# The desk's own a:hover sets text-decoration, which would draw a
+		# second line under this one. Both rules turn it off.
+		self.assertIn("text-decoration: none", rule)
+		hover = re.search(r"\.taxjar-nexus-count:hover \{([^}]+)\}", css, re.S).group(1)
+		self.assertIn("--taxjar-count-rule: var(--ink-gray-6)", hover)
+		self.assertIn("text-decoration: none", hover)
 
 	def test_the_category_count_is_drawn_at_the_size_the_design_asks_for(self):
 		"""26px, which the desk type scale names --text-5xl. The earlier

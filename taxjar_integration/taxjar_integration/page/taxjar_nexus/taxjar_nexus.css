@@ -78,21 +78,40 @@
 	font-family: var(--font-stack-mono, Menlo, Monaco, Consolas, "Courier New", monospace);
 }
 
-/* 5. The count and its label are one link, so one dotted underline runs under
-      the whole phrase. The utilities carry no decoration classes.
+/* 5. The count and its label are one link, so one dotted rule runs under the
+      whole phrase. The utilities carry no decoration classes.
 
       Dotted, and the two halves keep their own ink: a solid underline in the
       desk's link blue would pull a 26px number out of the card it sits in, and
-      the link is the whole point of the card, not an aside inside it. */
+      the link is the whole point of the card, not an aside inside it.
+
+      The rule is a background, not text-decoration: underline. The phrase sets
+      a 26px number and base-size words on one baseline, and the browser paints
+      a text decoration once per inline box - so the dots restarted at the join
+      and the first of them came out long. A background paints once for the
+      whole anchor, so one pattern spans the phrase however the sizes change.
+
+      Vertical padding on an inline box moves the background down without
+      moving the text or the line it sits on, which is what puts the rule clear
+      of the descenders. text-decoration: none in both rules, because the desk's
+      own a:hover would otherwise add a second line under the first. */
 .taxjar-nexus-count {
-	text-decoration: underline dotted var(--outline-gray-3);
-	text-underline-offset: 4px;
+	--taxjar-count-rule: var(--outline-gray-3);
+	text-decoration: none;
+	background-image: repeating-linear-gradient(
+		to right,
+		var(--taxjar-count-rule) 0 1px,
+		transparent 1px 3px
+	);
+	background-size: 100% 1px;
+	background-repeat: no-repeat;
+	background-position: left bottom;
+	padding-bottom: 2px;
 }
 
-/* The shorthand again, not just the colour: the desk's own a:hover sets
-   text-decoration, which would reset the style to solid. */
 .taxjar-nexus-count:hover {
-	text-decoration: underline dotted var(--ink-gray-6);
+	--taxjar-count-rule: var(--ink-gray-6);
+	text-decoration: none;
 }
 
 /* The icon-only sync button has no loading_label span, so the framework's own
