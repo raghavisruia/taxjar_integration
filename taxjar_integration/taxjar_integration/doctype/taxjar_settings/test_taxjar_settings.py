@@ -5958,46 +5958,58 @@ class TestDeskPageChromeJS(UnitTestCase):
 				tabs_block = js.split("new frappe.ui.Tabs({")[1].split("});")[0]
 				self.assertIn("this.tab_content_wrappers[tab.name] = $wrapper", tabs_block)
 
+	# The three controls that act on what the reader ticked. All of them are
+	# disabled the same way, so all of them explain themselves the same way.
+	SELECTION_CONTROLS = ("bulk_action_button", "action_button", "export_button")
+
 	def test_bulk_action_is_disabled_not_hidden(self):
 		"""A control that disappears teaches nothing. Disabled it explains
-		itself - and via data-disabled + title rather than pointer-events,
-		which would suppress the very tooltip doing the explaining. Underneath,
-		this is now frappe.ui.dropdown (the Espresso replacement for bootstrap's
-		data-toggle="dropdown") rather than a hand-rolled .btn-group, so the
-		disabled look targets the button's own es-button class, not a
-		Bootstrap .dropdown-toggle that no longer exists."""
+		itself - and via data-disabled rather than pointer-events or the native
+		disabled attribute, either of which would suppress the very bubble doing
+		the explaining. Underneath, the menu is frappe.ui.dropdown (the Espresso
+		replacement for bootstrap's data-toggle="dropdown") rather than a
+		hand-rolled .btn-group, so the disabled look targets the button's own
+		es-button class, not a Bootstrap .dropdown-toggle that no longer
+		exists."""
 		button = self._read_component("bulk_action_button")
-		self.assertIn('"data-disabled"', button)
-		self.assertIn("title: this.disabled_title", button)
-		self.assertIn("Select one or more records to run an action", button)
 		self.assertIn("new frappe.ui.Dropdown({", button)
 		self.assertNotIn("dropdown-toggle", button)
 		self.assertNotIn("btn-group", button)
+		self.assertIn("Select one or more records to run an action", button)
+		self.assertIn(
+			"Select one or more records to run an action",
+			self._read_component("action_button"),
+		)
 
-		# The single-action button is disabled the same way, so the two controls
-		# behave alike on a tab that offers one action and on one that offers
-		# three. It states the reason in the Espresso tooltip rather than the
-		# browser's native title: the desk's own bubble, on focus as well as
-		# hover, and announced through aria-describedby.
-		single = self._read_component("action_button")
-		self.assertIn('"data-disabled"', single)
-		self.assertIn("Select one or more records to run an action", single)
-		self.assertNotIn("disabled: true", single)
-		self.assertIn("new frappe.ui.Tooltip(", single)
-		self.assertIn("this.tooltip?.set_text(disabled ? this.disabled_title", single)
-		# No native title anywhere: two bubbles for one button is one too many.
-		self.assertNotIn("title: this.disabled_title", single)
-		self.assertNotIn('removeAttr("title")', single)
+		for name in self.SELECTION_CONTROLS:
+			with self.subTest(component=name):
+				source = self._read_component(name)
+				self.assertIn('"data-disabled"', source)
+				self.assertNotIn("disabled: true", source)
+				# The desk's own bubble, not the browser's native title: it
+				# reads in the desk's type, it opens on keyboard focus as well
+				# as hover, and aria-describedby names the control while it is
+				# open.
+				self.assertIn("new frappe.ui.Tooltip(", source)
+				self.assertIn("this.tooltip?.set_text(", source)
+				# No native title as well. Two bubbles for one button is one
+				# too many.
+				self.assertNotIn("title: this.disabled_title", source)
+				self.assertNotIn("title: reason", source)
+				self.assertNotIn('removeAttr("title")', source)
 
 	def test_a_blocked_press_still_shows_the_reason(self):
 		"""The tooltip hides itself on a press, and a press inside its hover
 		delay cancels it before it shows - so a reader who clicks a disabled
-		button would learn nothing. The click guard shows it again."""
-		single = self._read_component("action_button")
-		guard = single.split('addEventListener("click"')[1].split("}, true);")[0]
-		self.assertIn("e.stopImmediatePropagation();", guard)
-		self.assertIn("this.tooltip?.show();", guard)
+		control would learn nothing. The click guard shows it again."""
+		for name in self.SELECTION_CONTROLS:
+			with self.subTest(component=name):
+				source = self._read_component(name)
+				self.assertIn("e.stopImmediatePropagation();", source)
+				self.assertIn("this.tooltip?.show();", source)
 
+	def test_the_disabled_look_survives_the_pointer(self):
+		"""pointer-events: none would take the hover the bubble listens on."""
 		import os
 		scss_path = os.path.normpath(os.path.join(
 			os.path.dirname(__file__), "..", "..", "..",
@@ -6353,6 +6365,20 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		# only when the selection contains rows worth resending - Failed, and
 		# Queued, which is the status a stranded customer sits at.
 		self.assertIn('resyncable.length', bulk_fn)
+
+	def test_the_configure_pencil_names_itself_in_the_desk_bubble(self):
+		"""The cell button carries an icon and no text, so the name lives in
+		aria-label and the bubble is the desk's own - on keyboard focus as well
+		as on hover, which the browser's native title never gives."""
+		js = self._js()
+		cell = js.split("render_regions_cell(row) {")[1].split("\n\t}\n")[0]
+		self.assertIn('aria-label="${__("Configure exemption")}"', cell)
+		self.assertNotIn("title=", cell)
+
+		bind = js.split("bind_configure_tooltips($wrapper) {")[1].split("\n\t}\n")[0]
+		self.assertIn('frappe.ui.tooltip(el, { text: __("Configure exemption") })', bind)
+		# Bound per render: the DataTable builds fresh cells on every refresh.
+		self.assertIn("this.bind_configure_tooltips($table_wrapper)", js)
 
 	def test_clear_exemption_hidden_on_the_not_configured_tab(self):
 		"""It would be a no-op on every row there."""
@@ -8881,6 +8907,15 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		self.assertIn('class="address-box"', summary_fn)
 		self.assertIn("edit-btn", summary_fn)
 		self.assertIn('frappe.utils.icon("pencil", "xs")', summary_fn)
+
+	def test_the_edit_pencil_names_itself_in_the_desk_bubble(self):
+		"""The pencil carries an icon and no text, so the name lives in
+		aria-label and the bubble is the desk's own, not the browser's."""
+		js = self._read_js()
+		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
+		self.assertIn('aria-label="${__("Edit")}"', summary_fn)
+		self.assertNotIn("title=", summary_fn)
+		self.assertIn('frappe.ui.tooltip(el, { text: __("Edit") })', summary_fn)
 
 	def test_exemption_card_body_non_exempt(self):
 		js = self._read_js()

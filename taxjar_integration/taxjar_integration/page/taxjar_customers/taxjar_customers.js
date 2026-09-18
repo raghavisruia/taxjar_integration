@@ -436,10 +436,13 @@ class TaxJarCustomerConfig {
 	// name resolves to nothing and renders blank rather than failing loudly -
 	// which is exactly what "edit", absent from frappe's sprite, did here.
 	render_regions_cell(row) {
+		// aria-label, not title: the name a screen reader reads stays in the
+		// markup, and the bubble the pointer gets is the desk's own, bound in
+		// bind_configure_tooltips().
 		return `<button type="button"
 			class="taxjar-configure-link"
 			data-customer="${frappe.utils.escape_html(row.name)}"
-			title="${__("Configure exemption")}"
+			aria-label="${__("Configure exemption")}"
 			>${frappe.utils.icon("square-pen", "sm")}</button>`;
 	}
 
@@ -465,6 +468,21 @@ class TaxJarCustomerConfig {
 	// The wizard's "quick preview" timings, not the 700ms default: the count is
 	// already on screen and the card only expands it, so waiting most of a
 	// second to read what a "5" means is longer than the answer is worth.
+	// The desk's own bubble rather than the browser's native title: it reads in
+	// the desk's type, and it opens on keyboard focus as well as on hover, so a
+	// reader without a pointer learns what the pencil does.
+	//
+	// Bound per render, for the same reason as the hover cards below: the
+	// DataTable builds fresh cells on every refresh, and the listeners go with
+	// the elements they were bound to.
+	bind_configure_tooltips($wrapper) {
+		if (!frappe.ui.tooltip) return;
+
+		$wrapper.find(".taxjar-configure-link").each((_, el) => {
+			frappe.ui.tooltip(el, { text: __("Configure exemption") });
+		});
+	}
+
 	bind_region_hover_cards($wrapper) {
 		$wrapper.find(".taxjar-regions-trigger").each((_, el) => {
 			const row = this.customers.find((c) => c.name === el.dataset.customer);
@@ -600,6 +618,7 @@ class TaxJarCustomerConfig {
 			this.datatables[key].refresh(this.customers);
 		}
 
+		this.bind_configure_tooltips($table_wrapper);
 		this.bind_region_hover_cards($table_wrapper);
 
 		// Move rather than copy, so the one instance of each - handlers and all

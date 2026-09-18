@@ -89,12 +89,20 @@ function render_exemption_summary(frm) {
 	} else {
 		wrapper.html(`
 			<div class="address-box">
-				<button type="button" class="btn btn-xs btn-default edit-btn taxjar-manage-exemption-btn" title="${__("Edit")}">
+				<button type="button" class="btn btn-xs btn-default edit-btn taxjar-manage-exemption-btn" aria-label="${__("Edit")}">
 					${frappe.utils.icon("pencil", "xs")}
 				</button>
 				${_exemption_card_body(frm)}
 			</div>
 		`);
+	}
+
+	// The pencil carries no label, so it says what it does in the desk's own
+	// bubble rather than the browser's native title. aria-label above keeps the
+	// name a screen reader reads. Bound per render: wrapper.html() above
+	// replaced the button, so the listeners went with the element it replaced.
+	if (frappe.ui.tooltip) {
+		wrapper.find(".edit-btn").each((_, el) => frappe.ui.tooltip(el, { text: __("Edit") }));
 	}
 
 	wrapper

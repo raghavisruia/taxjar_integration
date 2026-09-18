@@ -12,10 +12,11 @@ frappe.provide("taxjar_integration");
 // reader nothing about why. Disabled it explains itself instead: there is
 // nothing to export, or there is too much of it to send in one request.
 //
-// Disabled state is data-disabled + title, NOT the button's native disabled
-// attribute - the latter would also drop it out of the keyboard tab order and
-// suppress the very title that explains why. Same reasoning, and the same
-// capture-phase click guard, as BulkActionButton.
+// Disabled state is data-disabled + an Espresso tooltip, NOT the button's
+// native disabled attribute - the latter would also drop it out of the
+// keyboard tab order, and a disabled button never fires the pointer events the
+// tooltip listens on. Same reasoning, and the same capture-phase click guard,
+// as BulkActionButton.
 taxjar_integration.ExportButton = class ExportButton {
 	// options: $wrapper, method (the dotted path of the export endpoint),
 	// get_args (a function returning { filters, scope } for the open tab).
@@ -38,16 +39,30 @@ taxjar_integration.ExportButton = class ExportButton {
 			})
 			.appendTo(this.$wrapper);
 
+		// The dark Espresso bubble, not the browser's native title: it reads in
+		// the desk's own type, it shows on keyboard focus as well as hover, and
+		// it names the button through aria-describedby while it is open. An
+		// empty text shows nothing, which is the enabled state - see
+		// toggle_disabled(). Looked up at run time, as frappe.ui.button does
+		// with the same component: a bundle without it still gets a button.
+		if (frappe.ui.Tooltip) {
+			this.tooltip = new frappe.ui.Tooltip(this.$button[0], { text: "" });
+		}
+
 		// Runs before the click handler frappe.ui.button binds, which only fires
 		// in the bubble phase - a capture-phase listener on the same element
 		// always runs first.
 		this.$button[0].addEventListener(
 			"click",
 			(e) => {
-				if (this.is_disabled()) {
-					e.preventDefault();
-					e.stopImmediatePropagation();
-				}
+				if (!this.is_disabled()) return;
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				// The press is the moment the reader most needs the reason, and
+				// it is the moment the tooltip hides itself: the component
+				// treats a press as the label having done its job, and a press
+				// inside the 500ms hover delay cancels the bubble.
+				this.tooltip?.show();
 			},
 			true
 		);
@@ -70,13 +85,11 @@ taxjar_integration.ExportButton = class ExportButton {
 
 	toggle_disabled() {
 		const reason = this.blocked_reason();
+		this.tooltip?.set_text(reason);
 		if (reason) {
-			this.$button.attr({ "data-disabled": "", "aria-disabled": "true", title: reason });
+			this.$button.attr({ "data-disabled": "", "aria-disabled": "true" });
 		} else {
-			this.$button
-				.removeAttr("data-disabled")
-				.removeAttr("aria-disabled")
-				.removeAttr("title");
+			this.$button.removeAttr("data-disabled").removeAttr("aria-disabled");
 		}
 	}
 
