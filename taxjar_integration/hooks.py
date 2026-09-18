@@ -15,7 +15,9 @@ add_to_apps_screen = [
 	{
 		"name": app_name,
 		"logo": app_logo_url,
-		"title": "TaxJar Integration",
+		# The desk tile and the sidebar header show this title, not `app_title`.
+		# The short brand fits the tile without truncation.
+		"title": "TaxJar",
 		"route": app_home,
 	}
 ]

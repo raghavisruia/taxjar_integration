@@ -10498,7 +10498,7 @@ class TestWorkspaceBranding(UnitTestCase):
 
 	def test_apps_screen_title_branded(self):
 		from taxjar_integration import hooks
-		self.assertEqual(hooks.add_to_apps_screen[0]["title"], "TaxJar Integration")
+		self.assertEqual(hooks.add_to_apps_screen[0]["title"], "TaxJar")
 
 
 # ── Tax Breakdown: helpers ──────────────────────────────────────────────────
