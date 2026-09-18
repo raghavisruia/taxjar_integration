@@ -1,6 +1,6 @@
 frappe.provide("taxjar_integration");
 
-// The "Export to Excel" button that sits beside the tab's bulk action.
+// The "Export" button that sits beside the tab's bulk action.
 //
 // It sends the tab's own filters and scope to a page endpoint that answers with
 // a file, so the sheet holds every row the tab holds - not the one page of rows
@@ -21,7 +21,7 @@ taxjar_integration.ExportButton = class ExportButton {
 	// get_args (a function returning { filters, scope } for the open tab).
 	constructor(options) {
 		Object.assign(this, options);
-		this.label = this.label || __("Export to Excel");
+		this.label = this.label || __("Export");
 		this.total = 0;
 		this.limit = 0;
 		this.render();
@@ -31,7 +31,7 @@ taxjar_integration.ExportButton = class ExportButton {
 		this.$button = frappe.ui
 			.button({
 				label: this.label,
-				icon: "download",
+				icon: "share",
 				variant: "outline",
 				css_class: "taxjar-export",
 				onclick: () => this.download(),
