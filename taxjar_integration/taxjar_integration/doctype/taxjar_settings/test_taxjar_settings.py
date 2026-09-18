@@ -6500,10 +6500,14 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		js = self._js()
 		cell_fn = js.split("render_sync_status_cell(row) {")[1].split("\n\t}\n")[0]
 		self.assertIn('status !== "Failed"', cell_fn)
-		self.assertIn("taxjar-sync-icon", cell_fn)
-		self.assertIn("taxjar-sync-trigger", cell_fn)
-		self.assertIn('frappe.utils.icon("info", "sm")', cell_fn)
+		self.assertIn("this.sync_info_icon(", cell_fn)
 		self.assertIn("row.taxjar_customer_sync_error", cell_fn)
+
+		# The markup itself now lives in one helper, shared with a stalled row.
+		icon_fn = js.split("sync_info_icon(info_text) {")[1].split("\n\t}\n")[0]
+		self.assertIn("taxjar-sync-icon", icon_fn)
+		self.assertIn("taxjar-sync-trigger", icon_fn)
+		self.assertIn('frappe.utils.icon("info", "sm")', icon_fn)
 
 	def test_sync_popover_bound_and_torn_down(self):
 		js = self._js()
@@ -18910,3 +18914,142 @@ class TestReleaseReadTransaction(UnitTestCase):
 
 	def test_a_web_request_does_not(self):
 		self._run(job=None).assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A queue the row never left, said on screen
+#
+# recover_stuck_customer_syncs() is a scheduled job, so it needs a worker to run
+# it - and the failure it exists to recover from is one that takes the worker
+# with it. A half-applied framework update on this bench left the worker unable
+# to open a database connection at all: every sync job died, and so did the cron
+# that would have rescued the rows they left behind. The page went on showing
+# "Queued" in calm blue for hours.
+#
+# So the same question is also answered on read, by the request the browser
+# makes, where no queue is involved.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCustomerSyncStalledFlag(UnitTestCase):
+
+	def _stalled(self, status, queued_at, cutoff="2026-01-01 12:00:00"):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			_is_sync_stalled,
+		)
+		row = {
+			"taxjar_customer_sync_status": status,
+			"taxjar_customer_sync_queued_at": queued_at,
+		}
+		return _is_sync_stalled(row, cutoff)
+
+	def test_a_row_queued_before_the_cutoff_is_stalled(self):
+		self.assertTrue(self._stalled("Queued", "2026-01-01 10:00:00"))
+
+	def test_a_row_queued_just_now_is_not(self):
+		"""A sync takes about a second. Calling that stalled would paint every
+		healthy queue orange. The cutoff is already fifteen minutes in the past,
+		so "just now" sits after it, not before.
+		"""
+		self.assertFalse(self._stalled("Queued", "2026-01-01 12:14:30"))
+
+	def test_a_row_with_no_timestamp_is_stalled(self):
+		"""Queued before that field existed. There is nothing to judge, and it
+		has certainly waited longer than the cutoff."""
+		self.assertTrue(self._stalled("Queued", None))
+
+	def test_only_queued_rows_can_stall(self):
+		"""Failed already says what is wrong, and Synced is finished. Neither
+		is waiting on anything, whatever timestamp it happens to carry."""
+		for status in ("Synced", "Failed", "", None):
+			with self.subTest(status=status):
+				self.assertFalse(self._stalled(status, "2026-01-01 10:00:00"))
+
+	def test_a_datetime_timestamp_compares_the_same_as_a_string(self):
+		"""frappe.get_list hands back datetime objects, the cutoff arrives from
+		add_to_date. Both are normalised before they are compared."""
+		import datetime
+		self.assertTrue(self._stalled("Queued", datetime.datetime(2026, 1, 1, 10, 0, 0)))
+		self.assertFalse(self._stalled("Queued", datetime.datetime(2026, 1, 1, 12, 14, 30)))
+
+
+class TestFetchCustomersCarriesTheStalledFlag(UnitTestCase):
+
+	def _fetch(self, rows):
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			_fetch_customers,
+		)
+		with patch(f"{_TJ_PAGE}.frappe.get_list", return_value=rows) as mock_list, \
+		     patch(f"{_TJ_PAGE}.frappe.get_all", return_value=[]):
+			out = _fetch_customers({}, 0, 20)
+		return out, mock_list
+
+	def test_the_timestamp_the_flag_needs_is_selected(self):
+		"""Derived from taxjar_customer_sync_queued_at, so the query has to ask
+		for it - the column was not in the list before."""
+		_out, mock_list = self._fetch([])
+		self.assertIn("taxjar_customer_sync_queued_at", mock_list.call_args[1]["fields"])
+
+	def test_every_row_carries_the_flag(self):
+		rows = [
+			{"name": "CUST-001", "taxjar_customer_sync_status": "Queued",
+			 "taxjar_customer_sync_queued_at": None},
+			{"name": "CUST-002", "taxjar_customer_sync_status": "Synced",
+			 "taxjar_customer_sync_queued_at": None},
+		]
+		out, _list = self._fetch(rows)
+		self.assertEqual([r["taxjar_sync_stalled"] for r in out], [True, False])
+
+	def test_a_row_queued_this_second_is_not_reported_as_stalled(self):
+		"""Guards the cutoff arithmetic itself: a sign error here would paint
+		every healthy queue orange."""
+		rows = [{"name": "CUST-001", "taxjar_customer_sync_status": "Queued",
+		         "taxjar_customer_sync_queued_at": frappe.utils.now()}]
+		out, _list = self._fetch(rows)
+		self.assertFalse(out[0]["taxjar_sync_stalled"])
+
+	def test_a_row_queued_an_hour_ago_is(self):
+		rows = [{"name": "CUST-001", "taxjar_customer_sync_status": "Queued",
+		         "taxjar_customer_sync_queued_at": frappe.utils.add_to_date(
+		             frappe.utils.now(), minutes=-60)}]
+		out, _list = self._fetch(rows)
+		self.assertTrue(out[0]["taxjar_sync_stalled"])
+
+
+class TestCustomersPageShowsAStalledRow(UnitTestCase):
+
+	def _js(self):
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_customers", "taxjar_customers.js"
+		))
+		with open(path) as f:
+			return f.read()
+
+	def _cell_fn(self):
+		return self._js().split("render_sync_status_cell(row) {")[1].split("\n\t}\n")[0]
+
+	def test_a_stalled_row_is_not_shown_as_an_ordinary_queue(self):
+		cell = self._cell_fn()
+		self.assertIn("row.taxjar_sync_stalled", cell)
+		self.assertIn('__("Not Sent")', cell)
+
+	def test_it_is_orange_not_the_calm_blue_of_a_healthy_queue(self):
+		cell = self._cell_fn()
+		self.assertIn('theme: "orange"', cell)
+
+	def test_the_stalled_check_comes_before_the_plain_pill(self):
+		"""Otherwise a stalled row returns early as "Queued" and the branch
+		below it is dead code."""
+		cell = self._cell_fn()
+		self.assertLess(cell.index("taxjar_sync_stalled"), cell.index("const pill"))
+
+	def test_it_says_what_to_do_about_it(self):
+		cell = self._cell_fn()
+		self.assertIn("Resync with TaxJar", cell)
+
+	def test_failed_and_stalled_share_one_info_icon(self):
+		"""One definition, so the two read the same way."""
+		js = self._js()
+		self.assertIn("sync_info_icon(info_text) {", js)
+		self.assertEqual(js.count("class=\"taxjar-sync-icon taxjar-sync-trigger\""), 1)

@@ -532,14 +532,33 @@ class TaxJarCustomerConfig {
 		// than an empty cell, same as the TaxJar Customer ID column above.
 		if (!color) return frappe.ui.badge.html({ label: __("NA"), theme: "gray" });
 
+		// A queue this row never left. The server decides this (see
+		// _is_sync_stalled) because only it knows how long the row has waited.
+		// Said in orange with its own reason, rather than in the same calm blue
+		// as a sync that started a second ago: the page used to show the two
+		// identically, so a worker that had stopped running jobs altogether
+		// looked exactly like one that was busy.
+		if (row.taxjar_sync_stalled) {
+			return `${frappe.ui.badge.html({ label: __("Not Sent"), theme: "orange" })}${this.sync_info_icon(
+				__(
+					"This customer has been waiting far longer than a sync takes, so the job that would have sent it is not running. Select the row and choose Resync with TaxJar."
+				)
+			)}`;
+		}
+
 		const pill = frappe.ui.badge.html({ label: __(status), theme: color });
 		if (status !== "Failed") return pill;
 
-		const info_text = row.taxjar_customer_sync_error || __("Unknown error");
-		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
+		return `${pill}${this.sync_info_icon(row.taxjar_customer_sync_error || __("Unknown error"))}`;
+	}
+
+	// The icon is always a sibling of the pill, never nested inside it - the
+	// pill names the state, the icon carries the reason. Shared by Failed and
+	// by a stalled row, so both read the same way.
+	sync_info_icon(info_text) {
+		return `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
 			info_text
 		)}">${frappe.utils.icon("info", "sm")}</button>`;
-		return `${pill}${icon}`;
 	}
 
 	// Delegated once per table (rather than rebound on every render) so it

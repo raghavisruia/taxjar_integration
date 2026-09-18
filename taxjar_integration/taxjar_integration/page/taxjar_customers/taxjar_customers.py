@@ -12,6 +12,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	permitted_count,
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import (
+	TAXJAR_QUEUED_STUCK_MINUTES,
 	_customer_sync_companies,
 	_customer_sync_status_fields,
 	_enqueue_customer_sync,
@@ -145,6 +146,7 @@ def _fetch_customers(conditions, start, page_size):
 			"name", "customer_name", "customer_group",
 			"taxjar_exemption_type", "taxjar_customer_id",
 			"taxjar_customer_sync_status", "taxjar_customer_sync_error",
+			"taxjar_customer_sync_queued_at",
 		],
 		order_by="customer_name asc",
 		start=start,
@@ -175,12 +177,44 @@ def _fetch_customers(conditions, start, page_size):
 				{"country": row["country"], "state": row["state"]}
 			)
 
+	stalled_before = frappe.utils.add_to_date(
+		frappe.utils.now(), minutes=-TAXJAR_QUEUED_STUCK_MINUTES
+	)
+
 	for c in customers:
 		regions = regions_by_customer.get(c["name"], [])
 		c["exempt_regions"] = regions
 		c["exempt_region_count"] = len(regions)
+		c["taxjar_sync_stalled"] = _is_sync_stalled(c, stalled_before)
 
 	return customers
+
+
+def _is_sync_stalled(customer, stalled_before):
+	"""Whether this customer has waited far longer than a sync takes.
+
+	"Queued" is a promise that a job is coming, and this page used to keep
+	showing it in calm blue long after that stopped being true. A worker that
+	cannot start takes every job with it - a half-applied framework update is
+	enough, and one on this bench did exactly that - including the job that
+	would have recovered this row. The answer on screen stayed "Queued"
+	indefinitely, with nothing to act on and nothing saying anything was wrong.
+
+	Worked out on read, by the request the browser makes, rather than stored by
+	a job. That is the whole point: it has to stay true when nothing in the
+	background is running, which is the one condition it exists to report.
+
+	recover_stuck_customer_syncs() asks the same question against the same
+	cutoff and turns the row into a Failed one the retry cron owns. This says
+	the same thing on screen straight away, and without a queue.
+	"""
+	if customer.get("taxjar_customer_sync_status") != "Queued":
+		return False
+
+	queued_at = customer.get("taxjar_customer_sync_queued_at")
+	# A row queued before that field existed has no timestamp to judge, and has
+	# certainly waited longer than the cutoff.
+	return not queued_at or str(queued_at) < str(stalled_before)
 
 
 @frappe.whitelist()
