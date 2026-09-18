@@ -1552,7 +1552,7 @@ taxjar_integration.exclusion_reason_text = function (reason, is_current) {
 		// No "when this document was submitted" past tense here, and no switch
 		// to go and change: where a sale is delivered is a fact about the
 		// document, and it reads the same today as it did at submit.
-		return __("This sale is delivered outside the United States, so TaxJar does not price or file it.");
+		return __("Export transactions aren't synced to TaxJar.");
 	}
 
 	return "";
