@@ -227,11 +227,11 @@ class TaxJarTransactionSync {
 		});
 	}
 
-	// Selection count + Bulk Action + Export. Built detached and moved into the
+	// Selection count + Resync + Export. Built detached and moved into the
 	// active tab's table wrapper by render_table(), so it sits directly above
 	// the rows it acts on and inherits that wrapper's padding.
 	//
-	// The count and Bulk Action are the selection's own controls, so they come
+	// The count and Resync are the selection's own controls, so they come
 	// and go with it - three of the six tabs hold nothing retryable. Export acts
 	// on the whole tab rather than on a selection, so it is on every tab, and it
 	// is rightmost: the row is right-aligned, so the one control that is always
@@ -246,9 +246,9 @@ class TaxJarTransactionSync {
 			this.$selection_actions
 		);
 
-		this.bulk_action = new taxjar_integration.BulkActionButton({
+		this.bulk_action = new taxjar_integration.ActionButton({
 			$wrapper: this.$selection_actions,
-			label: __("Bulk Action"),
+			label: __("Resync"),
 		});
 
 		this.export_button = new taxjar_integration.ExportButton({
@@ -669,29 +669,31 @@ class TaxJarTransactionSync {
 		const retryable = checked.filter((row) => row.taxjar_sync_status === "Failed");
 
 		this.$selection_count.text(checked.length ? __("{0} selected", [checked.length]) : "");
-		this.bulk_action.set_items(
-			retryable.length
-				? [{ label: this.retry_label(retryable.length), action: () => this.bulk_retry(retryable) }]
-				: []
-		);
+
+		// The title first, then the disabled state that reads it - the other
+		// order shows the previous update's title for one update.
 		this.bulk_action.disabled_title = checked.length
 			? __("None of the selected transactions can be resynced")
 			: __("Select one or more records to run an action");
+		this.bulk_action.set_action(() => this.confirm_bulk_retry(retryable));
+		this.bulk_action.toggle_disabled(!retryable.length);
 	}
 
 	tab_offers_selection() {
 		return this.active_tab === FAILED_TAB || this.active_tab === ALL_TAB;
 	}
 
-	// On the Failed tab every ticked row is retryable, so the count would only
-	// repeat the caption beside it. On All Transactions it is the one place the
-	// reader learns that three of their five rows are not going anywhere.
-	retry_label(count) {
-		if (this.active_tab === FAILED_TAB) return __("Resync with TaxJar");
+	// Ticking five rows of which three failed has to say three somewhere before
+	// anything is sent. The caption counts the selection and the button carries
+	// a plain verb, so the dialog is where the reader meets the number the
+	// action will act on - on All Transactions, where the two can differ.
+	confirm_bulk_retry(rows) {
+		const message =
+			rows.length === 1
+				? __("Resync 1 record with TaxJar?")
+				: __("Resync {0} records with TaxJar?", [rows.length]);
 
-		return count === 1
-			? __("Resync 1 failed transaction")
-			: __("Resync {0} failed transactions", [count]);
+		frappe.confirm(message, () => this.bulk_retry(rows));
 	}
 
 	bulk_retry(rows) {

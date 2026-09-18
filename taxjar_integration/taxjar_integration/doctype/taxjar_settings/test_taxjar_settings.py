@@ -5883,9 +5883,25 @@ class TestDeskPageChromeJS(UnitTestCase):
 	def test_pages_use_the_shared_components(self):
 		for page in self.TABBED_PAGES:
 			with self.subTest(page=page):
-				js = self._read_page_js(page)
-				self.assertIn("taxjar_integration.SummaryStrip", js)
-				self.assertIn("taxjar_integration.BulkActionButton", js)
+				self.assertIn("taxjar_integration.SummaryStrip", self._read_page_js(page))
+
+		# Customers offers three bulk actions, so it opens a menu. Transaction
+		# Sync offers one, so it presses a button.
+		self.assertIn("taxjar_integration.BulkActionButton", self._read_page_js("taxjar_customers"))
+		self.assertIn("taxjar_integration.ActionButton", self._read_page_js("taxjar_transactions"))
+
+	def test_both_selection_controls_are_in_the_desk_bundle(self):
+		"""A component the bundle never imports is a component the page never
+		finds."""
+		import os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..",
+			"public", "js", "taxjar_integration.bundle.js",
+		))
+		with open(path) as f:
+			bundle = f.read()
+		self.assertIn('import "./components/bulk_action_button";', bundle)
+		self.assertIn('import "./components/action_button";', bundle)
 
 	def test_transactions_uses_the_data_table(self):
 		"""Only Transaction Sync. The Customer page renders a plain bordered
@@ -5946,6 +5962,30 @@ class TestDeskPageChromeJS(UnitTestCase):
 		self.assertNotIn("dropdown-toggle", button)
 		self.assertNotIn("btn-group", button)
 
+		# The single-action button is disabled the same way, so the two controls
+		# behave alike on a tab that offers one action and on one that offers
+		# three. It states the reason in the Espresso tooltip rather than the
+		# browser's native title: the desk's own bubble, on focus as well as
+		# hover, and announced through aria-describedby.
+		single = self._read_component("action_button")
+		self.assertIn('"data-disabled"', single)
+		self.assertIn("Select one or more records to run an action", single)
+		self.assertNotIn("disabled: true", single)
+		self.assertIn("new frappe.ui.Tooltip(", single)
+		self.assertIn("this.tooltip?.set_text(disabled ? this.disabled_title", single)
+		# No native title anywhere: two bubbles for one button is one too many.
+		self.assertNotIn("title: this.disabled_title", single)
+		self.assertNotIn('removeAttr("title")', single)
+
+	def test_a_blocked_press_still_shows_the_reason(self):
+		"""The tooltip hides itself on a press, and a press inside its hover
+		delay cancels it before it shows - so a reader who clicks a disabled
+		button would learn nothing. The click guard shows it again."""
+		single = self._read_component("action_button")
+		guard = single.split('addEventListener("click"')[1].split("}, true);")[0]
+		self.assertIn("e.stopImmediatePropagation();", guard)
+		self.assertIn("this.tooltip?.show();", guard)
+
 		import os
 		scss_path = os.path.normpath(os.path.join(
 			os.path.dirname(__file__), "..", "..", "..",
@@ -5960,10 +6000,11 @@ class TestDeskPageChromeJS(UnitTestCase):
 		disabled_rule = scss.split(".es-button.taxjar-export[data-disabled] {")[1].split("}")[0]
 		self.assertNotIn("pointer-events", disabled_rule)
 
-	def test_bulk_action_labelled_consistently(self):
-		for page in self.TABBED_PAGES:
-			with self.subTest(page=page):
-				self.assertIn('label: __("Bulk Action")', self._read_page_js(page))
+	def test_bulk_action_labelled_for_what_it_does(self):
+		"""Customers offers three bulk actions, so its trigger names the group.
+		Transaction Sync offers one, so its button names that one action."""
+		self.assertIn('label: __("Bulk Action")', self._read_page_js("taxjar_customers"))
+		self.assertIn('label: __("Resync")', self._read_page_js("taxjar_transactions"))
 
 	def test_tab_click_reload_is_wired_via_on_change(self):
 		"""frappe.ui.Tabs fires its own on_change on every real tab switch - no
@@ -8247,26 +8288,34 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 		js = self._transactions_js()
 		bulk_fn = js.split("update_bulk_state() {")[1].split("\n\t}\n")[0]
 		self.assertIn('taxjar_sync_status === "Failed"', bulk_fn)
-		self.assertIn("this.bulk_retry(retryable)", bulk_fn)
+		self.assertIn("this.confirm_bulk_retry(retryable)", bulk_fn)
 		self.assertIn('__("{0} selected"', bulk_fn)
 		self.assertIn("bulk_retry", js)
+		# Nothing eligible leaves the button disabled, whatever is ticked.
+		self.assertIn("this.bulk_action.toggle_disabled(!retryable.length)", bulk_fn)
 
 	def test_a_selection_says_what_the_action_can_act_on(self):
 		"""Ticking five rows of which two failed has to say two somewhere before
-		the press. The caption counts the selection, so the menu item counts
-		what it will do - on All Transactions, where the two can differ."""
+		anything is sent. The caption counts the selection and the button reads
+		"Resync", so the count lands in the confirmation dialog - on All
+		Transactions, where the two can differ."""
 		js = self._transactions_js()
-		label_fn = js.split("retry_label(count) {")[1].split("\n\t}\n")[0]
-		self.assertIn('__("Resync {0} failed transactions", [count])', label_fn)
-		# "Resync 1 failed transactions" is the bug this guards.
-		self.assertIn('__("Resync 1 failed transaction")', label_fn)
-		# On the Failed tab the count would only repeat the caption beside it.
-		self.assertIn("if (this.active_tab === FAILED_TAB) return", label_fn)
-		self.assertIn('__("Resync with TaxJar")', label_fn)
+		confirm_fn = js.split("confirm_bulk_retry(rows) {")[1].split("\n\t}\n")[0]
+		self.assertIn('__("Resync {0} records with TaxJar?", [rows.length])', confirm_fn)
+		# "Resync 1 records with TaxJar?" is the bug this guards.
+		self.assertIn('__("Resync 1 record with TaxJar?")', confirm_fn)
+
+	def test_a_bulk_resync_is_confirmed_before_it_sends(self):
+		"""The press acts on rows the reader picked one tab away from the
+		result, so the count gets one more look before anything leaves."""
+		js = self._transactions_js()
+		confirm_fn = js.split("confirm_bulk_retry(rows) {")[1].split("\n\t}\n")[0]
+		self.assertIn("frappe.confirm(message, () => this.bulk_retry(rows));", confirm_fn)
 
 	def test_a_selection_with_nothing_eligible_says_so_on_the_button(self):
-		"""An empty menu leaves the button disabled, and a disabled button that
-		explains itself is the only warning the reader gets before pressing."""
+		"""Nothing eligible leaves the button disabled, and a disabled button
+		that explains itself is the only warning the reader gets before
+		pressing."""
 		js = self._transactions_js()
 		bulk_fn = js.split("update_bulk_state() {")[1].split("\n\t}\n")[0]
 		self.assertIn('__("None of the selected transactions can be resynced")', bulk_fn)
