@@ -359,7 +359,7 @@ class TaxJarCustomerConfig {
 				// a word that reads as its own status.
 				_html: (value) =>
 					value
-						? `<span class="taxjar-customer-id">${frappe.utils.escape_html(value)}</span>`
+						? frappe.utils.escape_html(value)
 						: `<span class="text-muted">-</span>`,
 			},
 			{

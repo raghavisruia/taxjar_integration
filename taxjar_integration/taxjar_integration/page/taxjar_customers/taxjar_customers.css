@@ -30,13 +30,6 @@
 	color: var(--text-on-light-gray);
 }
 
-/* An external identifier, not prose - monospace so a mistyped or truncated id
-   is spottable at a glance. */
-.taxjar-customer-id {
-	font-family: var(--font-stack-monospace, monospace);
-	font-size: var(--text-sm);
-}
-
 /* The Configure Exemption dialog's region pickers are frappe.ui.form
    MultiCheck fields now - styled by desk's own control CSS plus
    taxjar_integration._inject_multicheck_column_styles(), not this file. */
