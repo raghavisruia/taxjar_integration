@@ -16540,8 +16540,13 @@ class TestEnqueueDefersToCommit(UnitTestCase):
 		config.taxjar_create_transactions = 0
 		settings.company_config = [config]
 
+		# company_scope() re-reads the master switch itself, so patching
+		# _is_taxjar_enabled alone left this test reading the real site. A site
+		# with TaxJar off then enqueued nothing and the test failed for a reason
+		# it does not test.
 		with patch.object(module, "_has_taxjar_fields_changed", return_value=True), \
 		     patch.object(module, "_is_taxjar_enabled", return_value=True), \
+		     patch.object(module.frappe.db, "get_single_value", return_value=1), \
 		     patch.object(module, "_publish_customer_update"), \
 		     patch.object(module.frappe, "get_single", return_value=settings), \
 		     patch.object(module, "get_region", return_value="United States"), \
