@@ -92,22 +92,40 @@ def _taxjar_response_payload(response):
 	if response is None:
 		return None
 
-	for attr in ("full_response", "__dict__"):
-		value = getattr(response, attr, None)
-		if value:
-			return _safe_json(value)
+	# full_response is what the client attaches to a TaxJarResponseError, and
+	# to_json() is jsonobject's own rendering of a success. Reading __dict__
+	# instead logged jsonobject's internals: the data sat one level down under
+	# "_obj", beside a repr of a private object at a memory address.
+	full_response = getattr(response, "full_response", None)
+	if full_response:
+		return _safe_json(full_response)
+
+	to_json = getattr(response, "to_json", None)
+	if callable(to_json):
+		return _safe_json(to_json())
 
 	return _safe_json(response)
 
 
+@request_cache
+def _taxjar_api_log_exists():
+	"""Whether the log DocType is installed, read once per request.
+
+	The guard covers the window between the app files arriving and migrate
+	creating the DocType. That window does not justify a query on every
+	single log write.
+	"""
+	return bool(frappe.db.exists("DocType", "TaxJar API Log"))
+
+
 def _write_taxjar_ui_log(log_data):
-	if not frappe.db.exists("DocType", "TaxJar API Log"):
+	if not _taxjar_api_log_exists():
 		return
 
 	reference_doctype = (log_data.get("context") or {}).get("doctype")
 	reference_name = (log_data.get("context") or {}).get("name")
 
-	frappe.get_doc(
+	doc = frappe.get_doc(
 		{
 			"doctype": "TaxJar API Log",
 			"action": log_data.get("action"),
@@ -124,9 +142,20 @@ def _write_taxjar_ui_log(log_data):
 			if log_data.get("error") is not None
 			else None,
 		}
+	)
+
+	# Every caller that logs an error raises straight afterwards, and the raise
+	# rolls the request back. A plain insert() goes back with it, so the log
+	# kept every row except the ones worth reading. deferred_insert() queues
+	# the row in redis, which the rollback does not reach, and the scheduler
+	# flushes the queue into the table.
+	if log_data.get("status") == "error":
+		doc.deferred_insert()
+		return
+
 	# ignore_permissions: log writes must succeed regardless of the triggering user's role.
 	# TaxJar API Log is read-restricted to System Manager; this does not grant the user read access.
-	).insert(ignore_permissions=True)
+	doc.insert(ignore_permissions=True)
 
 
 @request_cache
