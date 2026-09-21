@@ -5,7 +5,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "taxjar_integration"
 authors = [
-    {name = "Frappe Technologies Pvt. Ltd.", email = "hello@frappe.io"}
+    {name = "Frappe Technologies Pvt. Ltd.", email = "developers@frappe.io"}
 ]
 dynamic = ["version"]
 description = "TaxJar Integration with ERPNext"
