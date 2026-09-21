@@ -9661,17 +9661,15 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 			}).insert(ignore_permissions=True)
 			# Registered as each row is created, not in a tearDownClass:
 			# doClassCleanups runs even when setUpClass raises afterwards, so a
-			# half-built fixture set still removes itself. setUpClass commits,
-			# so anything it leaves behind is on the site permanently.
+			# half-built fixture set still removes itself. Nothing here commits,
+			# so a run that dies before the cleanup leaves no row behind either.
 			cls.addClassCleanup(cls._drop_fixture, doc.name)
 			cls.fixture_names.append(doc.name)
-		frappe.db.commit()
 
 	@staticmethod
 	def _drop_fixture(docname):
 		frappe.delete_doc("Customer", docname, force=True, ignore_permissions=True,
 		                  ignore_missing=True, delete_permanently=True)
-		frappe.db.commit()
 
 	def _fixture_names(self):
 		"""The docnames of this class's own customers, never the site's."""
