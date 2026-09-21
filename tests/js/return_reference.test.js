@@ -165,6 +165,41 @@ describe("when the dialog stays shut", () => {
 
 		expect(dialogs).toHaveLength(1);
 	});
+
+	// The same two ticks, with the second one arriving before the first has
+	// finished. The scope lookup between the guard and the dialog is a real
+	// wait - the first tick on a form waits for get_company_scope - so the
+	// second tick used to read the guard before the first had set it.
+	it("opens one dialog when the second tick arrives during the scope lookup", async () => {
+		answer_scope(frappe, US_FILE);
+		answer_invoice_reads();
+		const frm = open_credit_note(US_FILE);
+
+		const first = forms["Sales Invoice"].is_return(frm);
+		const second = forms["Sales Invoice"].is_return(frm);
+		await Promise.all([first, second]);
+		await flush();
+		await flush();
+
+		expect(dialogs).toHaveLength(1);
+	});
+
+	// A tick that opens no dialog must leave nothing behind. The guard is taken
+	// before the company is known, so a company TaxJar does not file for has to
+	// give it back - otherwise this form never asks again.
+	it("asks again after a tick on a company it does not file for", async () => {
+		answer_scope(frappe, (args) => (args.company === US_FILE.company ? US_FILE : US_CALC));
+		answer_invoice_reads();
+
+		const frm = open_credit_note(US_CALC);
+		await tick_is_return(frm);
+		expect(dialogs).toHaveLength(0);
+
+		frm.doc.company = US_FILE.company;
+		await tick_is_return(frm);
+
+		expect(dialogs).toHaveLength(1);
+	});
 });
 
 describe("the invoices the picker offers", () => {

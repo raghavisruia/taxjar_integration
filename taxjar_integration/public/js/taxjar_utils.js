@@ -818,25 +818,52 @@ taxjar_integration.prompt_for_return_reference = function (frm) {
 	// one's choice.
 	if (frm._taxjar_return_prompt_open) return;
 
+	// Claimed here, before the scope lookup, rather than where the dialog is
+	// built. The lookup is asynchronous - the first tick on a form waits for
+	// get_company_scope to answer - so a claim made after it leaves the guard
+	// above reading false for every tick that arrives while it runs, and two
+	// dialogs open after all.
+	frm._taxjar_return_prompt_open = true;
+
 	// `files`, not `uses_taxjar`: this is the rule validate_return_against
 	// itself applies. A company that only calculates tax never needs the
 	// reference, so asking for it would collect an answer nothing reads.
-	return taxjar_integration.when_scoped(
-		frm,
-		(scope) => scope.files,
-		() => taxjar_integration._prompt_for_return_reference(frm)
-	);
+	return taxjar_integration
+		.when_scoped(
+			frm,
+			(scope) => scope.files,
+			() => taxjar_integration._prompt_for_return_reference(frm)
+		)
+		.then(
+			(dialog) => {
+				// No dialog opened, so no on_hide will ever release the claim.
+				// A claim left standing would refuse every later tick for the
+				// life of the form - including the ticks on a company the user
+				// then changes to one TaxJar files for.
+				if (!dialog) taxjar_integration.release_return_prompt(frm);
+				return dialog;
+			},
+			(error) => {
+				taxjar_integration.release_return_prompt(frm);
+				throw error;
+			}
+		);
 };
 
-taxjar_integration._prompt_for_return_reference = function (frm) {
-	frm._taxjar_return_prompt_open = true;
+// One name for "this form is no longer asking", so the dialogs and the paths
+// that open none release the claim the same way.
+taxjar_integration.release_return_prompt = function (frm) {
+	frm._taxjar_return_prompt_open = false;
+};
 
+// Returns the dialog it opened. prompt_for_return_reference reads that to tell
+// an open dialog from a path that opened none.
+taxjar_integration._prompt_for_return_reference = function (frm) {
 	// With no customer on the form the list covers the whole company, which is
 	// worth opening the picker for. With one, an empty list is a dead end the
 	// picker cannot show a way out of, so it is asked about first.
 	if (!frm.doc.customer) {
-		taxjar_integration.show_return_reference_dialog(frm);
-		return;
+		return taxjar_integration.show_return_reference_dialog(frm);
 	}
 
 	return frappe.db
@@ -846,10 +873,9 @@ taxjar_integration._prompt_for_return_reference = function (frm) {
 		})
 		.then((count) => {
 			if (count) {
-				taxjar_integration.show_return_reference_dialog(frm);
-				return;
+				return taxjar_integration.show_return_reference_dialog(frm);
 			}
-			taxjar_integration.show_no_returnable_invoice_dialog(frm);
+			return taxjar_integration.show_no_returnable_invoice_dialog(frm);
 		})
 		// The count decides which dialog to open, not whether to open one. A
 		// failed read opens the picker, where the link field asks the server
@@ -1003,7 +1029,7 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 			// Escape and the backdrop reach here too, and they mean the same
 			// thing the Cancel button means.
 			if (!chosen) taxjar_integration.cancel_return_reference(frm);
-			frm._taxjar_return_prompt_open = false;
+			taxjar_integration.release_return_prompt(frm);
 		},
 	});
 
@@ -1037,7 +1063,7 @@ taxjar_integration.show_no_returnable_invoice_dialog = function (frm) {
 		},
 		on_hide() {
 			taxjar_integration.cancel_return_reference(frm);
-			frm._taxjar_return_prompt_open = false;
+			taxjar_integration.release_return_prompt(frm);
 		},
 	});
 
