@@ -9620,6 +9620,63 @@ from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customer
 
 class TestCustomerConfigPageAPI(UnitTestCase):
 
+
+	# Every test below that WRITES works on customers this class creates and
+	# deletes. It used to read whatever customers the site happened to hold and
+	# mutate those, restoring them afterwards - which is how a test run left
+	# real customers sitting at "Queued": bulk_sync_to_taxjar writes that status
+	# and there is nothing to restore it from, so the rows stayed queued for a
+	# job the mocked enqueue never created. A suite must not be able to do that
+	# to the site it runs against.
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+
+		# Patched globally, and before anything is created. Every write below
+		# reaches the queue through _enqueue_customer_sync, and it does so
+		# under two different names: directly from the page module, and again
+		# from the Customer.on_update hook, which lives in a namespace this
+		# module cannot patch. Both land on frappe.enqueue - and because
+		# frappe.flags.in_test is set, enqueue runs the job INLINE instead of
+		# queueing it. Without this the suite talks to the real TaxJar account
+		# on every run, creating and deleting customers in it.
+		patcher = patch("frappe.enqueue")
+		patcher.start()
+		cls.addClassCleanup(patcher.stop)
+
+		# Unique per run. A fixed name lets two runs against one site delete
+		# each other's rows mid-test, and lets a run adopt a leftover from a
+		# crashed one - carrying its stale exemption type and TaxJar id.
+		suffix = frappe.generate_hash(length=6)
+		group = frappe.db.get_value("Customer Group", {"is_group": 0}, "name")
+		territory = frappe.db.get_value("Territory", {"is_group": 0}, "name")
+
+		cls.fixture_names = []
+		for label in ("A", "B"):
+			doc = frappe.get_doc({
+				"doctype": "Customer",
+				"customer_name": f"_TaxJar Page API {label} {suffix}",
+				"customer_group": group,
+				"territory": territory,
+			}).insert(ignore_permissions=True)
+			# Registered as each row is created, not in a tearDownClass:
+			# doClassCleanups runs even when setUpClass raises afterwards, so a
+			# half-built fixture set still removes itself. setUpClass commits,
+			# so anything it leaves behind is on the site permanently.
+			cls.addClassCleanup(cls._drop_fixture, doc.name)
+			cls.fixture_names.append(doc.name)
+		frappe.db.commit()
+
+	@staticmethod
+	def _drop_fixture(docname):
+		frappe.delete_doc("Customer", docname, force=True, ignore_permissions=True,
+		                  ignore_missing=True, delete_permanently=True)
+		frappe.db.commit()
+
+	def _fixture_names(self):
+		"""The docnames of this class's own customers, never the site's."""
+		return list(self.fixture_names)
+
 	def test_get_customers_requires_read_permission(self):
 		"""An unprivileged user must not be able to read customer data."""
 		frappe.set_user("Guest")
@@ -9709,54 +9766,23 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		self.assertEqual(len(result["customers"]), 0)
 
 	def test_configure_exemption_writes_type_and_regions_together(self):
-		"""Type and regions are one decision, so they are one write. Splitting
-		them is what previously let a customer keep exempt regions after its
-		exemption type was cleared."""
-		customers = get_customers()["customers"]
-		if not customers:
-			return
-
-		name = customers[0]["name"]
-		original = customers[0]["taxjar_exemption_type"]
-		# Captured, not just the type: restoring a region-scoped type without
-		# its regions is not a saveable state, so a run where the customer's
-		# real original type requires regions would fail here rather than
-		# leaving it stuck on this test's own "Government"/TX,ON. Same
-		# capture-and-guard as test_clearing_the_type_clears_its_regions.
-		original_regions = get_exempt_regions(name)
+		"""One call sets the type and its regions, so the two cannot disagree."""
+		name = self._fixture_names()[0]
 		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
-		with patch(f"{mod}.frappe.enqueue"):
-			configure_exemption(
-				[name], "Government", [{"country": "US", "state": "TX"}, {"country": "CA", "state": "ON"}]
-			)
+		with patch(f"{mod}._enqueue_customer_sync"):
+			configure_exemption([name], "Wholesale", [{"country": "US", "state": "TX"}])
 
-		self.assertEqual(frappe.db.get_value("Customer", name, "taxjar_exemption_type"), "Government")
-		self.assertEqual({r["state"] for r in get_exempt_regions(name)}, {"TX", "ON"})
-
-		with patch(f"{mod}.frappe.enqueue"):
-			regions = [{"country": r["country"], "state": r["state"]} for r in original_regions]
-			if original not in _EXEMPTION_TYPES_REQUIRING_REGIONS or regions:
-				configure_exemption([name], original or "", regions)
+		self.assertEqual(frappe.db.get_value("Customer", name, "taxjar_exemption_type"), "Wholesale")
+		self.assertEqual([(r["country"], r["state"]) for r in get_exempt_regions(name)], [("US", "TX")])
 
 	def test_clearing_the_type_clears_its_regions(self):
-		"""An exempt region without an exemption type means nothing, so it is
-		dropped rather than orphaned where no screen would ever show it."""
-		customers = get_customers()["customers"]
-		if not customers:
-			return
-
-		name = customers[0]["name"]
-		original = customers[0]["taxjar_exemption_type"]
-		# Captured, not just the type: restoring a region-scoped type without
-		# its regions is not a saveable state, so a run where an earlier test
-		# left this customer region-scoped would fail here rather than in
-		# whatever actually broke. Same capture-and-guard as
-		# test_bulk_clear_exemption and test_configure_exemption_applies_to_many.
-		original_regions = get_exempt_regions(name)
+		"""An exemption region without a type is meaningless, so clearing the
+		type drops the rows rather than orphaning them."""
+		name = self._fixture_names()[0]
 		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
-		with patch(f"{mod}.frappe.enqueue"):
+		with patch(f"{mod}._enqueue_customer_sync"):
 			configure_exemption([name], "Wholesale", [{"country": "US", "state": "TX"}])
 			self.assertEqual(len(get_exempt_regions(name)), 1)
 			# Regions passed alongside an empty type are discarded, not stored.
@@ -9765,75 +9791,54 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		self.assertEqual(frappe.db.get_value("Customer", name, "taxjar_exemption_type"), "")
 		self.assertEqual(get_exempt_regions(name), [])
 
-		with patch(f"{mod}.frappe.enqueue"):
-			regions = [{"country": r["country"], "state": r["state"]} for r in original_regions]
-			if original not in _EXEMPTION_TYPES_REQUIRING_REGIONS or regions:
-				configure_exemption([name], original or "", regions)
-
 	def test_configure_exemption_applies_to_many(self):
-		"""Other is a region-scoped type - at least one region is now mandatory
-		to save it (see _validate_exempt_regions)."""
-		customers = get_customers()["customers"]
-		if len(customers) < 1:
-			return
-
-		names = [c["name"] for c in customers[:2]]
-		originals = {c["name"]: c["taxjar_exemption_type"] for c in customers[:2]}
-		original_regions = {name: get_exempt_regions(name) for name in names}
+		"""Other is a region-scoped type - at least one region is mandatory to
+		save it (see _validate_exempt_regions)."""
+		names = self._fixture_names()
 		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
-		with patch(f"{mod}.frappe.enqueue"):
+		with patch(f"{mod}._enqueue_customer_sync"):
 			result = configure_exemption(names, "Other", [{"country": "US", "state": "TX"}])
 
 		self.assertEqual(result["updated"], len(names))
 		for name in names:
 			self.assertEqual(frappe.db.get_value("Customer", name, "taxjar_exemption_type"), "Other")
 
-		with patch(f"{mod}.frappe.enqueue"):
-			for name, orig in originals.items():
-				regions = [{"country": r["country"], "state": r["state"]} for r in original_regions[name]]
-				# A pre-existing customer already sitting in a state the new
-				# mandatory-region rule forbids (a region-scoped type with no
-				# regions on file) cannot be restored to that exact state -
-				# leaving it cleared is the closest still-valid outcome.
-				if orig in _EXEMPTION_TYPES_REQUIRING_REGIONS and not regions:
-					continue
-				configure_exemption([name], orig or "", regions)
-
 	def test_bulk_clear_exemption(self):
-		"""Wholesale is region-scoped - at least one region is now mandatory to
-		save it (see _validate_exempt_regions)."""
-		customers = get_customers()["customers"]
-		if len(customers) < 1:
-			return
+		"""Wholesale is region-scoped - at least one region is mandatory to save
+		it (see _validate_exempt_regions)."""
+		name = self._fixture_names()[0]
+		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
-		name = customers[0]["name"]
-		original = frappe.db.get_value("Customer", name, "taxjar_exemption_type")
-		original_regions = get_exempt_regions(name)
-
-		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
+		with patch(f"{mod}._enqueue_customer_sync"):
 			configure_exemption([name], "Wholesale", [{"country": "US", "state": "TX"}])
 			result = bulk_clear_exemption([name])
 
 		self.assertEqual(result["updated"], 1)
-		val = frappe.db.get_value("Customer", name, "taxjar_exemption_type")
-		self.assertIn(val, ("", None))
-
-		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue"):
-			regions = [{"country": r["country"], "state": r["state"]} for r in original_regions]
-			# See test_configure_exemption_applies_to_many's identical guard.
-			if original not in _EXEMPTION_TYPES_REQUIRING_REGIONS or regions:
-				configure_exemption([name], original or "", regions)
+		self.assertIn(frappe.db.get_value("Customer", name, "taxjar_exemption_type"), ("", None))
 
 	def test_bulk_sync_to_taxjar(self):
-		customers = get_customers()["customers"]
-		if not customers:
-			return
+		"""Queues the rows it is given, and one job per company for each.
 
-		with patch("taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers.frappe.enqueue") as mock_enqueue:
-			result = bulk_sync_to_taxjar([c["name"] for c in customers])
+		setUpClass already holds frappe.enqueue, so nothing here can reach
+		TaxJar. This second patch is only so the call count can be read.
+		"""
+		names = self._fixture_names()
+		mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
 
-		self.assertIn("queued", result)
+		with patch(f"{mod}._enqueue_customer_sync"):
+			configure_exemption(names, "Wholesale", [{"country": "US", "state": "TX"}])
+
+		with patch(f"{mod}._enqueue_customer_sync") as mock_enqueue, \
+		     patch(f"{mod}._customer_sync_companies", return_value=["Test Co"]):
+			result = bulk_sync_to_taxjar(names)
+
+		self.assertEqual(result["queued"], len(names))
+		self.assertEqual(mock_enqueue.call_count, len(names))
+		for name in names:
+			self.assertEqual(
+				frappe.db.get_value("Customer", name, "taxjar_customer_sync_status"), "Queued"
+			)
 
 	def test_page_json_exists(self):
 		import os
@@ -18642,10 +18647,13 @@ class TestSyncCustomerAlwaysRecordsAnOutcome(UnitTestCase):
 		self.assertEqual(recorded[0]["extra"]["taxjar_customer_id"], "CUST-001")
 		self.assertIn("taxjar_last_synced", recorded[0]["extra"])
 
-	def test_the_read_is_released_before_the_taxjar_call(self):
-		"""The one-second call used to sit inside the transaction that had just
-		read the Customer. Any save committing in that second made the status
-		write below collide (MariaDB 1020) and killed the job."""
+	def test_the_sync_commits_nothing_of_its_own(self):
+		"""The read that builds the payload is held across the TaxJar call, and
+		that is the window MariaDB answers with 1020. Closing it with a commit
+		would be a manual commit inside a framework that owns the transaction:
+		it would leave a failed job's earlier writes behind, and fire every
+		pending after-commit callback early. The retry below clears the 1020
+		instead, which is cheaper and does not reach outside this job."""
 		order = []
 		client = MagicMock()
 		client.update_customer.side_effect = lambda *a, **k: order.append("taxjar") or MagicMock()
@@ -18655,12 +18663,13 @@ class TestSyncCustomerAlwaysRecordsAnOutcome(UnitTestCase):
 		     patch(f"{_TJ}.get_client", return_value=client), \
 		     patch(f"{_TJ}.frappe.get_doc", side_effect=lambda *a, **k: order.append("read") or doc), \
 		     patch(f"{_TJ}.log_taxjar_call"), \
-		     patch(f"{_TJ}._release_read_transaction", side_effect=lambda: order.append("release")), \
+		     patch(f"{_TJ}.frappe.db.commit") as mock_commit, \
 		     patch(f"{_TJ}._set_customer_sync_status", side_effect=lambda *a, **k: order.append("status")):
 			from taxjar_integration.taxjar_integration.taxjar_integration import sync_customer_to_taxjar
 			sync_customer_to_taxjar("CUST-001", company="Test Co")
 
-		self.assertEqual(order, ["read", "release", "taxjar", "status"])
+		self.assertEqual(order, ["read", "taxjar", "status"])
+		mock_commit.assert_not_called()
 
 	def test_a_colliding_status_write_is_retried_and_then_succeeds(self):
 		"""1020 clears on the next attempt, because the retry re-runs against
@@ -19112,55 +19121,6 @@ class TestCustomersPageOffersResyncOnQueued(UnitTestCase):
 		self.assertNotIn("this.retry_failed(failed)", js)
 
 
-class TestReleaseReadTransaction(UnitTestCase):
-	"""Committing the read that built the payload is a background job's business
-	only. The inline Sync button (resync_customer) runs inside a web request
-	whose transaction is not this function's to commit."""
-
-	def _run(self, job):
-		# frappe.local is a werkzeug Local, which mock.patch cannot introspect -
-		# so the flag is set and restored by hand rather than patched.
-		had_job = hasattr(frappe.local, "job")
-		previous = getattr(frappe.local, "job", None)
-		frappe.local.job = job
-		try:
-			with patch(f"{_TJ}.frappe.db.commit") as mock_commit:
-				from taxjar_integration.taxjar_integration.taxjar_integration import (
-					_release_read_transaction,
-				)
-				_release_read_transaction()
-			return mock_commit
-		finally:
-			if had_job:
-				frappe.local.job = previous
-			else:
-				try:
-					del frappe.local.job
-				except AttributeError:
-					pass
-
-	def test_a_background_job_commits_its_read(self):
-		self._run(job=frappe._dict(method="sync_customer_to_taxjar")).assert_called_once()
-
-	def test_a_web_request_does_not(self):
-		self._run(job=None).assert_not_called()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# A queue the row never left, said on screen
-#
-# recover_stuck_customer_syncs() is a scheduled job, so it needs a worker to run
-# it - and the failure it exists to recover from is one that takes the worker
-# with it. A half-applied framework update on this bench left the worker unable
-# to open a database connection at all: every sync job died, and so did the cron
-# that would have rescued the rows they left behind. The page went on showing
-# "Queued" in calm blue for hours.
-#
-# So the same question is also answered on read, by the request the browser
-# makes, where no queue is involved.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class TestCustomerSyncStalledFlag(UnitTestCase):
 
 	def _stalled(self, status, queued_at, cutoff="2026-01-01 12:00:00"):
@@ -19283,3 +19243,100 @@ class TestCustomersPageShowsAStalledRow(UnitTestCase):
 		js = self._js()
 		self.assertIn("sync_info_icon(info_text) {", js)
 		self.assertEqual(js.count("class=\"taxjar-sync-icon taxjar-sync-trigger\""), 1)
+
+
+class TestCustomerStatusWriteIsAlwaysRetried(UnitTestCase):
+	"""Both exits from a customer sync write their outcome after the same
+	one-second TaxJar call, against a row the job read before it. So both meet
+	the same collision, and a write that raises unretried ends the job with the
+	customer still reading "Queued" - the one status nothing recovers on its
+	own."""
+
+	def _collide(self, times):
+		"""A status writer that raises the database's own collision `times`
+		times, then succeeds."""
+		calls = []
+
+		def _write(name, status, **kw):
+			calls.append(status)
+			if len(calls) <= times:
+				raise frappe.exceptions.QueryDeadlockError(
+					1020, "Record has changed since last read in table 'tabcustomer'"
+				)
+
+		return calls, _write
+
+	def test_a_colliding_write_is_retried_until_it_lands(self):
+		calls, writer = self._collide(times=2)
+		with patch(f"{_TJ}._set_customer_sync_status", side_effect=writer), \
+		     patch(f"{_TJ}.frappe.db.rollback") as mock_rollback, \
+		     patch(f"{_TJ}._get_taxjar_logger"):
+			from taxjar_integration.taxjar_integration.taxjar_integration import _write_customer_status
+			self.assertTrue(_write_customer_status("CUST-001", "Failed", error="boom"))
+
+		self.assertEqual(len(calls), 3)
+		# The collision leaves the transaction aborted, so each retry needs a
+		# clean one to run in.
+		self.assertEqual(mock_rollback.call_count, 2)
+
+	def test_it_gives_up_rather_than_raise(self):
+		"""Raising would propagate out of the handler that called it and kill
+		the job, which is what left the row at Queued."""
+		calls, writer = self._collide(times=99)
+		with patch(f"{_TJ}._set_customer_sync_status", side_effect=writer), \
+		     patch(f"{_TJ}.frappe.db.rollback"), \
+		     patch(f"{_TJ}._get_taxjar_logger") as mock_logger:
+			from taxjar_integration.taxjar_integration.taxjar_integration import (
+				TAXJAR_STATUS_WRITE_ATTEMPTS,
+				_write_customer_status,
+			)
+			self.assertFalse(_write_customer_status("CUST-001", "Failed", error="boom"))
+
+		self.assertEqual(len(calls), TAXJAR_STATUS_WRITE_ATTEMPTS)
+		mock_logger.return_value.error.assert_called_once()
+
+	def test_the_failure_path_goes_through_the_retry(self):
+		"""It used to write bare. That write runs precisely when TaxJar is
+		degraded and many rows are being retried at once - the busiest moment
+		for a collision."""
+		import taxjar.exceptions
+
+		err = taxjar.exceptions.TaxJarResponseError(MagicMock())
+		err.full_response = {"status_code": 500, "detail": "boom"}
+
+		with patch(f"{_TJ}.log_taxjar_call"), \
+		     patch(f"{_TJ}._get_taxjar_logger"), \
+		     patch(f"{_TJ}._write_customer_status") as mock_write:
+			from taxjar_integration.taxjar_integration.taxjar_integration import (
+				_record_customer_sync_failure,
+			)
+			_record_customer_sync_failure(err, "sync_customer", {}, {"name": "CUST-001"}, "CUST-001")
+
+		mock_write.assert_called_once()
+		self.assertEqual(mock_write.call_args[0], ("CUST-001", "Failed"))
+
+	def test_the_success_path_goes_through_it_too(self):
+		with patch(f"{_TJ}.log_taxjar_call"), \
+		     patch(f"{_TJ}._write_customer_status", return_value=True) as mock_write:
+			from taxjar_integration.taxjar_integration.taxjar_integration import (
+				_record_customer_sync_success,
+			)
+			_record_customer_sync_success("CUST-001", "CUST-001", {}, {"name": "CUST-001"})
+
+		mock_write.assert_called_once()
+		self.assertEqual(mock_write.call_args[0], ("CUST-001", "Synced"))
+
+	def test_a_sync_taxjar_accepted_still_ends_failed_when_the_write_cannot_land(self):
+		"""TaxJar has the data by now, so a retryable Failed is the cheaper
+		mistake than a status nobody can trust."""
+		recorded = []
+		with patch(f"{_TJ}.log_taxjar_call"), \
+		     patch(f"{_TJ}._write_customer_status",
+		           side_effect=lambda name, status, **kw: recorded.append((status, kw)) or False):
+			from taxjar_integration.taxjar_integration.taxjar_integration import (
+				_record_customer_sync_success,
+			)
+			_record_customer_sync_success("CUST-001", "CUST-001", {}, {"name": "CUST-001"})
+
+		self.assertEqual([r[0] for r in recorded], ["Synced", "Failed"])
+		self.assertTrue(recorded[1][1]["retryable"])

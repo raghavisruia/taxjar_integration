@@ -211,10 +211,60 @@ def check_mock_targets() -> list[str]:
 	return problems
 
 
+# Endpoints that write to a Customer. A test that hands one of these a name it
+# read from the site is mutating whatever that site happens to hold.
+_CUSTOMER_WRITE_ENDPOINTS = (
+	"configure_exemption",
+	"bulk_clear_exemption",
+	"bulk_sync_to_taxjar",
+)
+
+
+def check_tests_do_not_write_to_site_records():
+	"""No test may feed a site read into a Customer write endpoint.
+
+	The suite runs against a real site - the app's own docs name
+	usa-final.localhost - and a Customer written by a test is a Customer the
+	person using that site owns. TestCustomerConfigPageAPI used to read every
+	customer with get_customers() and pass the names to these endpoints. It
+	restored the exemption type afterwards, but bulk_sync_to_taxjar writes
+	"Queued" and there is nothing to restore that from, so every run left real
+	customers queued for a job that never existed - which is exactly the bug
+	people then reported against the app.
+
+	A test that needs a Customer creates its own and deletes it.
+	"""
+	problems = []
+	for path in _py_files(ROOT):
+		if not path.name.startswith("test_"):
+			continue
+		source = path.read_text(encoding="utf-8")
+		lines = source.splitlines()
+		for i, line in enumerate(lines):
+			if 'get_customers()["customers"]' not in line:
+				continue
+			# Look ahead to the end of this test for a write endpoint call.
+			for follow in lines[i : i + 40]:
+				if follow.lstrip().startswith("def test_") and follow is not lines[i]:
+					break
+				for endpoint in _CUSTOMER_WRITE_ENDPOINTS:
+					if f"{endpoint}(" in follow and "def " not in follow:
+						problems.append(
+							f"{_rel(path)}:{i + 1}  a name read from the site is passed to "
+							f"{endpoint}(); create a Customer for the test instead"
+						)
+						break
+				else:
+					continue
+				break
+	return problems
+
+
 CHECKS = (
 	("mock targets still on the code path", check_mock_targets),
 	("frappe.throw() titles", check_throw_titles),
 	("frappe.enqueue() after commit", check_enqueue_after_commit),
+	("tests do not write to site records", check_tests_do_not_write_to_site_records),
 )
 
 

@@ -3235,7 +3235,14 @@ def _record_customer_sync_failure(err, action, payload, ctx, customer_name):
 	log_taxjar_call(action=action, status="error", payload=payload, error=info["log_detail"], context=ctx)
 	if info["kind"] == "unknown":
 		_get_taxjar_logger().error(info["log_detail"])
-	_set_customer_sync_status(customer_name, "Failed", error=info["message"], retryable=info["retryable"])
+	# Through the retry, not bare: this write sits in the same window the
+	# success write does - the row was read before a call that takes a second -
+	# and it runs precisely when TaxJar is degraded and many rows are being
+	# retried at once. Raising here would propagate out of the handler that
+	# called it, kill the job, and leave the customer at "Queued".
+	_write_customer_status(
+		customer_name, "Failed", error=info["message"], retryable=info["retryable"]
+	)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -3292,8 +3299,6 @@ def sync_customer_to_taxjar(customer_name, company=None):
 
 	ctx = {"doctype": "Customer", "name": customer_name, "company": company}
 
-	_release_read_transaction()
-
 	try:
 		if existing_customer_id:
 			response = _update_taxjar_customer(client, safe_id, customer_data, ctx)
@@ -3309,84 +3314,93 @@ def sync_customer_to_taxjar(customer_name, company=None):
 	_record_customer_sync_success(customer_name, safe_id, customer_data, ctx)
 
 
-def _release_read_transaction():
-	"""Close the read that built the payload, before the call that takes a second.
-
-	Holding it open across that call used to make the status write that follows
-	collide with any Customer save committing meanwhile: under REPEATABLE READ,
-	MariaDB answers a write to a row this transaction has already read, and
-	someone else has since changed, with error 1020 - "Record has changed since
-	last read". The job died on it, and because the write sat outside any try,
-	no status was recorded at all. The customer kept "Queued" for good.
-
-	Nothing has been written at this point, so there is nothing to lose by
-	committing, and it also stops the job holding row locks through a network
-	call.
-
-	Only in a background job. The inline path - resync_customer, behind the
-	Customer form's Sync button - runs inside a web request whose transaction is
-	not this function's to commit. That path is covered instead by the retry in
-	_record_customer_sync_success().
-	"""
-	if getattr(frappe.local, "job", None):
-		frappe.db.commit()
+# No commit before the TaxJar call, though the collision that follows is real.
+#
+# Reading the Customer, waiting a second on TaxJar, then writing it back is
+# exactly the window MariaDB answers with error 1020, "Record has changed since
+# last read", when another transaction commits that row meanwhile. Committing
+# the read first would close the window - and it was doing that until this
+# comment replaced it.
+#
+# It is not needed. A rollback and one more attempt clears a 1020 outright,
+# because the retry runs against a read view opened after the change, and
+# _record_customer_sync_success() below already does exactly that. Frappe's own
+# job retry does not cover this: it catches frappe.db.InternalError, and 1020
+# arrives as QueryDeadlockError, which is not one - so the retry below is
+# load-bearing whether or not anything commits here.
+#
+# What a commit costs is worse than the window it closes. It commits the whole
+# transaction, so a job that fails afterwards leaves its earlier writes behind;
+# it fires every pending after-commit callback early, including enqueues the
+# caller has not finished registering; and it is a manual commit inside a
+# framework that owns the transaction boundary, which is why it needed a
+# semgrep suppression to sit here at all.
 
 
 # How many times a sync writes its own result before giving up on it. The
-# collision _release_read_transaction() guards against is narrow
-# but not impossible - a save can still commit inside the few milliseconds the
-# write itself takes - and it clears on the very next attempt, because the
-# retry re-runs against the row as it now stands.
+# collision above is narrow but not rare - the TaxJar call holds the read
+# open for about a second - and it clears on the very next attempt, because
+# the retry runs against the row as it now stands.
 TAXJAR_STATUS_WRITE_ATTEMPTS = 3
+
+
+def _write_customer_status(customer_name, status, **kwargs):
+	"""Write a sync outcome, retrying a write the database refused.
+
+	Every exit from sync_customer_to_taxjar comes through here, success and
+	failure alike. Both are written after the same ~1s TaxJar call, against a
+	row the job read before it - so both meet the same collision, and a write
+	that raises and is not retried ends the job with the customer still reading
+	"Queued". That is the one status nothing recovers on its own: the Customers
+	page offers Resync on a Failed row, and retry_failed_taxjar_customer_syncs()
+	filters on Failed too.
+
+	Returns True once something was recorded, False when even the retries lost.
+	The rollback is what makes the next attempt work: the collision leaves the
+	transaction aborted, and the fresh one reads the row as it now stands.
+	"""
+	last_error = None
+	for attempt in range(TAXJAR_STATUS_WRITE_ATTEMPTS):
+		try:
+			_set_customer_sync_status(customer_name, status, **kwargs)
+			return True
+		except Exception:
+			frappe.db.rollback()
+			last_error = frappe.get_traceback()
+
+	_get_taxjar_logger().error(last_error)
+	return False
 
 
 def _record_customer_sync_success(customer_name, safe_id, customer_data, ctx):
 	"""Write the result of a sync TaxJar has already accepted.
 
-	The point of this function is that it always records something. A write
-	that throws here used to end the job with the customer still reading
-	"Queued", which is the one status nothing recovers: the Customers page
-	offers Resync on a Failed row only, and
-	retry_failed_taxjar_customer_syncs() filters on Failed too. So the row sat
-	there, already synced, claiming to be waiting, for good.
-
-	A failed write is reported as Failed and retryable rather than left alone.
-	TaxJar has the data by now, so the retry is one idempotent PUT of a row
-	that already matches - the cheaper mistake than a status nobody can trust.
+	The point of this function is that it always records something. If even the
+	retries cannot write "Synced", the row is marked Failed and retryable
+	instead of left alone: TaxJar has the data by now, so the retry is one
+	idempotent PUT of a row that already matches - the cheaper mistake than a
+	status nobody can trust.
 	"""
 	extra = {"taxjar_customer_id": safe_id, "taxjar_last_synced": frappe.utils.now()}
-
-	for attempt in range(TAXJAR_STATUS_WRITE_ATTEMPTS):
-		try:
-			_set_customer_sync_status(customer_name, "Synced", extra=extra)
-			return
-		except Exception:
-			# A collision leaves the transaction aborted, so the next attempt -
-			# and the Failed write below - need a clean one to run in.
-			frappe.db.rollback()
-			last_error = frappe.get_traceback()
-			if attempt == TAXJAR_STATUS_WRITE_ATTEMPTS - 1:
-				_get_taxjar_logger().error(last_error)
+	if _write_customer_status(customer_name, "Synced", extra=extra):
+		return
 
 	log_taxjar_call(
 		action="sync_customer",
 		status="error",
 		payload=customer_data,
-		error=f"TaxJar accepted the change but the sync status could not be saved.\n{last_error}",
+		error="TaxJar accepted the change but the sync status could not be saved.",
 		context=ctx,
 	)
-	try:
-		_set_customer_sync_status(
-			customer_name,
-			"Failed",
-			error=_("TaxJar accepted the change, but the sync status could not be saved."),
-			retryable=True,
-		)
-	except Exception:
-		# Both writes are gone. recover_stuck_customer_syncs() is the last
-		# line here: it finds the row still sitting at Queued and hands it to
-		# the retry cron, which is capped at TAXJAR_MAX_SYNC_RETRIES.
-		_get_taxjar_logger().error(frappe.get_traceback())
+	# recover_stuck_customer_syncs() is the last line if this loses too: it
+	# finds the row still sitting at Queued and hands it to the retry cron,
+	# which is capped at TAXJAR_MAX_SYNC_RETRIES.
+	_write_customer_status(
+		customer_name,
+		"Failed",
+		error=_("TaxJar accepted the change, but the sync status could not be saved."),
+		retryable=True,
+	)
 
 
 def _create_taxjar_customer(client, customer_data, ctx):
