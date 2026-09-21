@@ -249,6 +249,9 @@ class TaxJarTransactionSync {
 		this.bulk_action = new taxjar_integration.ActionButton({
 			$wrapper: this.$selection_actions,
 			label: __("Resync"),
+			// The app's own sync mark, the one the Customer form's Sync button
+			// and the settings' fetch controls already carry.
+			icon: "refresh-cw",
 		});
 
 		this.export_button = new taxjar_integration.ExportButton({

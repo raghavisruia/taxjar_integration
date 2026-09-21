@@ -1,13 +1,14 @@
 frappe.provide("taxjar_integration");
 
-// Numbered pagination for the TaxJar desk pages.
+// Pagination for the TaxJar desk pages.
 //
 // The tables render at their natural height with no inner scrollbar, so the
 // page size is what keeps a page to roughly a screenful - hence the size
-// picker sitting next to the page numbers rather than buried in a menu.
+// picker sitting beside the steps rather than buried in a menu.
 //
-// Long ranges collapse to first / neighbours / last with ellipses, so the
-// control stays the same width whether there are 3 pages or 300.
+// One row: the page size on the left, then "Page 2 of 7" and the two steps on
+// the right. The control is the same width at 3 pages and at 300, because the
+// count lives in the words rather than in a row of numbered buttons.
 taxjar_integration.Paginator = class Paginator {
 	constructor(options) {
 		Object.assign(this, options);
@@ -17,7 +18,7 @@ taxjar_integration.Paginator = class Paginator {
 
 	// state: { page, total_pages, page_size }
 	//
-	// Prev / Next are always rendered, disabled at the ends rather than removed
+	// Both steps are always rendered, disabled at the ends rather than removed
 	// - controls that come and go make the row jump and leave you unsure
 	// whether there is more to see or the button simply vanished.
 	render(state) {
@@ -28,80 +29,66 @@ taxjar_integration.Paginator = class Paginator {
 
 		const total_pages = Math.max(state.total_pages || 1, 1);
 
-		// "Page 2 of 7" sits above the controls: where you are, then the means
-		// of moving. The numbered buttons alone say which page is current but
-		// not how many there are once the range collapses behind an ellipsis.
+		// "Page 2 of 7" sits on the same line as the steps, ahead of them:
+		// where you are, then the means of moving. The words carry the count,
+		// so the steps say only which way they go.
 		const $nav = $('<div class="taxjar-paginator-nav"></div>').appendTo(this.$wrapper);
-		$(`<div class="taxjar-paginator-status">${__("Page {0} of {1}", [state.page, total_pages])}</div>`).appendTo(
-			$nav
-		);
+		$('<div class="taxjar-paginator-status"></div>')
+			.text(__("Page {0} of {1}", [state.page, total_pages]))
+			.appendTo($nav);
 
 		const $pages = $('<div class="taxjar-paginator-pages"></div>').appendTo($nav);
 
-		this.add_step($pages, { label: __("Prev"), icon: "chevron-left" }, state.page - 1, state.page <= 1);
-
-		// Numbers only earn their place once there is a choice to make.
-		if (total_pages > 1) {
-			for (const entry of this.get_page_entries(state.page, total_pages)) {
-				if (entry === "…") {
-					$('<span class="taxjar-paginator-gap">…</span>').appendTo($pages);
-					continue;
-				}
-				$pages.append(frappe.ui.button({
-					label: String(entry),
-					variant: entry === state.page ? "solid" : "subtle",
-					onclick: () => entry !== state.page && this.on_page(entry),
-				}));
-			}
-		}
-
+		this.add_step($pages, "chevron-left", __("Previous page"), state.page - 1, state.page <= 1);
 		this.add_step(
 			$pages,
-			{ label: __("Next"), icon_right: "chevron-right" },
+			"chevron-right",
+			__("Next page"),
 			state.page + 1,
 			state.page >= total_pages
 		);
 	}
 
-	// The same segmented group the list view uses for its page length: the
-	// sizes are few and worth comparing at a glance, which a collapsed select
-	// hides. The current size is disabled - picking it again only reloads the
-	// page you are already on.
+	// A segmented group, because the sizes are few and worth comparing at a
+	// glance, which a collapsed select hides.
+	//
+	// frappe.ui.TabButtons, the desk's own component for this - its own
+	// documentation names a page size picker as the case it is for. It was a
+	// bootstrap .btn-group copied out of the list view, with rules in the scss
+	// to make it look like the desk around it; the component carries its rail,
+	// its pill and its dark theme itself.
+	//
+	// It is a radio group: arrow keys move the choice, and the whole group
+	// takes one tab stop. Picking the size that is already on does nothing,
+	// because TabButtons calls on_change only when the value changes - so the
+	// current size no longer has to be disabled to say the same thing.
 	render_size_picker(state) {
-		const $picker = $('<div class="taxjar-paginator-size"></div>').appendTo(this.$wrapper);
-		const $group = $('<div class="btn-group"></div>').appendTo($picker);
-
-		this.page_sizes.forEach((size) => {
-			const current = size === state?.page_size;
-			$(`<button type="button" class="btn btn-default btn-sm btn-paging ${
-				current ? "btn-info" : ""
-			}" data-value="${size}" ${current ? "disabled" : ""}>${size}</button>`).appendTo($group);
+		const picker = new frappe.ui.TabButtons({
+			// Not visible. It is the name a screen reader reads when focus
+			// enters the group, which would otherwise be "radio group" alone.
+			label: __("Rows per page"),
+			options: this.page_sizes.map((size) => ({ label: String(size), value: size })),
+			value: state.page_size,
+			css_class: "taxjar-paginator-size",
+			// Changing the size reshuffles every boundary, so the old page
+			// number is meaningless - the caller resets to 1.
+			on_change: (size) => this.on_page_size(size),
 		});
 
-		// Changing the size reshuffles every boundary, so the old page number
-		// is meaningless - the caller resets to 1.
-		$group.on("click", ".btn-paging", (e) =>
-			this.on_page_size(parseInt($(e.currentTarget).data("value"), 10))
+		picker.$el.appendTo(this.$wrapper);
+	}
+
+	// One step, as an arrow alone. The button carries no text, so `tooltip` is
+	// both the bubble on hover and the name a screen reader reads.
+	add_step($pages, icon, tooltip, page, disabled) {
+		$pages.append(
+			frappe.ui.button({
+				icon,
+				tooltip,
+				variant: "subtle",
+				disabled,
+				onclick: () => this.on_page(page),
+			})
 		);
-	}
-
-	add_step($pages, opts, page, disabled) {
-		$pages.append(frappe.ui.button({
-			...opts, variant: "subtle", disabled,
-			onclick: () => this.on_page(page),
-		}));
-	}
-
-	// First, last, and the current page with a neighbour either side; ellipses
-	// for whatever that skips.
-	get_page_entries(page, total) {
-		const entries = new Set([1, total, page, page - 1, page + 1]);
-		const pages = [...entries].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
-
-		return pages.reduce((out, n, i) => {
-			if (i && n - pages[i - 1] > 1) out.push("…");
-			out.push(n);
-			return out;
-		}, []);
 	}
 };

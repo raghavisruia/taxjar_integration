@@ -13,7 +13,7 @@ frappe.provide("taxjar_integration");
 // tooltip listens on. Same reasoning, and the same capture-phase click guard,
 // as BulkActionButton.
 taxjar_integration.ActionButton = class ActionButton {
-	// options: $wrapper, label, action (run on click), disabled_title.
+	// options: $wrapper, label, icon, action (run on click), disabled_title.
 	constructor(options) {
 		Object.assign(this, options);
 		this.disabled_title = this.disabled_title || __("Select one or more records to run an action");
@@ -24,6 +24,10 @@ taxjar_integration.ActionButton = class ActionButton {
 		this.$button = frappe.ui
 			.button({
 				label: this.label,
+				// The row's other control, Export, carries one. Two buttons of
+				// the same size and variant, one with an icon and one without,
+				// read as two kinds of control rather than as a pair.
+				icon: this.icon,
 				variant: "outline",
 				css_class: "taxjar-bulk-action",
 				onclick: () => this.action?.(),

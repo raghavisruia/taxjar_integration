@@ -323,51 +323,31 @@
 	// rows is set here.
 	padding: 14px 0 0;
 
-	// Mirrors the list view's page-length group so the two read as the same
-	// control - frappe scopes those rules to .list-paging-area, whose top
-	// border we do not want here.
-	.taxjar-paginator-size .btn-group {
-		border: 1px solid var(--border-color);
-		border-radius: var(--radius);
+	// The page size picker is the espresso segmented group (.es-tab-buttons),
+	// which carries its own rail, pill, ink and dark theme. It was a bootstrap
+	// .btn-group copied from the list view, and the rules that made that look
+	// like the desk around it stood here.
 
-		.btn-paging {
-			background-color: var(--control-bg);
-		}
-
-		.btn-paging.btn-info {
-			background-color: var(--bg-color);
-			color: var(--text-color);
-			font-weight: var(--weight-medium);
-
-			&:not(:first-child) {
-				border-left: 1px solid var(--border-color);
-			}
-		}
-	}
-
-	// Where you are, stacked above the means of moving.
+	// One row: the count, then the two steps. It used to stack, with the count
+	// above a row of numbered buttons - the numbers are gone, so the words and
+	// the arrows share a line and the control is half as tall.
 	.taxjar-paginator-nav {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 6px;
+		align-items: center;
+		gap: 12px;
 		margin-left: auto;
 	}
 
 	.taxjar-paginator-status {
 		font-size: var(--text-sm);
 		color: var(--text-muted);
+		white-space: nowrap;
 	}
 
 	.taxjar-paginator-pages {
 		display: flex;
 		align-items: center;
 		gap: 4px;
-	}
-
-	.taxjar-paginator-gap {
-		padding: 0 2px;
-		color: var(--text-muted);
 	}
 }
 
