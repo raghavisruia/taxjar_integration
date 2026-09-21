@@ -18977,7 +18977,6 @@ class TestSyncCustomerAlwaysRecordsAnOutcome(UnitTestCase):
 		     patch(f"{_TJ}.get_client", return_value=mock_client), \
 		     patch(f"{_TJ}.frappe.get_doc", return_value=doc or self._customer_doc()), \
 		     patch(f"{_TJ}.log_taxjar_call") as mock_log, \
-		     patch(f"{_TJ}.frappe.db.commit"), \
 		     patch(f"{_TJ}.frappe.db.rollback") as mock_rollback, \
 		     patch(f"{_TJ}._get_taxjar_logger"), \
 		     patch(f"{_TJ}._set_customer_sync_status", side_effect=_status):
