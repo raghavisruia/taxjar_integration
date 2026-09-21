@@ -2598,12 +2598,14 @@ class TestNexusPage(UnitTestCase):
 		for pointer_only in ("mouseenter", "mouseover", "mouseleave", ":hover"):
 			self.assertNotIn(pointer_only, js)
 
-	def test_the_hidden_count_reads_as_english_at_one(self):
-		""""+1 regions" is the bug this guards."""
+	def test_the_hidden_count_says_more_as_the_customer_form_does(self):
+		"""One wording for the one control, on this page and on the Customer
+		form. "more" also reads at a count of one, which "+1 regions" did
+		not."""
 		js = self._read("taxjar_nexus.js")
-		fn = js.split("_hidden_label(hidden) {")[1].split("\n\t}")[0]
-		self.assertIn('__("+1 region")', fn)
-		self.assertIn('__("+{0} regions", [hidden])', fn)
+		fn = js.split("_render_chips($chips, regions, open) {")[1].split("\n\t}")[0]
+		self.assertIn('__("+{0} more", [hidden])', fn)
+		self.assertNotIn("regions\", [hidden])", fn)
 
 	def test_the_open_state_is_not_carried_across_a_sync(self):
 		"""render() rebuilds the whole body, so an open card cannot survive it.

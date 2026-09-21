@@ -64,6 +64,71 @@
 	gap: 7px;
 }
 
+/* The line the control sits on: a flex item as wide as the row, so the chips
+   above it break before it and it takes the whole line. The control inside
+   keeps its own width. */
+.taxjar-nexus-more-line {
+	flex-basis: 100%;
+}
+
+/* The control that closes the row, as words rather than as a shape: the
+   espresso button (.es-button, xs, ghost) with its box taken off, at the
+   chip's type size and the chip's ink, with the dotted rule under it that the
+   count in 5 below already draws. The chips are the data and this is the one
+   action among them, so it carries no pill and no icon - a pill read as one
+   more region, and a chevron beside two words said what the words say.
+
+   The ink is the deepening: grey at rest, the chip's own step, so the action
+   sits with the regions it counts rather than over them. Then a step deeper
+   on hover, on the words and on the rule together, which is what answers the
+   pointer. The button's own hover fill would put the box back, so it goes.
+   The focus ring stays, and it is what answers a keyboard. */
+.taxjar-nexus-more.es-button {
+	height: auto;
+	/* The padding holds the ring clear of the words.
+
+	   The words then start where the words in the chips above them start: the
+	   chip's own 11px of padding, less this button's 4px. Set against the
+	   pill's outer edge instead, the control lined up with the company name
+	   above the list and read as a line under it, rather than as the end of
+	   the list itself. A pill is a shape, but this control is words, and words
+	   line up with words. */
+	padding: 2px 4px;
+	margin-inline-start: 7px;
+	color: var(--ink-gray-6);
+	/* The button's own two fills, set to nothing: a fill on hover or on press
+	   would put the box back around the words. The ink below is what answers
+	   the pointer instead, and the focus ring is what answers a keyboard. */
+	--bt-fill-bg-hover: transparent;
+	--bt-fill-bg-active: transparent;
+}
+
+.taxjar-nexus-more.es-button:hover {
+	color: var(--ink-gray-8);
+}
+
+/* The rule sits on the label rather than on the button, so it runs under the
+   words and not under the padding around them. See 5 below for why the pattern
+   is a background and not text-decoration. */
+.taxjar-nexus-more.es-button .es-button__label {
+	/* One step under the words, not the lighter step an edge takes: the rule
+	   is what says the words can be pressed, so it has to read at 13px. */
+	--taxjar-more-rule: var(--ink-gray-5);
+	background-image: repeating-linear-gradient(
+		to right,
+		var(--taxjar-more-rule) 0 1px,
+		transparent 1px 3px
+	);
+	background-size: 100% 1px;
+	background-repeat: no-repeat;
+	background-position: left bottom;
+	padding-bottom: 2px;
+}
+
+.taxjar-nexus-more.es-button:hover .es-button__label {
+	--taxjar-more-rule: var(--ink-gray-8);
+}
+
 /* 4. A region code is set in a mono face, so a two letter code reads as a code
       and not as a short word - as the wizard's .ts-pillcode does.
 

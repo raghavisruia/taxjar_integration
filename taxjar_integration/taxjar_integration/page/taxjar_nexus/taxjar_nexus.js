@@ -322,19 +322,35 @@ class TaxJarNexusSummary {
 
 		if (!hidden && !open) return;
 
-		$chips.append(
+		// On a line of its own, under the chips, whether or not the last chip
+		// row had room for it. Sharing a row, it sat one gap past a pill and
+		// read as a region that had lost its own pill; on its own line it reads
+		// as the end of the list. The line is a full-width flex item, so the
+		// row breaks before it and the control keeps its own width inside it.
+		$('<div class="taxjar-nexus-more-line"></div>').appendTo($chips).append(
 			frappe.ui.button({
-				label: hidden ? this._hidden_label(hidden) : __("Show fewer"),
-				icon_right: hidden ? "chevron-down" : "chevron-up",
-				variant: "outline",
-				size: "md",
+				// The same words the Customer form's own region list uses, so
+				// the two say one thing. "more" also reads at a count of one,
+				// which "+1 regions" did not.
+				label: hidden ? __("+{0} more", [hidden]) : __("Show fewer"),
+				// The chips are the data. This is the one action in the row, so
+				// it carries no pill and no icon of its own - grey words with
+				// a rule under them, from the espresso button stripped to its
+				// text (see .taxjar-nexus-more in the css). A pill here read
+				// as one more region, and a chevron beside two words said what
+				// the words say.
+				//
+				// It stays a button, not a link: it opens the rest of the list
+				// in place and goes nowhere, and the button brings the
+				// keyboard, the focus ring and the hover with it.
+				variant: "ghost",
+				size: "xs",
+				// text-sm is the desk's own 13px step, the step the chips are
+				// set in. The page names no size of its own anywhere.
+				css_class: "taxjar-nexus-more text-sm",
 				onclick: () => this._render_chips($chips, regions, !open),
 			})
 		);
-	}
-
-	_hidden_label(hidden) {
-		return hidden === 1 ? __("+1 region") : __("+{0} regions", [hidden]);
 	}
 
 	// The region name as a pill, with its region code beside the name inside the
@@ -351,9 +367,9 @@ class TaxJarNexusSummary {
 		const $chip = frappe.ui.badge({
 			label: row.region || "—",
 			variant: "outline",
-			// lg is the badge's own 13px step. The page sets no type size of its
-			// own anywhere - every size on it comes from a component or from a
-			// desk typography class.
+			// lg is the badge's own 13px step. The page names no size of its
+			// own anywhere - every size on it comes from a component, from a
+			// desk typography class, or from a desk token.
 			size: "lg",
 			css_class: "taxjar-nexus-chip",
 		});
