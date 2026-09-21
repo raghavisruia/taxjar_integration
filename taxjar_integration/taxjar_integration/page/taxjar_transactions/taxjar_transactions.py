@@ -118,6 +118,11 @@ def _fetch_invoices(conditions, scope, start, page_size, truncate_errors=True):
 		filters=conditions,
 		fields=[
 			"name", "posting_date", "customer_name", "grand_total", "docstatus",
+			# currency is here for the Grand Total column: it is a Currency
+			# field, and without the invoice's own currency beside it the table
+			# printed every total with the system default symbol. A foreign
+			# invoice then read as the wrong amount of the wrong money.
+			"currency",
 			"is_return", "is_debit_note", "company",
 			"taxjar_sync_status", "taxjar_last_synced", "taxjar_sync_error",
 			"taxjar_exclusion_reason",
@@ -293,6 +298,7 @@ def _export_columns():
 		{"label": _("Customer"), "fieldname": "customer_name"},
 		{"label": _("Type"), "fieldname": "transaction_type"},
 		{"label": _("Company"), "fieldname": "company"},
+		{"label": _("Currency"), "fieldname": "currency"},
 		{"label": _("Grand Total"), "fieldname": "grand_total"},
 		{"label": _("Transaction Status"), "fieldname": "doc_status"},
 		{"label": _("Sync Status"), "value": _sync_status_label},

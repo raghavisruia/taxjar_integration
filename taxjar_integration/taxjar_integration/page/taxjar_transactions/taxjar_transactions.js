@@ -457,6 +457,11 @@ class TaxJarTransactionSync {
 				label: __("Grand Total"),
 				fieldname: "grand_total",
 				fieldtype: "Currency",
+				// options names the row field that holds the currency, the
+				// same way a Currency docfield does. frappe.format reads it
+				// off the row; without it every total takes the system
+				// default symbol, whatever the invoice was written in.
+				options: "currency",
 				align: "right",
 			},
 		];

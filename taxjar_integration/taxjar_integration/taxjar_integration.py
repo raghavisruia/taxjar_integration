@@ -633,7 +633,14 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	tax_dict["transaction_id"] = doc.name
 	tax_dict["transaction_date"] = str(doc.posting_date)
-	tax_dict["sales_tax"] = sales_tax
+	# Converted to USD, like every other money field in this payload.
+	# doc.taxes holds the document currency, and get_tax_data() above already
+	# converted the line items and the shipping. Left alone, a EUR invoice
+	# filed USD lines under a EUR tax total, and TaxJar recorded the wrong
+	# amount for the order. The rate is memoized on doc.flags by the call
+	# above, so this reads it rather than looking it up again.
+	usd_rate = _get_usd_exchange_rate(doc)
+	tax_dict["sales_tax"] = flt(sales_tax * usd_rate, 2) if usd_rate else sales_tax
 	# get_tax_data() already derives "amount" correctly from the actual
 	# line_items + shipping being sent (see its own comment) - overriding it
 	# with doc.total here was wrong on two counts: doc.total excludes any
@@ -1042,7 +1049,11 @@ def get_tax_data(doc):
 			if "discount" in li:
 				li["discount"] = flt(li["discount"] * usd_rate, 2)
 			if "sales_tax" in li:
-				li["sales_tax"] = flt(li["sales_tax"] * usd_rate, 2)
+				# flt() around the value, not only the product: a row saved
+				# before taxjar_tax_collectable existed reads back as None,
+				# and None * rate ended the job. A retry of an older foreign
+				# invoice is exactly how that row reaches this loop.
+				li["sales_tax"] = flt(flt(li["sales_tax"]) * usd_rate, 2)
 
 	# TaxJar's own validation requires "amount" to equal the sum of line
 	# items (unit_price × quantity − discount) plus shipping, excluding

@@ -11,6 +11,7 @@ from unittest.mock import DEFAULT, MagicMock, call, patch
 import frappe
 import taxjar
 from frappe.tests import UnitTestCase
+from frappe.utils import flt
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
@@ -1769,6 +1770,366 @@ class TestSyncTransactionRowDetection(UnitTestCase):
 			sync_transaction_to_taxjar("SINV-TEST-001")
 
 		self.assertEqual(mock_client.create_order.call_args[0][0]["sales_tax"], 0)
+
+
+# ── Multi-currency: the document-level sales_tax in the filed payload ───────
+
+class TestSyncTransactionSalesTaxCurrency(UnitTestCase):
+	"""The sales_tax field of the create_order/create_refund payload.
+
+	doc.taxes carries the document currency. get_tax_data() converts the line
+	items and the shipping to USD, so this total has to make the same trip.
+	Left in document currency, a EUR invoice filed USD lines under a EUR tax
+	total, and TaxJar recorded the wrong amount for the order.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _sync(self, doc, rate=1.0):
+		"""Run the worker over a stubbed get_tax_data and return the client.
+
+		get_tax_data is stubbed here on purpose: the subject is the one field
+		the worker adds after it, and a stub keeps every other money value out
+		of the way. TestSyncTransactionPayloadCurrency below runs the real one.
+		"""
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+		mock_client.create_refund.return_value = MagicMock()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC")
+
+		with patch(f"{self.MOD}.frappe.get_doc", return_value=doc), \
+		     patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
+		     patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
+		     patch(f"{self.MOD}.get_tax_data", return_value={"shipping": 0.0, "amount": 100.0}), \
+		     patch(f"{self.MOD}.get_exchange_rate", return_value=rate), \
+		     patch(f"{self.MOD}._set_sync_status"), \
+		     patch(f"{self.MOD}.log_taxjar_call"):
+			sync_transaction_to_taxjar(doc.name)
+
+		return mock_client
+
+	def _invoice(self, currency="USD", tax_amount=95.0):
+		doc = _make_doc(currency=currency, taxes=[
+			_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, tax_amount),
+		])
+		doc.docstatus = 1
+		return doc
+
+	def _credit_note(self, currency="USD", tax_amount=-95.0):
+		doc = self._invoice(currency=currency, tax_amount=tax_amount)
+		doc.is_return = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+		return doc
+
+	def _debit_note(self, currency="USD", tax_amount=95.0):
+		"""is_debit_note and is_return exclude each other on a Sales Invoice.
+
+		Each one's depends_on hides it while the other is set, so a debit note
+		reaches the order path, not the refund path.
+		"""
+		doc = self._invoice(currency=currency, tax_amount=tax_amount)
+		doc.is_return = False
+		doc.is_debit_note = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+		return doc
+
+	# ── Sales Invoice ───────────────────────────────────────────────────
+
+	def test_usd_invoice_files_the_row_amount_unchanged(self):
+		client = self._sync(self._invoice(currency="USD", tax_amount=95.0))
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+	def test_foreign_invoice_converts_sales_tax_to_usd(self):
+		client = self._sync(self._invoice(currency="EUR", tax_amount=95.0), rate=1.1)
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 104.5)
+
+	# ── Credit Note ─────────────────────────────────────────────────────
+
+	def test_usd_credit_note_files_the_row_amount_unchanged(self):
+		client = self._sync(self._credit_note(currency="USD", tax_amount=-95.0))
+		client.create_order.assert_not_called()
+		self.assertEqual(client.create_refund.call_args[0][0]["sales_tax"], -95.0)
+
+	def test_foreign_credit_note_converts_sales_tax_to_usd(self):
+		client = self._sync(self._credit_note(currency="EUR", tax_amount=-95.0), rate=1.1)
+		client.create_order.assert_not_called()
+		self.assertEqual(client.create_refund.call_args[0][0]["sales_tax"], -104.5)
+
+	def test_foreign_credit_note_keeps_the_negative_sign(self):
+		"""A refund reverses tax. The conversion must not turn it into a charge."""
+		client = self._sync(self._credit_note(currency="EUR", tax_amount=-95.0), rate=1.1)
+		self.assertLess(client.create_refund.call_args[0][0]["sales_tax"], 0)
+
+	# ── Debit Note ──────────────────────────────────────────────────────
+
+	def test_usd_debit_note_files_the_row_amount_unchanged(self):
+		client = self._sync(self._debit_note(currency="USD", tax_amount=95.0))
+		client.create_refund.assert_not_called()
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+	def test_foreign_debit_note_converts_sales_tax_to_usd(self):
+		client = self._sync(self._debit_note(currency="EUR", tax_amount=95.0), rate=1.1)
+		client.create_refund.assert_not_called()
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 104.5)
+
+	def test_debit_note_takes_the_order_path_despite_return_against(self):
+		"""return_against alone does not make a refund. is_return decides."""
+		client = self._sync(self._debit_note(currency="EUR"), rate=1.1)
+		client.create_order.assert_called_once()
+		client.create_refund.assert_not_called()
+
+	# ── Arithmetic ──────────────────────────────────────────────────────
+
+	def test_converted_sales_tax_is_rounded_to_two_decimals(self):
+		"""Same rounding as every other money field get_tax_data() converts."""
+		client = self._sync(self._invoice(currency="EUR", tax_amount=95.0), rate=1.0856)
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 103.13)
+
+	def test_zero_sales_tax_stays_zero_in_a_foreign_currency(self):
+		client = self._sync(self._invoice(currency="EUR", tax_amount=0.0), rate=1.1)
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 0)
+
+	def test_a_rate_below_one_lowers_the_filed_amount(self):
+		"""A currency worth less than the dollar converts downward."""
+		client = self._sync(self._invoice(currency="SEK", tax_amount=1000.0), rate=0.095)
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 95.0)
+
+	def test_usd_document_never_asks_for_a_rate(self):
+		"""_get_usd_exchange_rate() returns early, so no Currency Exchange read."""
+		doc = self._invoice(currency="USD")
+		with patch(f"{self.MOD}.get_exchange_rate") as mock_rate:
+			mock_config = MagicMock(tax_account_head="Sales Tax - TC")
+			with patch(f"{self.MOD}.frappe.get_doc", return_value=doc), \
+			     patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
+			     patch(f"{self.MOD}.get_client", return_value=MagicMock()), \
+			     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
+			     patch(f"{self.MOD}.get_tax_data", return_value={"shipping": 0.0}), \
+			     patch(f"{self.MOD}._set_sync_status"), \
+			     patch(f"{self.MOD}.log_taxjar_call"):
+				sync_transaction_to_taxjar(doc.name)
+		mock_rate.assert_not_called()
+
+	def test_other_account_rows_still_excluded_before_conversion(self):
+		"""The conversion must not widen which rows count as the tax total."""
+		doc = _make_doc(currency="EUR", taxes=[
+			_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, 95.0),
+			_make_tax_row("Other Account - TC", TAXJAR_ROW_DESCRIPTION, 1000.0),
+		])
+		doc.docstatus = 1
+		client = self._sync(doc, rate=1.1)
+		self.assertEqual(client.create_order.call_args[0][0]["sales_tax"], 104.5)
+
+
+class TestSyncTransactionPayloadCurrency(UnitTestCase):
+	"""Every money field of a filed payload, built by the real get_tax_data().
+
+	One invariant holds the whole payload together: TaxJar is sent USD. The
+	class above stubs get_tax_data, so it cannot show that the document-level
+	total agrees with the line items. This one builds both from the same
+	document and compares them.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _sync(self, doc, rate=1.25):
+		mock_client = MagicMock()
+		mock_client.create_order.return_value = MagicMock()
+		mock_client.create_refund.return_value = MagicMock()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+		mock_address = MagicMock(pincode="78701", city="Austin", address_line1="123 Main St",
+			country="United States", state="TX")
+		mock_address.get.return_value = "TX"
+
+		# Same shape as TestGetTaxDataForeignRows._call: wraps= plus a
+		# side_effect returning DEFAULT overrides the one lookup this test
+		# cares about and lets Frappe's own internal reads through.
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Country":
+				return "us"
+			return DEFAULT
+
+		with patch(f"{self.MOD}.frappe.get_doc", return_value=doc), \
+		     patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
+		     patch(f"{self.MOD}.get_client", return_value=mock_client), \
+		     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
+		     patch(f"{self.MOD}.get_company_address_details", return_value=mock_address), \
+		     patch(f"{self.MOD}.get_shipping_address_details", return_value=mock_address), \
+		     patch(f"{self.MOD}.frappe.db.get_value",
+		           wraps=frappe.db.get_value, side_effect=fake_get_value), \
+		     patch(f"{self.MOD}._get_taxjar_customer_id", return_value=None), \
+		     patch(f"{self.MOD}._get_effective_exemption", return_value=(None, None)), \
+		     patch(f"{self.MOD}.get_exchange_rate", return_value=rate), \
+		     patch(f"{self.MOD}._set_sync_status"), \
+		     patch(f"{self.MOD}.log_taxjar_call"):
+			sync_transaction_to_taxjar(doc.name)
+
+		return mock_client
+
+	def _doc(self, currency="EUR", qty=2, rate=100.0, line_tax=16.0, doc_tax=16.0, shipping=0.0):
+		"""A submitted document whose one line carries the whole tax total.
+
+		line_tax is taxjar_tax_collectable, which set_sales_tax() writes in
+		document currency. doc_tax is the Sales Taxes and Charges row, also in
+		document currency. On a real document the two agree, so the payload
+		must still show them agreeing after the conversion.
+		"""
+		item = _FakeItem(idx=1, qty=qty, rate=rate, net_amount=rate * qty)
+		item.taxjar_tax_collectable = line_tax
+
+		taxes = [_make_tax_row("Sales Tax - TC", TAXJAR_ROW_DESCRIPTION, doc_tax, idx=1)]
+		if shipping:
+			taxes.append(_make_tax_row("Freight - TC", "Shipping", shipping, idx=2))
+
+		doc = _make_doc(currency=currency, items=[item], taxes=taxes)
+		doc.docstatus = 1
+		return doc
+
+	def _payload(self, client):
+		if client.create_refund.called:
+			return client.create_refund.call_args[0][0]
+		return client.create_order.call_args[0][0]
+
+	# ── Sales Invoice ───────────────────────────────────────────────────
+
+	def test_invoice_total_tax_matches_the_line_tax_it_came_from(self):
+		"""The bug in one assertion: 16 EUR of tax filed beside 20 USD of line tax."""
+		client = self._sync(self._doc(currency="EUR", line_tax=16.0, doc_tax=16.0), rate=1.25)
+		payload = self._payload(client)
+		line_total = sum(flt(li["sales_tax"]) for li in payload["line_items"])
+		self.assertEqual(payload["sales_tax"], line_total)
+		self.assertEqual(payload["sales_tax"], 20.0)
+
+	def test_invoice_amount_and_lines_are_usd_too(self):
+		"""Guards the comparison above: both sides converted, not neither."""
+		client = self._sync(self._doc(currency="EUR", qty=2, rate=100.0), rate=1.25)
+		payload = self._payload(client)
+		self.assertEqual(payload["line_items"][0]["unit_price"], 125.0)
+		self.assertEqual(payload["amount"], 250.0)
+
+	def test_usd_invoice_payload_is_untouched(self):
+		client = self._sync(self._doc(currency="USD", line_tax=16.0, doc_tax=16.0))
+		payload = self._payload(client)
+		self.assertEqual(payload["sales_tax"], 16.0)
+		self.assertEqual(payload["line_items"][0]["unit_price"], 100.0)
+		self.assertEqual(payload["amount"], 200.0)
+
+	def test_shipping_and_total_tax_share_one_rate(self):
+		client = self._sync(self._doc(currency="EUR", shipping=40.0), rate=1.25)
+		payload = self._payload(client)
+		self.assertEqual(payload["shipping"], 50.0)
+		self.assertEqual(payload["sales_tax"], 20.0)
+
+	def test_the_rate_is_read_once_for_the_whole_document(self):
+		"""get_tax_data() and the sales_tax line both need it.
+
+		_get_usd_exchange_rate() memoizes on doc.flags, so a document with a
+		flags container reads Currency Exchange once rather than twice.
+		"""
+		doc = self._doc(currency="EUR")
+		doc.flags = frappe._dict()
+		mock_config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+		mock_address = MagicMock(pincode="78701", city="Austin", address_line1="123 Main St",
+			country="United States", state="TX")
+		mock_address.get.return_value = "TX"
+
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Country":
+				return "us"
+			return DEFAULT
+
+		with patch(f"{self.MOD}.frappe.get_doc", return_value=doc), \
+		     patch(f"{self.MOD}.company_scope", return_value=_files_scope(True)), \
+		     patch(f"{self.MOD}.get_client", return_value=MagicMock()), \
+		     patch(f"{self.MOD}.get_company_config", return_value=mock_config), \
+		     patch(f"{self.MOD}.get_company_address_details", return_value=mock_address), \
+		     patch(f"{self.MOD}.get_shipping_address_details", return_value=mock_address), \
+		     patch(f"{self.MOD}.frappe.db.get_value",
+		           wraps=frappe.db.get_value, side_effect=fake_get_value), \
+		     patch(f"{self.MOD}._get_taxjar_customer_id", return_value=None), \
+		     patch(f"{self.MOD}._get_effective_exemption", return_value=(None, None)), \
+		     patch(f"{self.MOD}.get_exchange_rate", return_value=1.25) as mock_rate, \
+		     patch(f"{self.MOD}._set_sync_status"), \
+		     patch(f"{self.MOD}.log_taxjar_call"):
+			sync_transaction_to_taxjar(doc.name)
+
+		self.assertEqual(mock_rate.call_count, 1)
+
+	# ── Credit Note ─────────────────────────────────────────────────────
+
+	def test_credit_note_total_tax_matches_its_line_tax(self):
+		"""A return carries negative quantity and negative tax throughout."""
+		doc = self._doc(currency="EUR", qty=-2, rate=100.0, line_tax=-16.0, doc_tax=-16.0)
+		doc.is_return = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+
+		client = self._sync(doc, rate=1.25)
+		payload = self._payload(client)
+		line_total = sum(flt(li["sales_tax"]) for li in payload["line_items"])
+		self.assertEqual(payload["sales_tax"], line_total)
+		self.assertEqual(payload["sales_tax"], -20.0)
+
+	def test_credit_note_amount_is_negative_usd(self):
+		doc = self._doc(currency="EUR", qty=-2, rate=100.0, line_tax=-16.0, doc_tax=-16.0)
+		doc.is_return = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+
+		payload = self._payload(self._sync(doc, rate=1.25))
+		self.assertEqual(payload["line_items"][0]["unit_price"], 125.0)
+		self.assertEqual(payload["line_items"][0]["quantity"], -2)
+		self.assertEqual(payload["amount"], -250.0)
+
+	def test_credit_note_is_filed_as_a_refund_against_the_original(self):
+		doc = self._doc(currency="EUR", qty=-2, rate=100.0, line_tax=-16.0, doc_tax=-16.0)
+		doc.is_return = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+
+		client = self._sync(doc, rate=1.25)
+		client.create_refund.assert_called_once()
+		self.assertEqual(
+			client.create_refund.call_args[0][0]["transaction_reference_id"],
+			"SINV-TEST-ORIGINAL",
+		)
+
+	# ── Debit Note ──────────────────────────────────────────────────────
+
+	def test_debit_note_total_tax_matches_its_line_tax(self):
+		"""A rate adjustment is a positive order, not a refund."""
+		doc = self._doc(currency="EUR", qty=2, rate=100.0, line_tax=16.0, doc_tax=16.0)
+		doc.is_return = False
+		doc.is_debit_note = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+
+		client = self._sync(doc, rate=1.25)
+		client.create_refund.assert_not_called()
+		payload = self._payload(client)
+		line_total = sum(flt(li["sales_tax"]) for li in payload["line_items"])
+		self.assertEqual(payload["sales_tax"], line_total)
+		self.assertEqual(payload["sales_tax"], 20.0)
+
+	def test_debit_note_carries_no_refund_reference(self):
+		"""transaction_reference_id belongs to the refund path only."""
+		doc = self._doc(currency="EUR", qty=2, rate=100.0, line_tax=16.0, doc_tax=16.0)
+		doc.is_return = False
+		doc.is_debit_note = True
+		doc.return_against = "SINV-TEST-ORIGINAL"
+
+		payload = self._payload(self._sync(doc, rate=1.25))
+		self.assertNotIn("transaction_reference_id", payload)
+
+	# ── A line that never got a tax value ───────────────────────────────
+
+	def test_null_line_tax_converts_to_zero_rather_than_crashing(self):
+		"""taxjar_tax_collectable is NULL on a row saved before the field existed.
+
+		A retry or a Sync to TaxJar click on such a document reaches the
+		conversion loop, where None * rate used to end the job.
+		"""
+		doc = self._doc(currency="EUR")
+		doc.items[0].taxjar_tax_collectable = None
+
+		payload = self._payload(self._sync(doc, rate=1.25))
+		self.assertEqual(payload["line_items"][0]["sales_tax"], 0.0)
 
 
 # ── Phase 1: taxjar_state_code custom field on Address ───────────────────────
@@ -8638,6 +8999,119 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			css = f.read()
 		self.assertIn("cursor: pointer;", css)
 		self.assertNotIn("cursor: help;", css)
+
+
+class TestTransactionsPageShowsTheInvoiceCurrency(UnitTestCase):
+	"""Grand Total is a Currency column, so it needs a currency beside it.
+
+	frappe.format() resolves a Currency field through df.options: it reads the
+	named field off the row, and falls back to the system default when the row
+	does not carry it. The page used not to fetch currency at all, so a EUR
+	invoice printed its total with the company's own symbol - the wrong amount
+	of the wrong money, with nothing on screen to say so.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions"
+
+	def _rows(self, currency="EUR"):
+		return [
+			frappe._dict(
+				name="SINV-001", posting_date="2026-06-01", customer_name="A",
+				grand_total=100, currency=currency, docstatus=1,
+				is_return=False, is_debit_note=False, company="Test Co",
+				taxjar_sync_status="Synced", taxjar_last_synced=None, taxjar_sync_error="",
+			),
+		]
+
+	def _get_transactions(self, rows):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			get_transactions,
+		)
+		with patch(f"{self.MOD}.frappe.get_list", return_value=rows) as mock_list, \
+		     patch(f"{self.MOD}.permitted_count", return_value=len(rows)):
+			result = get_transactions(filters={}, page=1)
+		return result, mock_list
+
+	def _transactions_js(self):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__),
+			"..", "..", "page", "taxjar_transactions", "taxjar_transactions.js",
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def _grand_total_column(self):
+		"""The Grand Total column object, as written in get_columns()."""
+		js = self._transactions_js()
+		columns_fn = js.split("\tget_columns() {")[1].split("\n\t}\n")[0]
+		return columns_fn.split('fieldname: "grand_total"')[1].split("},")[0]
+
+	# ── The server side ─────────────────────────────────────────────────
+
+	def test_the_page_fetches_the_invoice_currency(self):
+		_result, mock_list = self._get_transactions(self._rows())
+		self.assertIn("currency", mock_list.call_args[1]["fields"])
+
+	def test_the_currency_reaches_the_row_the_table_renders(self):
+		result, _mock_list = self._get_transactions(self._rows(currency="EUR"))
+		self.assertEqual(result["invoices"][0]["currency"], "EUR")
+
+	def test_grand_total_is_still_fetched_beside_it(self):
+		"""The pair is what makes the cell readable. Neither one alone does."""
+		_result, mock_list = self._get_transactions(self._rows())
+		fields = mock_list.call_args[1]["fields"]
+		self.assertIn("grand_total", fields)
+		self.assertIn("currency", fields)
+
+	# ── The column ──────────────────────────────────────────────────────
+
+	def test_grand_total_column_names_the_row_field_holding_the_currency(self):
+		column = self._grand_total_column()
+		self.assertIn('fieldtype: "Currency"', column)
+		self.assertIn('options: "currency"', column)
+
+	def test_the_option_names_a_field_the_page_actually_fetches(self):
+		"""options names a row field. A name nothing fetches reads as the
+		system default and says nothing about it."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			get_transactions,
+		)
+		column = self._grand_total_column()
+		named = re.search(r'options:\s*"([^"]+)"', column).group(1)
+
+		_result, mock_list = self._get_transactions(self._rows())
+		self.assertIn(named, mock_list.call_args[1]["fields"])
+
+	# ── The export ──────────────────────────────────────────────────────
+
+	def test_the_export_carries_a_currency_column(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			_export_columns,
+		)
+		fieldnames = [c.get("fieldname") for c in _export_columns()]
+		self.assertIn("currency", fieldnames)
+
+	def test_the_export_puts_the_currency_before_the_total_it_describes(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			_export_columns,
+		)
+		fieldnames = [c.get("fieldname") for c in _export_columns()]
+		self.assertLess(fieldnames.index("currency"), fieldnames.index("grand_total"))
+
+	def test_the_export_reads_the_same_rows_as_the_page(self):
+		"""_fetch_invoices is shared, so one field list serves both. A sheet
+		of bare numbers with no currency column is the same fault as the
+		table cell, in a file that leaves the site."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions import (
+			ALL_SCOPE,
+			_fetch_invoices,
+		)
+		with patch(f"{self.MOD}.frappe.get_list", return_value=self._rows()) as mock_list:
+			rows = _fetch_invoices({}, ALL_SCOPE, 0, 20, truncate_errors=False)
+
+		self.assertIn("currency", mock_list.call_args[1]["fields"])
+		self.assertEqual(rows[0]["currency"], "EUR")
 
 
 # ── Hooks registration — updated hooks ───────────────────────────────────────
