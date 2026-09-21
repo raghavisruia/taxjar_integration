@@ -11,10 +11,21 @@ def execute():
 	also blocks renaming any non-custom module, so this corrects the stored name
 	in place with a direct UPDATE rather than attempting a delete-and-recreate
 	(which, under that same collation, would delete the only copy outright).
+
+	The UPDATE comes from frappe.qb rather than from frappe.db.sql. The builder
+	writes the same statement and quotes each name for the database in use.
+	frappe.db.set_value() cannot stand in for it: the primary key is one of the
+	two columns this corrects, and set_value() would also stamp the row as
+	modified for a change no user made.
 	"""
 	current_name = frappe.db.get_value("Module Def", "TaxJar Integration", "name")
-	if current_name and current_name != "TaxJar Integration":
-		frappe.db.sql(
-			"update `tabModule Def` set name=%s, module_name=%s where name=%s",
-			("TaxJar Integration", "TaxJar Integration", current_name),
-		)
+	if not current_name or current_name == "TaxJar Integration":
+		return
+
+	module_def = frappe.qb.DocType("Module Def")
+	(
+		frappe.qb.update(module_def)
+		.set(module_def.name, "TaxJar Integration")
+		.set(module_def.module_name, "TaxJar Integration")
+		.where(module_def.name == current_name)
+	).run()

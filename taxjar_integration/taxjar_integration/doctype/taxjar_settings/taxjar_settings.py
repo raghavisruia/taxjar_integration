@@ -1082,22 +1082,31 @@ def _backfill_print_settings_defaults():
 	taxjar_show_tax_breakdown reading back as unchecked forever, silently
 	contradicting its declared default="1".
 
-	Checked via a raw query against the Singles table, not get_single_value()/
-	db.exists() - for a Check field, cast_fieldtype() maps a missing row to 0
-	the same as an explicit 0, so get_single_value() can never tell "never
-	set" apart from "someone unchecked it", and using it here would
-	re-assert 1 over that choice on every migrate. db.exists() is no better:
-	confirmed directly against this site that both it and db.get_value()
-	raise/no-op on "Singles", since the QB builder's default order-by-creation
-	assumes a real doctype table, and Singles has no such column. Only a plain
-	SELECT against the row itself tells "never set" apart from "set to 0",
-	so this backfills the very first time only and leaves any later value
-	alone.
+	Checked by reading the Singles row itself, not by get_single_value() - for
+	a Check field, cast_fieldtype() maps a missing row to 0 the same as an
+	explicit 0, so get_single_value() can never tell "never set" apart from
+	"someone unchecked it", and using it here would re-assert 1 over that
+	choice on every migrate. Only the row itself tells the two apart, so this
+	backfills the very first time only and leaves any later value alone.
+
+	Read with frappe.qb, which sends the SELECT as written. db.exists() and
+	db.get_value() cannot stand in: both go through the query engine, which
+	orders by `creation` by default, and Singles carries no such column.
+	Confirmed against this site - each one raises (1054) Unknown column
+	'creation' in 'ORDER BY'.
 	"""
-	row_exists = frappe.db.sql(
-		"select 1 from `tabSingles` where doctype=%s and field=%s limit 1",
-		("Print Settings", "taxjar_show_tax_breakdown"),
-	)
+	singles = frappe.qb.DocType("Singles")
+	row_exists = (
+		frappe.qb.from_(singles)
+		# Subscripts, not attributes: pypika's Table already defines a field()
+		# method, so `singles.field` hands back that method rather than the
+		# column of the same name, and the WHERE clause silently goes wrong.
+		.select(singles["value"])
+		.where(singles["doctype"] == "Print Settings")
+		.where(singles["field"] == "taxjar_show_tax_breakdown")
+		.limit(1)
+	).run()
+
 	if not row_exists:
 		frappe.db.set_single_value("Print Settings", "taxjar_show_tax_breakdown", 1)
 

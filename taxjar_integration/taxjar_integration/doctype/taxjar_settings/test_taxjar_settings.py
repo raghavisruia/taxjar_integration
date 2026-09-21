@@ -18570,11 +18570,15 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 		version only ever created the unprefixed pair on Sales Invoice Item and
 		the category on Item. Those two are the only tables holding data to
 		move; the other two never had an old column to copy out of."""
-		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL, _RENAMES
+		from taxjar_integration.patches.namespace_item_tax_fields import (
+			_COPY_DOCTYPES,
+			_RENAMES,
+			_copy_query,
+		)
 
-		self.assertEqual(sorted(_COPY_SQL), ["Item", "Sales Invoice Item"])
+		self.assertEqual(sorted(_COPY_DOCTYPES), ["Item", "Sales Invoice Item"])
 		for doctype, old, new in _RENAMES:
-			self.assertIn(f"`{new}` = `{old}`", _COPY_SQL[doctype])
+			self.assertIn(f"`{new}`=`{old}`", _copy_query(doctype).get_sql())
 
 	def test_patch_moves_the_names_the_app_now_uses(self):
 		"""The new names come from the field definitions, so a later rename
@@ -18590,18 +18594,23 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 	def test_patch_creates_the_fields_before_it_copies(self):
 		"""after_migrate runs make_custom_fields, but it runs after every patch.
 		The copy needs the new columns, so the patch creates them itself."""
-		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL, execute
+		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_DOCTYPES, execute
 
 		order = []
+
+		def record_copy(_doctype):
+			order.append("copy")
+			return MagicMock()
+
 		with patch(f"{self.SETTINGS}.make_custom_fields", side_effect=lambda: order.append("create")), \
 		     patch(f"{self.PATCH}.frappe.db.has_column", return_value=True), \
-		     patch(f"{self.PATCH}.frappe.db.sql", side_effect=lambda *a, **k: order.append("copy")), \
+		     patch(f"{self.PATCH}._copy_query", side_effect=record_copy), \
 		     patch(f"{self.PATCH}.frappe.db.exists", return_value=False), \
 		     patch(f"{self.PATCH}.frappe.clear_cache"):
 			execute()
 
 		self.assertEqual(order[0], "create")
-		self.assertEqual(order.count("copy"), len(_COPY_SQL))
+		self.assertEqual(order.count("copy"), len(_COPY_DOCTYPES))
 
 	def test_patch_is_a_no_op_without_the_old_columns(self):
 		"""A site that installed the app but never enabled a TaxJar feature has
@@ -18610,20 +18619,21 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 
 		with patch(f"{self.SETTINGS}.make_custom_fields"), \
 		     patch(f"{self.PATCH}.frappe.db.has_column", return_value=False), \
-		     patch(f"{self.PATCH}.frappe.db.sql") as mock_sql, \
+		     patch(f"{self.PATCH}._copy_query") as mock_copy_query, \
 		     patch(f"{self.PATCH}.frappe.db.exists", return_value=False), \
 		     patch(f"{self.PATCH}.frappe.clear_cache"):
 			execute()
 
-		mock_sql.assert_not_called()
+		mock_copy_query.assert_not_called()
 
 	def test_patch_never_drops_a_column(self):
 		"""Deleting a Custom Field does not drop its column, and an unused
 		column is cheaper to keep than a one-way DDL is to get wrong."""
-		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL
+		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_DOCTYPES, _copy_query
 
-		for doctype, sql in _COPY_SQL.items():
-			upper = sql.upper()
+		for doctype in _COPY_DOCTYPES:
+			upper = _copy_query(doctype).get_sql().upper()
+			self.assertTrue(upper.startswith("UPDATE"), doctype)
 			self.assertNotIn("DROP", upper, doctype)
 			self.assertNotIn("ALTER", upper, doctype)
 			self.assertNotIn("DELETE", upper, doctype)

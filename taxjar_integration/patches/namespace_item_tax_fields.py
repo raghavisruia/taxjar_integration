@@ -10,23 +10,10 @@ _RENAMES = (
 	("Item", "product_tax_category", "taxjar_product_tax_category"),
 )
 
-# One literal UPDATE per table, keyed by doctype. Written out rather than built
-# from _RENAMES because a frappe.db.sql() whose string is assembled at runtime
-# trips the frappe semgrep rules CI blocks on, and because a literal statement
-# is the one a reader can check against the table by eye.
-_COPY_SQL = {
-	"Sales Invoice Item": """
-		UPDATE `tabSales Invoice Item`
-		SET `taxjar_product_tax_category` = `product_tax_category`,
-			`taxjar_tax_collectable` = `tax_collectable`
-		WHERE `product_tax_category` IS NOT NULL OR `tax_collectable` IS NOT NULL
-	""",
-	"Item": """
-		UPDATE `tabItem`
-		SET `taxjar_product_tax_category` = `product_tax_category`
-		WHERE `product_tax_category` IS NOT NULL
-	""",
-}
+# The tables the copy writes to, in the order _RENAMES names them. Read off
+# _RENAMES rather than written out a second time, so a rename added above
+# cannot name a table the copy then skips.
+_COPY_DOCTYPES = tuple(dict.fromkeys(doctype for doctype, _old, _new in _RENAMES))
 
 
 def execute():
@@ -49,11 +36,11 @@ def execute():
 	2. Copy each old column into its new one, one UPDATE per table.
 	3. Delete the old Custom Field records.
 
-	Copied with SQL, not the ORM: tax_collectable lives on submitted Sales
-	Invoice Items, so a doc.save() migration fights docstatus validation for a
-	read-only value no user typed and no user can edit. The copy moves that
-	value unchanged, so there is nothing for the Sales Invoice controller to
-	revalidate.
+	Copied with the query builder, not with the document API: tax_collectable
+	lives on submitted Sales Invoice Items, so a doc.save() migration fights
+	docstatus validation for a read-only value no user typed and no user can
+	edit. The copy moves that value unchanged, so there is nothing for the
+	Sales Invoice controller to revalidate.
 
 	The old columns stay. Deleting a Custom Field does not drop its column, and
 	an unused column is cheaper to keep than a one-way DDL is to get wrong.
@@ -69,11 +56,37 @@ def execute():
 
 	make_custom_fields()
 
-	for doctype in _COPY_SQL:
+	for doctype in _COPY_DOCTYPES:
 		if _columns_ready(doctype):
-			frappe.db.sql(_COPY_SQL[doctype])
+			_copy_query(doctype).run()
 
 	_drop_old_fields()
+
+
+def _copy_query(doctype):
+	"""Build the one UPDATE that copies a table's old columns into its new ones.
+
+	frappe.qb, not frappe.db.sql: the builder writes the same statement, quotes
+	each name for the database in use, and leaves nothing for this module to
+	assemble as a string. It also stays below the document API, which is what
+	execute() needs - see its docstring for why a doc.save() cannot do this.
+
+	Returned rather than run, so a test can read the statement the patch would
+	send without a database behind it.
+	"""
+	table = frappe.qb.DocType(doctype)
+	query = frappe.qb.update(table)
+	rows_to_copy = None
+
+	for dt, old, new in _RENAMES:
+		if dt != doctype:
+			continue
+		query = query.set(table[new], table[old])
+		# One row is worth copying if any old column on it holds a value.
+		carries_a_value = table[old].isnotnull()
+		rows_to_copy = carries_a_value if rows_to_copy is None else rows_to_copy | carries_a_value
+
+	return query.where(rows_to_copy)
 
 
 def _columns_ready(doctype):
@@ -105,5 +118,5 @@ def _drop_old_fields():
 		if frappe.db.exists("Custom Field", name):
 			frappe.delete_doc("Custom Field", name, ignore_missing=True)
 
-	for doctype in _COPY_SQL:
+	for doctype in _COPY_DOCTYPES:
 		frappe.clear_cache(doctype=doctype)
