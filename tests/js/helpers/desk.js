@@ -139,6 +139,14 @@ function cint(value) {
 	return Number.isNaN(number) ? 0 : number;
 }
 
+// frappe's own global, reduced to what the strings under test read back: a
+// currency code and a number, in that order. No number format is loaded in a
+// test, so the assertions match on this shape rather than a locale's.
+function format_currency(value, currency) {
+	const amount = Number(value || 0).toFixed(2);
+	return currency ? `${currency} ${amount}` : amount;
+}
+
 function escape_html(value) {
 	const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 	return String(value === undefined || value === null ? "" : value).replace(
@@ -173,6 +181,14 @@ export function install_desk() {
 				if (row) row[fieldname] = value;
 				return Promise.resolve();
 			}),
+			open_mapped_doc: vi.fn(),
+		},
+		// The two reads the credit-note picker makes. Both answer empty by
+		// default, for the same reason xcall does: a test that cares what
+		// comes back says so itself, next to the assertion that reads it.
+		db: {
+			count: vi.fn(() => Promise.resolve(0)),
+			get_value: vi.fn(() => Promise.resolve({ message: {} })),
 		},
 		datetime: {
 			str_to_user: (value) => value,
@@ -204,10 +220,12 @@ export function install_desk() {
 	globalThis.frappe = frappe;
 	globalThis.__ = translate;
 	globalThis.cint = cint;
+	globalThis.format_currency = format_currency;
 	globalThis.locals = {};
 	window.frappe = frappe;
 	window.__ = translate;
 	window.cint = cint;
+	window.format_currency = format_currency;
 	window.locals = globalThis.locals;
 
 	// Every test starts from an empty page. The sidebar helpers insert into
@@ -323,6 +341,63 @@ export function load_customer_form() {
 		throw new Error("Customer registered no handlers - has its form script moved?");
 	}
 	return handlers.Customer;
+}
+
+/**
+ * Replace `frappe.ui.Dialog` with one that keeps a value per field.
+ *
+ * The inert stub in `install_desk` answers every read the same way, so a dialog
+ * that reads its own fields back cannot be driven through it: the credit-note
+ * picker's Continue button would never see a choice, and the test would be
+ * asserting on a button that can only fail.
+ *
+ * This keeps one value per field, seeded from that field's `default`, and fires
+ * the field's own `onchange` on a write, which is what a desk control does. A
+ * `hide()` runs `on_hide`, which is the path Escape and the backdrop take.
+ *
+ * Returns the array the dialogs land in, oldest first.
+ */
+export function record_dialogs() {
+	const opened = [];
+
+	frappe.ui.Dialog = vi.fn(function Dialog(options) {
+		const values = {};
+		const fields_dict = {};
+
+		for (const field of options.fields || []) {
+			if (!field.fieldname) continue;
+			values[field.fieldname] = field.default === undefined ? "" : field.default;
+			fields_dict[field.fieldname] = {
+				df: field,
+				$wrapper: $(`<div class='control-${field.fieldname}'></div>`),
+			};
+		}
+
+		this.options = options;
+		this.fields_dict = fields_dict;
+		this.$wrapper = $("<div class='modal'></div>");
+		this.get_value = (fieldname) => values[fieldname];
+		this.set_value = vi.fn((fieldname, value) => {
+			values[fieldname] = value;
+			const field = fields_dict[fieldname];
+			if (field && field.df.onchange) field.df.onchange();
+			return Promise.resolve();
+		});
+		this.show = vi.fn();
+		this.hide = vi.fn(() => {
+			if (options.on_hide) options.on_hide();
+		});
+
+		opened.push(this);
+	});
+
+	return opened;
+}
+
+/** The HTML a dialog's HTML field was built with. */
+export function dialog_html(dialog, fieldname) {
+	const field = dialog.fields_dict[fieldname];
+	return field ? field.df.options || "" : "";
 }
 
 export function add_grid_row(doctype, name, values) {

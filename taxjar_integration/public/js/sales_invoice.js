@@ -36,6 +36,17 @@ frappe.ui.form.on("Sales Invoice", {
 			.then(() => taxjar_integration.check_shipping_address(frm));
 	},
 
+	// A filing company's credit note has to name the invoice it reverses, and
+	// validate_return_against refuses the save without it. Ask here, where the
+	// user has just said the document is a return, rather than at the save -
+	// and open the picker that takes the Return / Credit Note route for them.
+	//
+	// Fires on the user's own tick and on set_value alike, which is why the
+	// entry point re-reads is_return rather than assuming this means "ticked".
+	is_return(frm) {
+		return taxjar_integration.prompt_for_return_reference(frm);
+	},
+
 	// A missing nexus is reported in the form's own message strip rather than
 	// a modal, so there is nothing here for a caller to await before saving -
 	// the strip can appear while the save runs without racing anything.

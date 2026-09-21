@@ -794,6 +794,360 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 	d.show();
 };
 
+// ── Credit note reference ──
+//
+// A credit note a filing company raises has to name the invoice it reverses.
+// validate_return_against refuses the save without it, because TaxJar files the
+// refund against that invoice's transaction id.
+//
+// That refusal arrives after the user has filled the form in, and tells them to
+// start again from Sales Invoice → Create → Return / Credit Note. This asks for
+// the reference the moment the user says the document is a return, and then
+// takes that same route for them.
+
+taxjar_integration.prompt_for_return_reference = function (frm) {
+	if (!frm.doc.is_return) return;
+	if (frm.doc.docstatus !== 0) return;
+
+	// A document the Return / Credit Note mapper built arrives with both fields
+	// already set, so there is nothing left to ask it.
+	if (frm.doc.return_against) return;
+
+	// One dialog at a time. Ticking the box twice in quick succession would
+	// otherwise stack two, and the second one's cancel would undo the first
+	// one's choice.
+	if (frm._taxjar_return_prompt_open) return;
+
+	// `files`, not `uses_taxjar`: this is the rule validate_return_against
+	// itself applies. A company that only calculates tax never needs the
+	// reference, so asking for it would collect an answer nothing reads.
+	return taxjar_integration.when_scoped(
+		frm,
+		(scope) => scope.files,
+		() => taxjar_integration._prompt_for_return_reference(frm)
+	);
+};
+
+taxjar_integration._prompt_for_return_reference = function (frm) {
+	frm._taxjar_return_prompt_open = true;
+
+	// With no customer on the form the list covers the whole company, which is
+	// worth opening the picker for. With one, an empty list is a dead end the
+	// picker cannot show a way out of, so it is asked about first.
+	if (!frm.doc.customer) {
+		taxjar_integration.show_return_reference_dialog(frm);
+		return;
+	}
+
+	return frappe.db
+		.count("Sales Invoice", {
+			filters: taxjar_integration.return_reference_filters(frm, frm.doc.customer),
+			limit: 1,
+		})
+		.then((count) => {
+			if (count) {
+				taxjar_integration.show_return_reference_dialog(frm);
+				return;
+			}
+			taxjar_integration.show_no_returnable_invoice_dialog(frm);
+		})
+		// The count decides which dialog to open, not whether to open one. A
+		// failed read opens the picker, where the link field asks the server
+		// the same question again.
+		.catch(() => taxjar_integration.show_return_reference_dialog(frm));
+};
+
+// Submitted, and not itself a return: TaxJar files the refund against an order
+// it already holds, and a draft was never sent to it. The company keeps one
+// company's invoices out of another company's credit note.
+taxjar_integration.return_reference_filters = function (frm, customer) {
+	const filters = { docstatus: 1, is_return: 0, company: frm.doc.company };
+	if (customer) filters.customer = customer;
+	return filters;
+};
+
+// Most sites name a Customer by series, so a link field shows CUST-0003 where
+// the reader expects a name. The name is already on the transaction, so the
+// dialog says both and the reader never has to recognise an id.
+taxjar_integration.customer_label = function (frm) {
+	const customer = frm.doc.customer;
+	if (!customer) return "";
+
+	const customer_name = frm.doc.customer_name;
+	if (!customer_name || customer_name === customer) return customer;
+
+	return `${customer_name} (${customer})`;
+};
+
+// The form's own customer whenever it has one: the dialog shows that as a label
+// there, not as a value a field can be read for. Only where the form names
+// nobody does the dialog's own link field hold the answer.
+taxjar_integration.return_reference_customer = function (frm, d) {
+	if (frm.doc.customer) return frm.doc.customer;
+	return d ? d.get_value("customer") : "";
+};
+
+// Rows the user has filled in. A new Sales Invoice starts with one blank row,
+// and a warning about losing that is a warning about nothing.
+taxjar_integration.return_draft_row_count = function (frm) {
+	return (frm.doc.items || []).filter((row) => row.item_code || row.item_name).length;
+};
+
+taxjar_integration.show_return_reference_dialog = function (frm) {
+	taxjar_integration._inject_return_reference_styles();
+
+	const draft_rows = taxjar_integration.return_draft_row_count(frm);
+	const customer_on_form = Boolean(frm.doc.customer);
+	let chosen = false;
+
+	// Declared before the field definitions below, which close over it. A
+	// control can fire its own onchange while the Dialog constructor is still
+	// running, which is before the constructor has returned anything to assign.
+	let d = null;
+
+	const fields = [
+		{
+			fieldtype: "HTML",
+			fieldname: "taxjar_return_intro",
+			options: `<p class="text-muted">${__(
+				"TaxJar files a credit note against the invoice it reverses. Choose that invoice."
+			)}</p>`,
+		},
+	];
+
+	// Only when there is something to lose. The mapper builds its own document,
+	// so whatever is on this form does not travel with the user.
+	if (draft_rows) {
+		fields.push({
+			fieldtype: "HTML",
+			fieldname: "taxjar_return_draft_warning",
+			options: `<div class="taxjar-return-warning">
+				<div class="taxjar-return-warning-title">${__("This draft closes without a save.")}</div>
+				<div>${__(
+					"It holds {0} item row(s). ERPNext builds the credit note from the invoice you choose, in a new form.",
+					[draft_rows]
+				)}</div>
+			</div>`,
+		});
+	}
+
+	// A label, not a link, where the form has already decided the customer:
+	// changing it here would pick an invoice for a customer the credit note is
+	// not for, and a link field would show the id where a name reads better.
+	fields.push(
+		customer_on_form
+			? {
+					fieldtype: "Data",
+					fieldname: "customer_display",
+					label: __("Customer"),
+					default: taxjar_integration.customer_label(frm),
+					read_only: 1,
+					description: __("Taken from the form. It filters the list below."),
+			  }
+			: {
+					fieldtype: "Link",
+					fieldname: "customer",
+					label: __("Customer"),
+					options: "Customer",
+					description: __("The form names no customer yet. Choose one to shorten the list."),
+					onchange() {
+						if (!d) return;
+						// The invoice belonged to the previous customer, so it
+						// cannot stand once that changes.
+						d.set_value("return_against", "");
+					},
+			  },
+		{
+			fieldtype: "Link",
+			fieldname: "return_against",
+			label: __("Sales Invoice"),
+			options: "Sales Invoice",
+			reqd: 1,
+			get_query: () => ({
+				filters: taxjar_integration.return_reference_filters(
+					frm,
+					taxjar_integration.return_reference_customer(frm, d)
+				),
+			}),
+			onchange() {
+				if (!d) return;
+				taxjar_integration.render_return_invoice_preview(d);
+			},
+		},
+		{ fieldtype: "HTML", fieldname: "taxjar_return_preview" }
+	);
+
+	d = new frappe.ui.Dialog({
+		title: __("Credit Note Against Invoice"),
+		fields,
+		primary_action_label: draft_rows ? __("Discard and Continue") : __("Continue"),
+		primary_action() {
+			const invoice_name = d.get_value("return_against");
+			if (!invoice_name) {
+				frappe.show_alert({
+					message: __("Please select a Sales Invoice"),
+					indicator: "orange",
+				});
+				return;
+			}
+
+			chosen = true;
+			d.hide();
+			taxjar_integration.open_return_credit_note(frm, invoice_name);
+		},
+		secondary_action_label: draft_rows ? __("Keep This Draft") : __("Cancel"),
+		secondary_action() {
+			d.hide();
+		},
+		on_hide() {
+			// Escape and the backdrop reach here too, and they mean the same
+			// thing the Cancel button means.
+			if (!chosen) taxjar_integration.cancel_return_reference(frm);
+			frm._taxjar_return_prompt_open = false;
+		},
+	});
+
+	d.show();
+	return d;
+};
+
+// The customer has nothing this credit note can reverse, so the dialog offers
+// the one move that is left. A picker here would open on an empty list and say
+// nothing about why.
+taxjar_integration.show_no_returnable_invoice_dialog = function (frm) {
+	const customer = taxjar_integration.customer_label(frm);
+
+	const d = new frappe.ui.Dialog({
+		title: __("Credit Note Against Invoice"),
+		fields: [
+			{
+				fieldtype: "HTML",
+				fieldname: "taxjar_no_invoice",
+				options: `<p><b>${__("{0} has no submitted invoice.", [
+					frappe.utils.escape_html(customer),
+				])}</b></p>
+				<p class="text-muted">${__(
+					"TaxJar files a credit note against the invoice it reverses, and a draft was never sent to it. Submit the invoice first, then start the credit note again."
+				)}</p>`,
+			},
+		],
+		primary_action_label: __("Cancel"),
+		primary_action() {
+			d.hide();
+		},
+		on_hide() {
+			taxjar_integration.cancel_return_reference(frm);
+			frm._taxjar_return_prompt_open = false;
+		},
+	});
+
+	d.show();
+	return d;
+};
+
+// What the user is about to reverse, read from the invoice itself rather than
+// guessed from its name. The sync status is here because a credit note against
+// an invoice TaxJar never received has nothing to file against.
+taxjar_integration.render_return_invoice_preview = function (d) {
+	const invoice_name = d.get_value("return_against");
+	const $wrapper = d.fields_dict.taxjar_return_preview.$wrapper;
+
+	if (!invoice_name) {
+		$wrapper.empty();
+		return;
+	}
+
+	return frappe.db
+		.get_value("Sales Invoice", invoice_name, [
+			"posting_date",
+			"currency",
+			"grand_total",
+			"total_taxes_and_charges",
+			"taxjar_sync_status",
+		])
+		.then((result) => {
+			// A second pick can land while this read is in flight. The field is
+			// the record of what the user chose last, so it decides.
+			if (d.get_value("return_against") !== invoice_name) return;
+
+			const row = (result && result.message) || {};
+			const rows = [
+				[__("Posting date"), frappe.datetime.str_to_user(row.posting_date)],
+				[__("Grand total"), format_currency(row.grand_total, row.currency)],
+				[__("Sales tax"), format_currency(row.total_taxes_and_charges, row.currency)],
+				[__("TaxJar"), row.taxjar_sync_status || __("Not synced")],
+			];
+
+			$wrapper.html(`<div class="taxjar-return-preview">
+				${rows
+					.map(
+						([label, value]) => `<div class="taxjar-return-preview-row">
+							<span class="text-muted">${label}</span>
+							<span>${frappe.utils.escape_html(value === undefined || value === null ? "" : value)}</span>
+						</div>`
+					)
+					.join("")}
+			</div>`);
+		});
+};
+
+// The box is what opened the dialog, so dismissing the dialog puts it back.
+// Leaving it ticked would leave a draft that validate_return_against refuses to
+// save, with no way to reach this dialog again.
+taxjar_integration.cancel_return_reference = function (frm) {
+	return frm.set_value("is_return", 0);
+};
+
+taxjar_integration.open_return_credit_note = function (frm, invoice_name) {
+	// This draft is left behind, so it must not be left in the state that
+	// cannot be saved. Untick first, then route: the mapper builds its own
+	// document and this one is never written.
+	return Promise.resolve(frm.set_value("is_return", 0)).then(() =>
+		frappe.model.open_mapped_doc({
+			method: "erpnext.accounts.doctype.sales_invoice.mapper.make_sales_return",
+			source_name: invoice_name,
+		})
+	);
+};
+
+// Injected on first use, the same way the address picker's styles are: two
+// blocks that exist only inside this dialog do not earn a place in the bundle
+// every desk page loads.
+taxjar_integration._inject_return_reference_styles = function () {
+	if (document.getElementById("taxjar-return-reference-styles")) return;
+	const style = document.createElement("style");
+	style.id = "taxjar-return-reference-styles";
+	style.textContent = `
+		.taxjar-return-warning {
+			background-color: var(--bg-yellow);
+			border-radius: var(--border-radius);
+			padding: 10px 12px;
+			margin-bottom: 10px;
+			font-size: var(--text-md);
+		}
+		.taxjar-return-warning-title {
+			font-weight: 600;
+			margin-bottom: 2px;
+		}
+		.taxjar-return-preview {
+			background-color: var(--subtle-fg);
+			border-radius: var(--border-radius);
+			padding: 10px 12px;
+			font-size: var(--text-md);
+		}
+		.taxjar-return-preview-row {
+			display: flex;
+			justify-content: space-between;
+			gap: 12px;
+		}
+		.taxjar-return-preview-row + .taxjar-return-preview-row {
+			margin-top: 6px;
+		}
+	`;
+	document.head.appendChild(style);
+};
+
+
 const TAXJAR_MESSAGE_CLASS = "taxjar-form-message";
 
 // Layout.show_message() *appends*; it only clears the container when called
