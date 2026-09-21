@@ -13364,13 +13364,43 @@ class TestGuidedSetupAddressStepJS(UnitTestCase):
 		              "taxjar_state_code", "pincode"):
 			self.assertIn("{0}: cstr(values.{0})".format(field), payload)
 
-	def test_verification_never_gates_continue(self):
-		"""Only completeness gates. TaxJar fails to match addresses users have
-		entered correctly, which is why the call left Address.validate."""
+	def test_a_rejected_address_gates_continue(self):
+		"""An address TaxJar answers about and rejects holds Continue, whether
+		the user has just created it or just picked one that already existed:
+		the card verifies itself on sight, so both ways in set the same verdict.
+
+		A product decision, taken knowingly. TaxJar fails to match addresses
+		users have entered correctly - which is why that call left
+		Address.validate - so a correct address it rejects now stops the wizard,
+		and the way past is to edit the address until TaxJar matches it.
+		"""
 		js = self._setup_js()
 		gate = js.split("\t_sync_address_gate() {")[1].split("\n\t}")[0]
-		self.assertNotIn("verified", gate)
-		self.assertNotIn("verifyError", gate)
+		self.assertIn("c.verifyError", gate)
+		self.assertIn('__("Please review the address, its invalid as per TaxJar.")', gate)
+		# The verdict lands after the card is drawn, so the check itself has to
+		# move the gate - otherwise the button stays open until the next render.
+		verify = js.split("\t_verify_address(entry) {")[1].split("\n\t}\n")[0]
+		self.assertEqual(verify.count("this._sync_address_gate();"), 2)
+
+	def test_an_unanswered_check_never_gates_continue(self):
+		"""The gate reads verifyError alone, which only a checked-and-rejected
+		address carries. An unsupported country, or a TaxJar that cannot be
+		reached, leaves verifyNote instead - and must not hold up a setup."""
+		js = self._setup_js()
+		gate = js.split("\t_sync_address_gate() {")[1].split("\n\t}")[0]
+		self.assertNotIn("verifyNote", gate)
+		self.assertNotIn("c.verified", gate)
+
+	def test_the_gate_reason_is_the_alert_and_nothing_on_the_button(self):
+		"""One channel for the reason: the alert a gated press raises. The
+		Continue button carries no tooltip of its own - a bubble that follows
+		the pointer around the footer says the same thing the press already
+		says."""
+		js = self._setup_js()
+		self.assertNotIn("_nextTooltip", js)
+		on_next = js.split("_on_next() {")[1].split("\n\t}\n")[0]
+		self.assertIn("frappe.show_alert", on_next)
 
 
 # ── Company address: deletion / disable guard ────────────────────────────────
@@ -14255,15 +14285,68 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 
 	def test_the_walkthrough_stays_a_click_to_play_thumbnail(self):
 		"""Nothing loads from youtube.com for someone who never presses play."""
-		header = self._fn("_done_header() {")
-		self.assertIn("SETUP_VIDEO_POSTER", header)
-		self.assertNotIn("youtube-nocookie.com", header)
-		play = self._fn("_play_setup_video() {")
-		self.assertIn("youtube-nocookie.com", play)
-		# No duration in the label: the video can be re-cut without this line
+		card = self._fn("_video_card({ title, description }) {")
+		self.assertIn("SETUP_VIDEO_POSTER", card)
+		self.assertNotIn("youtube-nocookie.com", card)
+		for player in ("_play_setup_video_in_row() {", "_play_setup_video_in_dialog() {"):
+			self.assertIn("youtube-nocookie.com", self._fn(player))
+		# No duration in either label: the video can be re-cut without a line
 		# going quietly wrong, and a wrong duration is worse than none.
-		self.assertIn('__("Walkthrough")', header)
-		self.assertNotIn("min", header.split('__("Walkthrough")')[1].split("</p>")[0])
+		js = self._js()
+		for label in ('__("Setup TaxJar")', '__("Walkthrough")'):
+			self.assertIn(label, js)
+			self.assertNotIn("min", js.split(label)[1].split("),")[0])
+
+	def test_the_first_step_plays_the_walkthrough_over_the_page(self):
+		"""A dialog there, so the checklist under the card stays where it is
+		while the video runs - that checklist is what the video introduces.
+		frappe's dialog brings the cross, the backdrop and Escape.
+
+		The wrapper is removed on close. A hidden dialog keeps its DOM, and an
+		iframe left inside one goes on playing with nothing on screen to stop
+		it."""
+		play = self._fn("_play_setup_video_in_dialog() {")
+		self.assertIn("new frappe.ui.Dialog({", play)
+		self.assertIn('dialog.$wrapper.on("hidden.bs.modal", () => dialog.$wrapper.remove());', play)
+		# The dialog lands outside .taxjar-setup, so the player's rules hang off
+		# a class of their own rather than the page's scope.
+		self.assertIn('dialog.$wrapper.addClass("ts-video-dialog");', play)
+		self.assertIn(".ts-video-dialog .ts-video-frame {", self._setup_css())
+
+	def test_the_activated_screen_plays_the_walkthrough_in_the_row(self):
+		"""Unchanged, and deliberately not the dialog: nothing sits under that
+		card, so a row that grows moves nothing the reader was using."""
+		play = self._fn("_play_setup_video_in_row() {")
+		self.assertIn('addClass("is-playing")', play)
+		self.assertIn(".taxjar-setup .ts-video.is-playing {", self._setup_css())
+		self.assertNotIn("frappe.ui.Dialog", play)
+
+	def test_each_place_picks_its_own_player(self):
+		"""One binder, one flag. The first step asks for the dialog; the
+		activated screen takes the row, which is what it has always done."""
+		binder = self._fn("_bind_setup_video({ dialog } = {}) {")
+		self.assertIn(
+			"dialog ? this._play_setup_video_in_dialog() : this._play_setup_video_in_row()", binder
+		)
+		self.assertIn("this._bind_setup_video({ dialog: true });", self._fn("_render_welcome() {"))
+
+	def test_the_walkthrough_opens_the_first_step_and_the_activated_screen(self):
+		"""One card, drawn by one method, in the two places a reader meets this
+		wizard: the first step, above the checklist, and the screen an activated
+		setup lands on. Each hands in its own two lines - two readers, on two
+		days, with two things to be told."""
+		welcome = self._fn("_render_welcome() {")
+		self.assertIn("this._video_card({", welcome)
+		self.assertIn('title: __("Setup TaxJar"),', welcome)
+
+		header = self._fn("_done_header() {")
+		self.assertIn("this._video_card({", header)
+		self.assertIn('title: __("Walkthrough"),', header)
+
+		# An id nobody has published yet would otherwise ship a play button that
+		# opens nothing, on the very first screen of the wizard.
+		card = self._fn("_video_card({ title, description }) {")
+		self.assertIn("if (!SETUP_VIDEO_ID) return \"\";", card)
 
 	def test_remedial_links_name_the_card_they_want_opened(self):
 		"""Both links appear only because a company has a feature flag off, and

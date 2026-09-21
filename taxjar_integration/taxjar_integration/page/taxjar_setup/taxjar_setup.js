@@ -402,11 +402,20 @@ class TaxJarSetup {
 	}
 
 	// ── Step 1: Welcome ──────────────────────────────────────────────
+	// The walkthrough sits above the checklist, under the step's own title:
+	// somebody who has never set this up is deciding whether to read four links
+	// or watch the thing being done, and the video has to be visible for that
+	// to be a choice. It repeats on the activated screen, which is a different
+	// reader on a different day.
 	_render_welcome() {
 		const icon = frappe.utils.icon("external-link", "xs");
 		const chartOfAccountsUrl = `${frappe.urllib.get_base_url()}/app/account/view/tree`;
 
 		this.$body.html(`
+			${this._video_card({
+				title: __("Setup TaxJar"),
+				description: __("Quick walkthrough to get your API keys & configure nexus."),
+			})}
 			<ul class="ts-check">
 				<li>
 					<a class="ts-check-link" href="https://app.taxjar.com/api_sign_up" target="_blank" rel="noopener noreferrer">
@@ -440,6 +449,11 @@ class TaxJarSetup {
 				</li>
 			</ul>
 		`);
+
+		// In a dialog here: the checklist under this card is what the video
+		// introduces, and a player that grew inside the row pushed it off the
+		// screen for as long as it ran.
+		this._bind_setup_video({ dialog: true });
 	}
 
 	// Sandbox/Live as a segmented single-select (frappe.ui.tab_buttons) rather
@@ -1420,11 +1434,17 @@ class TaxJarSetup {
 		}
 	}
 
-	// Advisory, never a gate. verify_address_with_taxjar()'s own docstring is
-	// explicit that TaxJar fails to match addresses a user may have entered
-	// correctly - which is why that call was pulled out of Address.validate in
-	// the first place. Gating Continue on it here would reintroduce the same bug
-	// one step earlier, so only completeness gates (see _sync_address_gate).
+	// A gate, by the product decision recorded in _sync_address_gate: an
+	// address TaxJar rejects holds Continue until it is fixed.
+	//
+	// It was advisory before. verify_address_with_taxjar()'s own docstring says
+	// TaxJar fails to match addresses a user may have entered correctly, which
+	// is why that call left Address.validate - so a rejected address that is in
+	// fact correct now stops this wizard, and the way past it is to edit the
+	// address until TaxJar matches it.
+	//
+	// The three outcomes stay as they were. Only a checked-and-rejected one
+	// sets verifyError, which is the single thing the gate reads.
 	_verify_address(entry) {
 		entry.$card.find(".ts-addr-action").empty().append(
 			$(`<span class="es-spinner" role="status"></span>`).attr("aria-label", __("Verifying…"))
@@ -1447,6 +1467,9 @@ class TaxJarSetup {
 				}
 				this._render_address_verify_note(entry);
 				this._render_address_action(entry);
+				// The verdict arrives after the card is drawn, so the gate is
+				// set here rather than by whoever asked for the check.
+				this._sync_address_gate();
 			})
 			.catch(() => {
 				entry.verified = false;
@@ -1454,6 +1477,7 @@ class TaxJarSetup {
 				entry.verifyNote = ADDRESS_NOT_CHECKED_REASONS.error;
 				this._render_address_verify_note(entry);
 				this._render_address_action(entry);
+				this._sync_address_gate();
 			});
 	}
 
@@ -1593,11 +1617,21 @@ class TaxJarSetup {
 		return taxjar_integration.us_state_code_options();
 	}
 
-	// Only two things gate: no address at all, and an incomplete one. Not a
-	// failed TaxJar verification (see _verify_address), and not an ambiguous
-	// origin - that one is resolved by the very button it would be blocking.
-	// One company named at a time, first in card order, with the verb that
-	// matches its state; the message re-points itself as each is fixed.
+	// Three things gate: no address at all, an incomplete one, and one TaxJar
+	// has answered about and rejected. Not an ambiguous origin - that one is
+	// resolved by the very button it would be blocking.
+	//
+	// The third is the address the user has just entered or just picked, since
+	// the card verifies itself on sight (see _render_address_card) - so both
+	// ways in reach this same check without the user pressing anything.
+	//
+	// It gates on a verdict, never on the absence of one: an address TaxJar
+	// could not be asked about carries verifyNote instead of verifyError, and
+	// an unreachable TaxJar must not hold up a setup.
+	//
+	// The first two name one company at a time, first in card order, with the
+	// verb that matches its state; the message re-points itself as each is
+	// fixed.
 	_sync_address_gate() {
 		const cards = this._addressCards || [];
 
@@ -1608,10 +1642,16 @@ class TaxJarSetup {
 		}
 
 		const incomplete = cards.find((c) => (c.info.missing || []).length);
-		this._set_next_gated(
-			!!incomplete,
-			incomplete ? __("Complete the address for {0} before continuing.", [incomplete.company]) : ""
-		);
+		if (incomplete) {
+			this._set_next_gated(true, __("Complete the address for {0} before continuing.", [incomplete.company]));
+			return;
+		}
+
+		// The only one of the three that names no company: the card carries
+		// the same verdict under the address it is about, so the reader is
+		// already looking at the one to review.
+		const invalid = cards.find((c) => c.verifyError);
+		this._set_next_gated(!!invalid, invalid ? __("Please review the address, its invalid as per TaxJar.") : "");
 	}
 
 	// Sends every card's current address, not just the changed ones -
@@ -2138,11 +2178,39 @@ class TaxJarSetup {
 		// attribute - .icon's own `stroke:` rule would win over one of those.
 		const tick = `<span class="ts-done-tick">${frappe.utils.icon("check", "sm")}</span>`;
 
-		// A facade, not an embed: one image from i.ytimg.com, and nothing from
-		// youtube.com loads for somebody who never presses play. No duration in
-		// the label - the video can be re-cut without this line going quietly
-		// wrong, and a wrong duration is worse than none.
-		const video = SETUP_VIDEO_ID ? `
+		return `
+			<div class="ts-done">
+				${tick}
+				<h2 class="ts-done-title">${__("TaxJar is configured")}</h2>
+				<span class="ts-done-spacer"></span>
+				<div class="ts-done-action"></div>
+			</div>
+			${this._video_card({
+				title: __("Walkthrough"),
+				description: __("See auto sales-tax computation and transaction syncing with TaxJar in action."),
+			})}
+		`;
+	}
+
+	// The walkthrough row. Two places show it, to two readers, and each hands
+	// in its own two lines: the first step introduces a setup nobody has done
+	// yet, and the activated screen offers the same video to somebody whose
+	// setup already runs.
+	//
+	// The words and the player are all that differ. The markup, the facade, the
+	// thumbnail fallback and the rules stay here, so the rest cannot drift.
+	//
+	// A facade, not an embed: one image from i.ytimg.com, and nothing from
+	// youtube.com loads for somebody who never presses play. No duration in the
+	// label - the video can be re-cut without this line going quietly wrong,
+	// and a wrong duration is worse than none.
+	//
+	// An empty SETUP_VIDEO_ID drops the row rather than shipping a play button
+	// that opens nothing.
+	_video_card({ title, description }) {
+		if (!SETUP_VIDEO_ID) return "";
+
+		return `
 			<div class="ts-video">
 				<button type="button" class="ts-video-play" aria-label="${__("Play the TaxJar walkthrough")}">
 					<img class="ts-video-thumb" src="${SETUP_VIDEO_POSTER}/maxresdefault.jpg" alt="">
@@ -2151,25 +2219,19 @@ class TaxJarSetup {
 					</span>
 				</button>
 				<div class="ts-video-text">
-					<p class="ts-video-title">${__("Walkthrough")}</p>
-					<p class="ts-video-desc">${__("See auto sales-tax computation and transaction syncing with TaxJar in action.")}</p>
+					<p class="ts-video-title">${frappe.utils.escape_html(title)}</p>
+					<p class="ts-video-desc">${frappe.utils.escape_html(description)}</p>
 				</div>
 			</div>
-		` : "";
-
-		return `
-			<div class="ts-done">
-				${tick}
-				<h2 class="ts-done-title">${__("TaxJar is configured")}</h2>
-				<span class="ts-done-spacer"></span>
-				<div class="ts-done-action"></div>
-			</div>
-			${video}
 		`;
 	}
 
-	_bind_setup_video() {
-		this.$body.find(".ts-video-play").on("click", () => this._play_setup_video());
+	// dialog: true opens the video over the page. Without it the row becomes
+	// the player, which is how the activated screen has always shown it.
+	_bind_setup_video({ dialog } = {}) {
+		this.$body.find(".ts-video-play").on("click", () =>
+			dialog ? this._play_setup_video_in_dialog() : this._play_setup_video_in_row()
+		);
 		// Bound here rather than an inline onerror="" attribute, like every other
 		// handler on this page. Safe to bind after inserting the <img>: the
 		// browser cannot fire error before this synchronous block returns.
@@ -2184,7 +2246,10 @@ class TaxJarSetup {
 	// The row becomes the player. A 168x96 frame is a thumbnail, not something
 	// anybody can watch, so the card drops its side-by-side layout and gives the
 	// video the width - the description has done its job once the video runs.
-	_play_setup_video() {
+	//
+	// The activated screen's player. Nothing sits under this card there, so a
+	// row that grows moves nothing the reader was using.
+	_play_setup_video_in_row() {
 		const $video = this.$body.find(".ts-video").addClass("is-playing");
 		const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(SETUP_VIDEO_ID)}?autoplay=1&rel=0`;
 		$video.find(".ts-video-play").replaceWith(`
@@ -2198,5 +2263,46 @@ class TaxJarSetup {
 				></iframe>
 			</div>
 		`);
+	}
+
+	// The first step's player: a dialog, over the page. What sits under that
+	// card is the checklist the video introduces, and a player that grew inside
+	// the row pushed it off the screen for as long as it ran.
+	//
+	// frappe's own dialog, so the cross, the backdrop, the Escape key and the
+	// focus trap are the desk's and not this page's.
+	//
+	// Built on each press and removed on close: a hidden dialog keeps its DOM,
+	// and an iframe left inside one goes on playing with nothing on screen to
+	// stop it. Removing it is also what makes the next press start the video
+	// from the top.
+	_play_setup_video_in_dialog() {
+		const dialog = new frappe.ui.Dialog({
+			title: __("TaxJar walkthrough"),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "player" }],
+		});
+
+		// frappe appends a dialog to <body>, outside .taxjar-setup - so the
+		// player's rules cannot be scoped to this page like the rest of its
+		// css. This class is what they hang off instead.
+		dialog.$wrapper.addClass("ts-video-dialog");
+
+		const src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(SETUP_VIDEO_ID)}?autoplay=1&rel=0`;
+		dialog.fields_dict.player.$wrapper.html(`
+			<div class="ts-video-frame">
+				<iframe
+					src="${src}"
+					title="${__("TaxJar walkthrough")}"
+					allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+					referrerpolicy="strict-origin-when-cross-origin"
+					allowfullscreen
+				></iframe>
+			</div>
+		`);
+
+		// hidden, not hide: the wrapper has to outlive the closing animation.
+		dialog.$wrapper.on("hidden.bs.modal", () => dialog.$wrapper.remove());
+		dialog.show();
 	}
 }
