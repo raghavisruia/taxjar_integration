@@ -1,37 +1,27 @@
 import frappe
 
-_DOCTYPES = ("Sales Invoice Item", "Quotation Item", "Sales Order Item")
+_DOCTYPES = ("Sales Invoice Item",)
 
-# The per-line "TaxJar Tax Detail" section, the JSON behind it, the HTML field
-# that rendered it, and the Taxable Amount column beside it.
-_FIELDNAMES = (
-	"taxjar_item_tax_section",
-	"taxjar_item_breakdown_json",
-	"taxjar_item_breakdown_html",
-	"taxable_amount",
-)
+# The Taxable Amount column. This is the one field a released version of the
+# app created on this table, so it is the one a migrated site still carries.
+_FIELDNAMES = ("taxable_amount",)
 
 
 def execute():
-	"""Drop the view-only TaxJar fields from the sales item child tables.
+	"""Drop the view-only Taxable Amount field from Sales Invoice Item.
 
-	What is left behind - product_tax_category and tax_collectable - is what the
-	tax engine reads: the first feeds product_tax_code on every TaxJar call, the
-	second is read back as the per-line sales_tax on create_order. Both were
-	later moved into the app's own namespace, as taxjar_product_tax_category and
-	taxjar_tax_collectable, by namespace_item_tax_fields. The four removed here
-	were written and never read by any server code:
+	The field was stored on every line and read by no server code at all. What
+	is left behind - product_tax_category and tax_collectable - is what the tax
+	engine reads: the first feeds product_tax_code on every TaxJar call, the
+	second is read back as the per-line sales_tax on create_order. Both are
+	moved into the app's own namespace afterwards, as taxjar_product_tax_category
+	and taxjar_tax_collectable, by namespace_item_tax_fields.
 
-	- taxable_amount was stored on every line and consumed by nothing at all.
-	- taxjar_item_breakdown_json duplicated, per line, a slice of the breakdown
-	  already stored whole on the parent's taxjar_breakdown_json.
-	- the HTML field and its Section Break existed only to draw that duplicate.
-
-	Removing them from make_custom_fields() only stops them being recreated;
+	Removing the field from make_custom_fields() only stops it being recreated;
 	after_migrate re-runs that function but never deletes what it no longer
-	lists, so migrated sites would keep the section forever. Hence this.
+	lists, so migrated sites would keep the column on the form forever.
 
-	The underlying columns are intentionally left in place - deleting a Custom
+	The underlying column is intentionally left in place - deleting a Custom
 	Field does not drop its column, and an unused column is cheaper to keep than
 	a one-way DDL is to get wrong.
 	"""

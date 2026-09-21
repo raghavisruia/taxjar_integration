@@ -1,15 +1,12 @@
 import frappe
 
-# Every (doctype, old fieldname, new fieldname) this patch moves. The three
-# sales item child tables carry both fields; the Item master carries only the
-# category the child rows fetch from.
+# Every (doctype, old fieldname, new fieldname) this patch moves. These are the
+# only two unprefixed fields any released version of this app ever created, and
+# it created them on these two doctypes alone. Sales Invoice Item carries both;
+# the Item master carries only the category the child rows fetch from.
 _RENAMES = (
 	("Sales Invoice Item", "product_tax_category", "taxjar_product_tax_category"),
 	("Sales Invoice Item", "tax_collectable", "taxjar_tax_collectable"),
-	("Quotation Item", "product_tax_category", "taxjar_product_tax_category"),
-	("Quotation Item", "tax_collectable", "taxjar_tax_collectable"),
-	("Sales Order Item", "product_tax_category", "taxjar_product_tax_category"),
-	("Sales Order Item", "tax_collectable", "taxjar_tax_collectable"),
 	("Item", "product_tax_category", "taxjar_product_tax_category"),
 )
 
@@ -20,18 +17,6 @@ _RENAMES = (
 _COPY_SQL = {
 	"Sales Invoice Item": """
 		UPDATE `tabSales Invoice Item`
-		SET `taxjar_product_tax_category` = `product_tax_category`,
-			`taxjar_tax_collectable` = `tax_collectable`
-		WHERE `product_tax_category` IS NOT NULL OR `tax_collectable` IS NOT NULL
-	""",
-	"Quotation Item": """
-		UPDATE `tabQuotation Item`
-		SET `taxjar_product_tax_category` = `product_tax_category`,
-			`taxjar_tax_collectable` = `tax_collectable`
-		WHERE `product_tax_category` IS NOT NULL OR `tax_collectable` IS NOT NULL
-	""",
-	"Sales Order Item": """
-		UPDATE `tabSales Order Item`
 		SET `taxjar_product_tax_category` = `product_tax_category`,
 			`taxjar_tax_collectable` = `tax_collectable`
 		WHERE `product_tax_category` IS NOT NULL OR `tax_collectable` IS NOT NULL
@@ -48,10 +33,10 @@ def execute():
 	"""Move the app's two unprefixed item fields into the taxjar_ namespace.
 
 	product_tax_category and tax_collectable were the only custom fields this
-	app created without its own prefix, and they sit on child tables the app
-	does not own. An unprefixed name on a shared table is a name a second tax
-	app can claim for a different meaning, and nothing warns either app. The
-	prefix also tells our field apart from the TaxJar SDK's own tax_collectable
+	app created without its own prefix, and tax_collectable sits on a child
+	table the app does not own. An unprefixed name on a shared table is a name
+	a second tax app can claim for a different meaning, and nothing warns either
+	app. The prefix also tells our field apart from the SDK's own tax_collectable
 	response attribute, which set_sales_tax reads two lines from where it
 	writes ours.
 

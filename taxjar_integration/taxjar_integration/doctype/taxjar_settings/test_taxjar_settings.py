@@ -4424,49 +4424,6 @@ class TestCustomerCustomFields(UnitTestCase):
 		self.assertFalse(section.get("collapsible_depends_on"))
 		self.assertFalse(section.get("depends_on"))
 
-	def test_exemption_column_break_removed_by_patch(self):
-		"""after_migrate re-runs make_custom_fields but never deletes what it no
-		longer lists. Without the patch an already-migrated site keeps the
-		Column Break, and keeps rendering the card in half a section - with an
-		empty column beside it, now that both fields that used to sit there
-		have moved into TaxJar Sync Details."""
-		import os
-		patches = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
-		))
-		with open(patches) as f:
-			self.assertIn(
-				"taxjar_integration.patches.remove_customer_exemption_column_break", f.read()
-			)
-
-		from taxjar_integration.patches.remove_customer_exemption_column_break import execute
-
-		mod = "taxjar_integration.patches.remove_customer_exemption_column_break"
-		with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
-			f"{mod}.frappe.delete_doc"
-		) as mock_delete, patch(f"{mod}.frappe.clear_cache") as mock_clear:
-			execute()
-
-		mock_delete.assert_called_once_with(
-			"Custom Field", "Customer-taxjar_column_break", ignore_missing=True
-		)
-		# The form reads its layout from the cached meta, so the delete only
-		# reaches the browser once that is dropped.
-		mock_clear.assert_called_once_with(doctype="Customer")
-
-	def test_exemption_column_break_patch_is_re_runnable(self):
-		"""A patch can be replayed on a site restored from a backup, and a
-		fresh install never had the field at all."""
-		from taxjar_integration.patches.remove_customer_exemption_column_break import execute
-
-		mod = "taxjar_integration.patches.remove_customer_exemption_column_break"
-		with patch(f"{mod}.frappe.db.exists", return_value=False), patch(
-			f"{mod}.frappe.delete_doc"
-		) as mock_delete, patch(f"{mod}.frappe.clear_cache"):
-			execute()
-
-		mock_delete.assert_not_called()
-
 	def test_sync_details_section_layout(self):
 		"""Everything about the last sync in one place: what it did, what went
 		wrong and when it queued on the left; which TaxJar record it wrote, and
@@ -5853,41 +5810,6 @@ class TestDeskPageLifecycleJS(UnitTestCase):
 
 class TestExcludedRename(UnitTestCase):
 
-	PATCH = "taxjar_integration.patches.rename_not_applicable_sync_status"
-
-	def test_patch_rewrites_the_stored_values(self):
-		from taxjar_integration.patches.rename_not_applicable_sync_status import execute
-
-		with patch(f"{self.PATCH}.frappe.db.has_column", return_value=True), patch(
-			f"{self.PATCH}.frappe.db.sql"
-		) as mock_sql:
-			execute()
-
-		sql = mock_sql.call_args[0][0]
-		self.assertIn("`tabSales Invoice`", sql)
-		self.assertIn("taxjar_sync_status = 'Excluded'", sql)
-		self.assertIn("WHERE taxjar_sync_status = 'Not Applicable'", sql)
-
-	def test_patch_is_a_no_op_without_the_column(self):
-		"""A site that installed the app but never enabled a TaxJar feature has
-		no taxjar_* columns; reading one raises MySQLdb (1054)."""
-		from taxjar_integration.patches.rename_not_applicable_sync_status import execute
-
-		with patch(f"{self.PATCH}.frappe.db.has_column", return_value=False), patch(
-			f"{self.PATCH}.frappe.db.sql"
-		) as mock_sql:
-			execute()
-
-		mock_sql.assert_not_called()
-
-	def test_patch_is_registered(self):
-		import os
-		path = os.path.normpath(
-			os.path.join(os.path.dirname(__file__), "..", "..", "..", "patches.txt")
-		)
-		with open(path) as f:
-			self.assertIn("taxjar_integration.patches.rename_not_applicable_sync_status", f.read())
-
 	def test_delete_marks_the_invoice_excluded(self):
 		"""Removing a transaction from TaxJar is exactly the excluded state."""
 		import inspect
@@ -5903,12 +5825,12 @@ class TestExcludedRename(UnitTestCase):
 		"""Guards the stored status, not the words.
 
 		The words are gone from the page - the card and the tab are both called
-		"Excluded" now - but "Not Applicable" survives as a scope key, in the
-		patch that renamed the status, and in prose explaining the rename, so a
-		plain string search reports those as leftovers. What must never come back
-		is the old *status value*, so the rule is that no line may mention both
-		the string and taxjar_sync_status: that catches an assignment, a
-		comparison, or a _set_sync_status() call, and leaves the rest alone.
+		"Excluded" now - but "Not Applicable" survives as a scope key and in
+		prose explaining the rename, so a plain string search reports those as
+		leftovers. What must never come back is the old *status value*, so the
+		rule is that no line may mention both the string and taxjar_sync_status:
+		that catches an assignment, a comparison, or a _set_sync_status() call,
+		and leaves the rest alone.
 		"""
 		import os
 		root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -5918,9 +5840,6 @@ class TestExcludedRename(UnitTestCase):
 					continue
 				for name in files:
 					if not name.endswith(exts) or name.startswith("test_"):
-						continue
-					# The patch is the one place that must still name the old value.
-					if name == "rename_not_applicable_sync_status.py":
 						continue
 					path = os.path.join(dirpath, name)
 					with open(path) as f:
@@ -7299,29 +7218,6 @@ class TestSalesInvoiceCustomFields(UnitTestCase):
 		fields = self._get_si_field_defs()
 		self.assertEqual(fields["taxjar_sync_section"]["insert_after"], "taxjar_status_html")
 
-	def test_marketplace_fields_removed_by_patch(self):
-		"""after_migrate re-runs make_custom_fields but never deletes what it no
-		longer lists, so an already-migrated site keeps the whole section."""
-		import os
-		patches = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
-		))
-		with open(patches) as f:
-			self.assertIn("taxjar_integration.patches.remove_marketplace_fields", f.read())
-
-		from taxjar_integration.patches.remove_marketplace_fields import _FIELDNAMES, execute
-
-		mod = "taxjar_integration.patches.remove_marketplace_fields"
-		with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
-			f"{mod}.frappe.delete_doc"
-		) as mock_delete, patch(f"{mod}.frappe.clear_cache"):
-			execute()
-
-		self.assertEqual(
-			[call.args[1] for call in mock_delete.call_args_list],
-			[f"Sales Invoice-{fieldname}" for fieldname in _FIELDNAMES],
-		)
-
 	def test_sync_status_field(self):
 		fields = self._get_si_field_defs()
 		f = fields["taxjar_sync_status"]
@@ -7351,30 +7247,6 @@ class TestSalesInvoiceCustomFields(UnitTestCase):
 		fields = self._get_si_field_defs()
 		self.assertNotIn("taxjar_sync_draft_message_html", fields)
 		self.assertEqual(fields["taxjar_sync_status"]["insert_after"], "taxjar_sync_section")
-
-	def test_sync_draft_message_field_removed_by_patch(self):
-		"""after_migrate re-runs make_custom_fields but never deletes what it no
-		longer lists, so an already-migrated site needs the patch."""
-		import os
-		patches = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
-		))
-		with open(patches) as f:
-			self.assertIn(
-				"taxjar_integration.patches.remove_sync_draft_message_field", f.read()
-			)
-
-		from taxjar_integration.patches.remove_sync_draft_message_field import execute
-
-		mod = "taxjar_integration.patches.remove_sync_draft_message_field"
-		with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
-			f"{mod}.frappe.delete_doc"
-		) as mock_delete, patch(f"{mod}.frappe.clear_cache"):
-			execute()
-
-		mock_delete.assert_called_once_with(
-			"Custom Field", "Sales Invoice-taxjar_sync_draft_message_html", ignore_missing=True
-		)
 
 	def test_sync_error_field(self):
 		fields = self._get_si_field_defs()
@@ -10687,28 +10559,17 @@ class TestWorkspaceBranding(UnitTestCase):
 			with self.subTest(icon=name):
 				self.assertIn(f'id="icon-{name}"', svg)
 
-	def test_old_workspace_removed_by_patch(self):
+	def test_taxjar_integration_casing_fix_patch_registered(self):
+		"""modules.txt in the released app said "Taxjar Integration". It now says
+		"TaxJar Integration". MySQL collation makes the two names one row, so
+		sync_all() never rewrites the stored name and the sidebar keeps reading
+		the old casing. The patch corrects it in place."""
 		import os
 		patches = os.path.normpath(os.path.join(
 			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
 		))
 		with open(patches) as f:
-			self.assertIn("remove_old_taxjar_workspace", f.read())
-
-	def test_taxjar_integration_casing_fix_patches_registered(self):
-		"""The "Taxjar Integration" -> "TaxJar Integration" casing fix needs
-		post_model_sync cleanup of the old-named Workspace/Workspace Sidebar/Module
-		Def left behind once sync_all() creates the new-named records (Module Def
-		can't be renamed in place - ModuleDef.before_rename blocks non-custom
-		modules)."""
-		import os
-		patches = os.path.normpath(os.path.join(
-			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
-		))
-		with open(patches) as f:
-			content = f.read()
-		self.assertIn("remove_old_taxjar_integration_workspace", content)
-		self.assertIn("remove_old_taxjar_integration_module", content)
+			self.assertIn("remove_old_taxjar_integration_module", f.read())
 
 	def test_icon_is_valid_not_dollar_sign(self):
 		ws = self._workspace()
@@ -18225,11 +18086,14 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 			self.assertIn("taxjar_integration.patches.namespace_item_tax_fields", f.read())
 
 	def test_patch_covers_every_renamed_field(self):
+		"""The patch is narrower than _ITEM_TAX_DOCTYPES on purpose. The app now
+		creates the namespaced fields on all three child tables, but a released
+		version only ever created the unprefixed pair on Sales Invoice Item and
+		the category on Item. Those two are the only tables holding data to
+		move; the other two never had an old column to copy out of."""
 		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL, _RENAMES
 
-		self.assertEqual(
-			sorted(_COPY_SQL), sorted([*_ITEM_TAX_DOCTYPES, "Item"])
-		)
+		self.assertEqual(sorted(_COPY_SQL), ["Item", "Sales Invoice Item"])
 		for doctype, old, new in _RENAMES:
 			self.assertIn(f"`{new}` = `{old}`", _COPY_SQL[doctype])
 
@@ -18247,7 +18111,7 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 	def test_patch_creates_the_fields_before_it_copies(self):
 		"""after_migrate runs make_custom_fields, but it runs after every patch.
 		The copy needs the new columns, so the patch creates them itself."""
-		from taxjar_integration.patches.namespace_item_tax_fields import execute
+		from taxjar_integration.patches.namespace_item_tax_fields import _COPY_SQL, execute
 
 		order = []
 		with patch(f"{self.SETTINGS}.make_custom_fields", side_effect=lambda: order.append("create")), \
@@ -18258,7 +18122,7 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 			execute()
 
 		self.assertEqual(order[0], "create")
-		self.assertEqual(order.count("copy"), 4)
+		self.assertEqual(order.count("copy"), len(_COPY_SQL))
 
 	def test_patch_is_a_no_op_without_the_old_columns(self):
 		"""A site that installed the app but never enabled a TaxJar feature has
@@ -18304,17 +18168,16 @@ class TestNamespaceItemTaxFieldsPatch(UnitTestCase):
 
 
 class TestNamespaceItemTaxFieldsPatchOnRealRows(UnitTestCase):
-	"""The patch's copy step, run against real rows in every table it touches.
+	"""The patch's copy step, run against real rows in both tables it touches.
 
-	The audit this work comes from found both development sites carrying zero
-	Sales Order Item and zero Quotation Item rows, so a migrate on either
-	exercises one of the four tables and reports success for all four. This
-	seeds a row in each table itself, so what the suite reports does not depend
-	on what a site happens to hold.
+	A development site can hold zero rows in either table, and a migrate against
+	one of those reports success without copying anything. This seeds a row in
+	each table itself, so what the suite reports does not depend on what a site
+	happens to hold.
 
 	The old fields are recreated in setUp, which is what makes the copy real:
 	on a fresh site their columns never existed, and the patch would correctly
-	skip every table. Recreating them puts the site into the state an already
+	skip both tables. Recreating them puts the site into the state an already
 	installed site is actually in.
 	"""
 
@@ -18346,8 +18209,6 @@ class TestNamespaceItemTaxFieldsPatchOnRealRows(UnitTestCase):
 	# has no tax_collectable field - the Item master carries only the category.
 	_SEEDS = (
 		("Sales Invoice Item", "TAXJAR-NS-TEST-SII", "20010", 7.25),
-		("Quotation Item", "TAXJAR-NS-TEST-QI", "31000", 3.50),
-		("Sales Order Item", "TAXJAR-NS-TEST-SOI", "99999", 0.00),
 		("Item", "TAXJAR-NS-TEST-ITEM", "40030", None),
 	)
 
