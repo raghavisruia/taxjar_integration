@@ -66,6 +66,58 @@ taxjar_integration.region_full_name = function (country, code) {
 	return (taxjar_integration.REGION_NAMES_BY_COUNTRY[country] || {})[code] || code;
 };
 
+// The two flags this app can ever draw - it stores regions for the United
+// States and Canada and nowhere else (see REGION_NAMES_BY_COUNTRY above).
+// Drawn inline rather than fetched: two shapes at 16px cost less as markup
+// than as two more requests, and an <img> that 404s leaves a broken-image box
+// where the flag should be.
+//
+// Both are authored on a 20x15 viewBox and drawn with plain rects and one
+// polygon, so they scale to whatever the caller sizes .taxjar-flag at. The
+// stars are dots rather than five-pointed stars on purpose: at 16px wide a
+// real star is three grey pixels, and a dot grid reads as the canton while a
+// smudge does not. No <clipPath> either - an id inside markup that renders
+// twice on a page collides with itself, so the rounded corner is CSS on the
+// wrapper instead.
+const COUNTRY_FLAG_SVG = {
+	US: `<svg viewBox="0 0 20 15" xmlns="http://www.w3.org/2000/svg">
+		<rect width="20" height="15" fill="#ffffff"/>
+		<g fill="#b22234">
+			<rect y="0" width="20" height="1.154"/><rect y="2.308" width="20" height="1.154"/>
+			<rect y="4.615" width="20" height="1.154"/><rect y="6.923" width="20" height="1.154"/>
+			<rect y="9.231" width="20" height="1.154"/><rect y="11.538" width="20" height="1.154"/>
+			<rect y="13.846" width="20" height="1.154"/>
+		</g>
+		<rect width="8" height="8.077" fill="#3c3b6e"/>
+		<g fill="#ffffff">
+			<circle cx="1.15" cy="1.35" r="0.3"/><circle cx="2.85" cy="1.35" r="0.3"/>
+			<circle cx="4.55" cy="1.35" r="0.3"/><circle cx="6.25" cy="1.35" r="0.3"/>
+			<circle cx="2" cy="3.15" r="0.3"/><circle cx="3.7" cy="3.15" r="0.3"/>
+			<circle cx="5.4" cy="3.15" r="0.3"/>
+			<circle cx="1.15" cy="4.95" r="0.3"/><circle cx="2.85" cy="4.95" r="0.3"/>
+			<circle cx="4.55" cy="4.95" r="0.3"/><circle cx="6.25" cy="4.95" r="0.3"/>
+			<circle cx="2" cy="6.75" r="0.3"/><circle cx="3.7" cy="6.75" r="0.3"/>
+			<circle cx="5.4" cy="6.75" r="0.3"/>
+		</g>
+	</svg>`,
+	CA: `<svg viewBox="0 0 20 15" xmlns="http://www.w3.org/2000/svg">
+		<rect width="20" height="15" fill="#ffffff"/>
+		<rect width="5" height="15" fill="#d52b1e"/>
+		<rect x="15" width="5" height="15" fill="#d52b1e"/>
+		<polygon fill="#d52b1e" points="10,2.6 11,4.9 12.9,4.5 12.3,6.6 14.5,6.2 13.2,8 14.1,8.7 11.5,9.5 11.8,11.6 10.5,11.2 10.5,12.4 9.5,12.4 9.5,11.2 8.2,11.6 8.5,9.5 5.9,8.7 6.8,8 5.5,6.2 7.7,6.6 7.1,4.5 9,4.9"/>
+	</svg>`,
+};
+
+// Decorative: the country's own name is always right beside it, so a screen
+// reader that announced the flag too would just say the country twice. Empty
+// string for a country with no flag on file, so a caller can concatenate it
+// without checking first.
+taxjar_integration.country_flag_html = function (country) {
+	const svg = COUNTRY_FLAG_SVG[country];
+	if (!svg) return "";
+	return `<span class="taxjar-flag" aria-hidden="true">${svg}</span>`;
+};
+
 // Select options for a US state code, as "AK — Alaska" over the stored "AK".
 // The value is still the 2-letter code TaxJar asks for, but a list of 51 bare
 // codes is read one guess at a time, so the option text carries the name too.

@@ -366,6 +366,10 @@
 	.taxjar-regions-card-heading {
 		font-weight: var(--font-weight-semibold);
 		color: var(--heading-color);
+		// The country's flag sits on the same line as its name.
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 
 	.taxjar-regions-card-body {
@@ -375,5 +379,209 @@
 		&:last-child {
 			margin-bottom: 0;
 		}
+	}
+}
+
+// ── Customer exemption card ───────────────────────────────────────────────
+// The card render_exemption_summary draws once an exemption exists. Not
+// frappe's .address-box: this holds more than an address does - a header, then
+// a band per country - so it needs rules between those bands, and padding on
+// each band rather than one padding around the lot. Every colour, radius and
+// space below is still a desk token, so it sits beside frappe's own cards in
+// the same form without looking foreign.
+//
+// frappe builds an input control with bootstrap's .form-group class, and with
+// it the 1rem gap that holds one field off the next. It builds an HTML control
+// from the base class instead, which carries .frappe-control alone - so this
+// field ended flush against the rule that closes its section, with no space
+// after the card at all.
+//
+// The gap belongs to the field, not to the card: the empty state stands in the
+// same wrapper and needs the same space under it.
+.frappe-control[data-fieldname="taxjar_exemption_summary_html"] {
+	margin-bottom: 1rem;
+}
+
+// Capped rather than halved, so the card keeps its width on a narrow screen
+// instead of shrinking with the viewport. The section around it is full width
+// for the empty state, which needs the room for its centred actions.
+.taxjar-exemption-card {
+	max-width: 28rem;
+	background-color: var(--card-bg);
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius);
+	// So a rule at the top of a band cannot cross the rounded corner.
+	overflow: hidden;
+
+	// One rule between bands, never above the first or below the last.
+	> * + * {
+		border-top: 1px solid var(--border-color);
+	}
+
+	// 12px, not --padding-md's 15px. The card stacks four bands, so that
+	// padding counts eight times down the card - and it set the regions in a
+	// band further from their own country name than the bands sit apart.
+	.taxjar-exemption-row {
+		padding: calc(var(--spacing) * 3);
+	}
+
+	// Flag, country name, and the count pushed to the far end of the same line.
+	.taxjar-exemption-country {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.taxjar-exemption-count {
+		margin-inline-start: auto;
+		white-space: nowrap;
+	}
+
+	// Indented to the country name above it - the flag's width and the gap
+	// after it - so the eye reads one left edge down the band, not two.
+	.taxjar-exemption-detail {
+		margin-top: 6px;
+		padding-inline-start: 24px;
+	}
+
+	// Rows sit closer than the chips within a row: a chip that wraps belongs
+	// to the list above it, and the wider space is what holds one chip apart
+	// from the next.
+	.taxjar-region-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px 6px;
+	}
+
+	// The chip sets its own height from its padding, as the Nexus page's own
+	// region chip does - the badge's fixed height crops a two-line name.
+	.taxjar-region-chip.es-badge {
+		height: auto;
+		padding: 3px 9px;
+	}
+
+	// The line the control sits on: a flex item as wide as the row, so the
+	// chips above it break before it and it takes the whole line. The control
+	// inside keeps its own width.
+	.taxjar-region-more-line {
+		flex-basis: 100%;
+	}
+
+	// The control that closes the row, as words rather than as a shape: the
+	// espresso button with its box taken off, at the chip's type size and the
+	// chip's ink, with a dotted rule under the text. The chips are the data
+	// and this is the one action among them, so it carries no pill and no icon
+	// - a pill read as one more region, and a chevron beside two words said
+	// what the words say.
+	//
+	// The ink is the deepening: grey at rest, the chip's own step, so the
+	// action sits with the regions it counts rather than over them. Then a
+	// step deeper on hover, on the words and on the rule together, which is
+	// what answers the pointer. The button's own hover fill would put the box
+	// back, so it goes. The focus ring stays, and it is what answers a
+	// keyboard.
+	.taxjar-region-more.es-button {
+		height: auto;
+		// The padding holds the ring clear of the words.
+		//
+		// The words then start where the words in the chips above them start:
+		// the chip's own 9px of padding, less this button's 4px. Set against
+		// the pill's outer edge instead, the control lined up with the country
+		// name above the list and read as a line under it, rather than as the
+		// end of the list itself. A pill is a shape, but this control is
+		// words, and words line up with words.
+		padding: 2px 4px;
+		margin-inline-start: 5px;
+		color: var(--ink-gray-6);
+		// The button's own two fills, set to nothing: a fill on hover or on
+		// press would put the box back around the words. The ink below is what
+		// answers the pointer instead, and the focus ring is what answers a
+		// keyboard.
+		--bt-fill-bg-hover: transparent;
+		--bt-fill-bg-active: transparent;
+
+		&:hover {
+			color: var(--ink-gray-8);
+		}
+
+		// The rule sits on the label rather than on the button, so it runs
+		// under the words and not under the padding around them.
+		//
+		// Dotted, and painted as a background rather than as
+		// text-decoration: underline. It is the rule the Nexus page's own
+		// count draws (.taxjar-nexus-count), so the app marks the things it
+		// opens in the one way. A background also paints once for the whole
+		// box, which keeps the dots even.
+		//
+		// Padding on the label moves the background clear of the descenders
+		// without moving the words off their line.
+		.es-button__label {
+			// One step under the words, not the lighter step an edge takes:
+			// the rule is what says the words can be pressed, so it has to
+			// read at 13px.
+			--taxjar-more-rule: var(--ink-gray-5);
+			background-image: repeating-linear-gradient(
+				to right,
+				var(--taxjar-more-rule) 0 1px,
+				transparent 1px 3px
+			);
+			background-size: 100% 1px;
+			background-repeat: no-repeat;
+			background-position: left bottom;
+			padding-bottom: 2px;
+		}
+
+		&:hover .es-button__label {
+			--taxjar-more-rule: var(--ink-gray-8);
+		}
+	}
+}
+
+// The header is the one band laid out as a row, so the pencil can sit at its
+// far end. frappe's .card-menu-btn would pin it to the card's top-right corner
+// instead, which is half a band away from the line it belongs to.
+.taxjar-exemption-header {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+
+	.taxjar-exemption-edit {
+		margin-inline-start: auto;
+	}
+}
+
+// ── Country flag ──────────────────────────────────────────────────────────
+// The chip taxjar_integration.country_flag_html draws its SVG into. The shape
+// lives here rather than in the SVG so it is one rule to change, and so the
+// rounded corner needs no <clipPath> - an id inside markup that renders twice
+// on a page collides with itself.
+.taxjar-flag {
+	display: inline-block;
+	// Never squeezed by a long country name beside it in a flex row.
+	flex: none;
+	// 4:3, the same ratio both flags are authored at, sized to sit on a line
+	// of the 12-13px text it labels rather than to tower over it.
+	width: 16px;
+	height: 12px;
+	border-radius: 2px;
+	overflow: hidden;
+	// Both flags reach their own edge in white, so without an edge of its own
+	// the chip bleeds into the card behind it.
+	//
+	// A ring outside the box, not `inset` and not a `border`. Inset paints
+	// under the SVG's own edge and eats a pixel of the artwork - a stripe on
+	// one flag, a red panel on the other. A border shrinks the artwork into a
+	// smaller content box while the outer corner keeps the full radius, which
+	// leaves the two curves visibly out of step. This one sits clear of both.
+	//
+	// var(--border-color), like every other edge in this file, so the ring
+	// follows the desk into dark mode instead of staying a black line on a
+	// dark card.
+	box-shadow: 0 0 0 1px var(--border-color);
+
+	svg {
+		display: block;
+		width: 100%;
+		height: 100%;
 	}
 }

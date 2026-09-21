@@ -4392,15 +4392,22 @@ class TestCustomerCustomFields(UnitTestCase):
 		self.assertEqual(f["fieldtype"], "HTML")
 		self.assertEqual(f["insert_after"], "taxjar_section_break")
 
-	def test_main_section_layout(self):
-		"""One section ("TaxJar Tax Exemption"): just the summary card in
-		column 1, Sync Status/Sync Error in column 2 - the at-a-glance state.
-		Customer ID and Last Synced are bookkeeping detail, not glance-state,
-		so they live in their own collapsed section instead."""
+	def test_the_exemption_section_holds_the_card_and_nothing_else(self):
+		"""The card is the section. It draws a bordered box when an exemption
+		exists and frappe's empty state - icon, sentence, two actions - when
+		none does, and both want the whole width. A Column Break here halved
+		it and left the empty state's centred actions crowded against an edge,
+		so there is no longer one to divide it."""
 		fields = self._get_customer_field_defs()
-		self.assertEqual(fields["taxjar_column_break"]["insert_after"], "taxjar_exemption_summary_html")
-		self.assertEqual(fields["taxjar_customer_sync_status"]["insert_after"], "taxjar_column_break")
-		self.assertEqual(fields["taxjar_customer_sync_error"]["insert_after"], "taxjar_customer_sync_status")
+		self.assertNotIn("taxjar_column_break", fields)
+		self.assertEqual(
+			fields["taxjar_exemption_summary_html"]["insert_after"], "taxjar_section_break"
+		)
+		# Nothing else may anchor inside that section either.
+		self.assertEqual(
+			[f for f, d in fields.items() if d.get("insert_after") == "taxjar_exemption_summary_html"],
+			["taxjar_sync_details_section"],
+		)
 
 	def test_sync_details_section_is_collapsed_by_default(self):
 		"""collapsible=1 with no collapsible_depends_on collapses by default
@@ -4412,16 +4419,75 @@ class TestCustomerCustomFields(UnitTestCase):
 		section = fields["taxjar_sync_details_section"]
 		self.assertEqual(section["fieldtype"], "Section Break")
 		self.assertEqual(section["label"], "TaxJar Sync Details")
-		self.assertEqual(section["insert_after"], "taxjar_customer_sync_queued_at")
+		self.assertEqual(section["insert_after"], "taxjar_exemption_summary_html")
 		self.assertTrue(section.get("collapsible"))
 		self.assertFalse(section.get("collapsible_depends_on"))
 		self.assertFalse(section.get("depends_on"))
 
+	def test_exemption_column_break_removed_by_patch(self):
+		"""after_migrate re-runs make_custom_fields but never deletes what it no
+		longer lists. Without the patch an already-migrated site keeps the
+		Column Break, and keeps rendering the card in half a section - with an
+		empty column beside it, now that both fields that used to sit there
+		have moved into TaxJar Sync Details."""
+		import os
+		patches = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
+		))
+		with open(patches) as f:
+			self.assertIn(
+				"taxjar_integration.patches.remove_customer_exemption_column_break", f.read()
+			)
+
+		from taxjar_integration.patches.remove_customer_exemption_column_break import execute
+
+		mod = "taxjar_integration.patches.remove_customer_exemption_column_break"
+		with patch(f"{mod}.frappe.db.exists", return_value=True), patch(
+			f"{mod}.frappe.delete_doc"
+		) as mock_delete, patch(f"{mod}.frappe.clear_cache") as mock_clear:
+			execute()
+
+		mock_delete.assert_called_once_with(
+			"Custom Field", "Customer-taxjar_column_break", ignore_missing=True
+		)
+		# The form reads its layout from the cached meta, so the delete only
+		# reaches the browser once that is dropped.
+		mock_clear.assert_called_once_with(doctype="Customer")
+
+	def test_exemption_column_break_patch_is_re_runnable(self):
+		"""A patch can be replayed on a site restored from a backup, and a
+		fresh install never had the field at all."""
+		from taxjar_integration.patches.remove_customer_exemption_column_break import execute
+
+		mod = "taxjar_integration.patches.remove_customer_exemption_column_break"
+		with patch(f"{mod}.frappe.db.exists", return_value=False), patch(
+			f"{mod}.frappe.delete_doc"
+		) as mock_delete, patch(f"{mod}.frappe.clear_cache"):
+			execute()
+
+		mock_delete.assert_not_called()
+
 	def test_sync_details_section_layout(self):
+		"""Everything about the last sync in one place: what it did, what went
+		wrong and when it queued on the left; which TaxJar record it wrote, and
+		when, on the right. Sync Status used to sit beside the exemption card
+		instead, which put the reading next to the exemption rather than next
+		to the rest of the sync it describes."""
 		fields = self._get_customer_field_defs()
-		self.assertEqual(fields["taxjar_customer_id"]["insert_after"], "taxjar_sync_details_section")
-		self.assertEqual(fields["taxjar_sync_details_cb"]["insert_after"], "taxjar_customer_id")
-		self.assertEqual(fields["taxjar_last_synced"]["insert_after"], "taxjar_sync_details_cb")
+		self.assertEqual(
+			fields["taxjar_customer_sync_status"]["insert_after"], "taxjar_sync_details_section"
+		)
+		self.assertEqual(
+			fields["taxjar_customer_sync_error"]["insert_after"], "taxjar_customer_sync_status"
+		)
+		self.assertEqual(
+			fields["taxjar_customer_sync_queued_at"]["insert_after"], "taxjar_customer_sync_error"
+		)
+		self.assertEqual(
+			fields["taxjar_sync_details_cb"]["insert_after"], "taxjar_customer_sync_queued_at"
+		)
+		self.assertEqual(fields["taxjar_customer_id"]["insert_after"], "taxjar_sync_details_cb")
+		self.assertEqual(fields["taxjar_last_synced"]["insert_after"], "taxjar_customer_id")
 
 	def test_raw_data_section_layout(self):
 		"""A third, separate section groups the hidden backing fields
@@ -5023,6 +5089,30 @@ class TestCustomersPageRealtime(UnitTestCase):
 		doc.set.assert_called_once_with("taxjar_exempt_regions", [])
 		doc.append.assert_not_called()
 		self.assertEqual(doc.taxjar_exemption_type, "")
+
+	def test_configure_exemption_drops_regions_under_non_exempt(self):
+		"""Non Exempt is one global answer - the customer pays sales tax
+		everywhere - so a region under it means nothing, exactly as under a
+		blank type.
+
+		A row kept here would not stop at the customer card: the payload
+		sync_customer_to_taxjar builds reads the region table whatever the type
+		says, so the row would travel to TaxJar and sit there under a non_exempt
+		customer."""
+		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
+		from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+			configure_exemption,
+		)
+		doc = MagicMock()
+
+		with patch(f"{page_mod}.frappe.has_permission"), patch(
+			f"{page_mod}._ensure_taxjar_customer_fields"
+		), patch(f"{page_mod}.frappe.get_doc", return_value=doc):
+			configure_exemption(["CUST-0001"], "Non Exempt", [{"country": "US", "state": "TX"}])
+
+		doc.set.assert_called_once_with("taxjar_exempt_regions", [])
+		doc.append.assert_not_called()
+		self.assertEqual(doc.taxjar_exemption_type, "Non Exempt")
 
 	def test_bulk_sync_publishes_queued(self):
 		page_mod = "taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers"
@@ -6430,10 +6520,20 @@ class TestCustomerConfigPageJS(UnitTestCase):
 		js = self._js()
 		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
 
-		self.assertIn('__("US States")', card_fn)
-		self.assertIn('__("CA Provinces")', card_fn)
+		self.assertIn('__("United States")', card_fn)
+		self.assertIn('__("Canada")', card_fn)
 		# Codes are stored; the card reads names.
 		self.assertIn("taxjar_integration.region_full_name(country, state)", card_fn)
+
+	def test_the_hover_card_heads_each_country_the_way_the_form_card_does(self):
+		"""This popover and the Customer form's exemption card show the very
+		same regions. Two names for one country - "US States" here, "United
+		States" there - read as two different things."""
+		js = self._js()
+		card_fn = js.split("build_regions_card(regions) {")[1].split("\n\t}\n")[0]
+		self.assertIn("taxjar_integration.country_flag_html(country)", card_fn)
+		self.assertNotIn("US States", card_fn)
+		self.assertNotIn("CA Provinces", card_fn)
 
 	def test_the_region_card_is_the_shared_one(self):
 		"""The guided setup's Nexus card opens the same card from its own region
@@ -8898,87 +8998,107 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		js = self._read_js()
 		self.assertIn("function render_exemption_summary(frm)", js)
 		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
-		self.assertIn("No exemption configured.", summary_fn)
+		self.assertIn("No exemption configured", summary_fn)
 		self.assertIn("taxjar-manage-exemption-btn", summary_fn)
-		self.assertIn("_exemption_card_body(frm)", summary_fn)
 
-	def test_exemption_summary_reuses_the_address_card_styling(self):
-		"""Reusing frappe's own .address-box/.edit-btn classes and pencil icon
-		(rather than inventing parallel CSS or a different icon) is what makes
-		this look identical to the Address card for free - .edit-btn's
-		absolute top-right positioning is a CSS rule scoped to being inside
-		.address-box."""
+	def test_nothing_configured_yet_is_an_empty_state(self):
+		"""A bordered box holding one muted sentence said that there was
+		nothing here, without offering a way to change it or explaining what
+		an exemption would do. frappe's own empty state says all three."""
 		js = self._read_js()
 		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
-		self.assertIn('class="address-box"', summary_fn)
-		self.assertIn("edit-btn", summary_fn)
-		self.assertIn('frappe.utils.icon("pencil", "xs")', summary_fn)
+		self.assertIn("frappe.ui.empty_state.html({", summary_fn)
+		self.assertIn('title: __("No exemption configured")', summary_fn)
+		self.assertIn('description: __("Set exemption to stop collecting sales tax")', summary_fn)
 
-	def test_the_edit_pencil_names_itself_in_the_desk_bubble(self):
-		"""The pencil carries an icon and no text, so the name lives in
-		aria-label and the bubble is the desk's own, not the browser's."""
+	def test_the_empty_state_leads_with_manage_exemption(self):
+		"""Solid is the one primary action on the card - the docs link beside
+		it is the secondary, so it stays a link rather than a second button."""
 		js = self._read_js()
 		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
-		self.assertIn('aria-label="${__("Edit")}"', summary_fn)
-		self.assertNotIn("title=", summary_fn)
-		self.assertIn('frappe.ui.tooltip(el, { text: __("Edit") })', summary_fn)
+		manage = summary_fn.split('label: __("Manage Exemption")')[1].split("},")[0]
+		self.assertIn('variant: "solid"', manage)
+		self.assertIn("taxjar-manage-exemption-btn", manage)
 
-	def test_exemption_card_body_non_exempt(self):
+	def test_the_empty_state_links_to_the_manual(self):
 		js = self._read_js()
-		fn = js.split("function _exemption_card_body(frm) {")[1].split("\nfunction ")[0]
-		self.assertIn('type === "Non Exempt"', fn)
-		self.assertIn("Non-Exempted", fn)
-		self.assertIn("Sales tax is applicable.", fn)
+		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
+		docs = summary_fn.split('label: __("Documentation")')[1].split("},")[0]
+		self.assertIn("href: TAXJAR_DOC_URL", docs)
+		self.assertIn('icon: "external-link"', docs)
+		# The app's own page in the ERPNext manual, not TaxJar's site.
+		self.assertIn(
+			'const TAXJAR_DOC_URL = "https://docs.frappe.io/erpnext/taxjar_integration";',
+			self._read_js(),
+		)
 
-	def test_exemption_card_body_splits_regions_by_country(self):
-		"""Two separate blocks (US States / CA Provinces), not one
-		comma-joined line across both countries - each is built by the same
-		shared helper so a full country collapses to just its name."""
+	def test_a_configured_exemption_gets_the_app_s_own_card(self):
+		"""Not frappe's .address-box any more: this card holds a header and a
+		band per country, so it needs rules between those bands and padding on
+		each one rather than a single padding around the lot. What it renders
+		is covered by tests/js/customer_card.test.js, which builds the card and
+		reads it back out of the DOM."""
 		js = self._read_js()
-		fn = js.split("function _exemption_card_body(frm) {")[1].split("\nfunction ")[0]
-		self.assertIn(
-			'_exemption_region_block("US", us_codes, taxjar_integration.US_STATE_CODES, __("United States"), __("US States"), __("All states exempted"))',
-			fn,
-		)
-		self.assertIn(
-			'_exemption_region_block("CA", ca_codes, taxjar_integration.CA_PROVINCE_CODES, __("Canada"), __("CA Provinces"), __("All provinces exempted"))',
-			fn,
-		)
-		self.assertIn("No regions selected", fn)
-		self.assertIn('<span>${__("Exempted")}</span>', fn)
+		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
+		self.assertIn('$(\'<div class="taxjar-exemption-card"></div>\')', summary_fn)
+		# The class attributes, not the bare names - the comments above them
+		# explain what this card no longer borrows from frappe's address card.
+		self.assertNotIn('class="address-box', js)
+		# frappe renamed its corner rule to .card-menu-btn when it rebuilt that
+		# card. This one uses neither: the pencil sits in the header row, which
+		# is the line it belongs to.
+		self.assertNotIn('css_class: "card-menu-btn', js)
+		self.assertNotIn('css_class: "edit-btn', js)
 
-	def test_exemption_region_block_collapses_a_full_country_to_its_name(self):
-		"""A fully-selected country still shows its name (unchanged from
-		before), plus a small caption confirming every state/province is
-		checked - otherwise "United States" alone reads the same whether one
-		state or all fifty are selected."""
+	def test_only_the_configured_card_is_width_capped(self):
+		"""The section is full width for the empty state, which needs the room
+		for its centred actions. A card of facts stretched the same way reads
+		as a banner, so the cap goes on the card rather than on the section."""
 		js = self._read_js()
-		fn = js.split(
-			"function _exemption_region_block(country, codes, all_codes, country_name, label, all_selected_text) {"
-		)[1].split("\nfunction ")[0]
-		self.assertIn("if (codes.length === all_codes.length) {", fn)
-		self.assertIn("frappe.utils.escape_html(country_name)", fn)
-		self.assertIn("${all_selected_text}", fn)
-		# The country name's own <p> must carry the tight margin, not the
-		# caption's - the caption is the pair's LAST line, so it's the one
-		# that needs the default bottom margin to separate this block from
-		# the next country's, same shape the un-collapsed branch already
-		# gets right below (label tight, value carries the gap). Bold and
-		# regular size (not text-muted or `small`), so it reads as a heading
-		# one step down from the type header, with the muted `small` caption
-		# below it one step down again - a three-tier size/weight hierarchy,
-		# not just a color difference.
-		collapsed_branch = fn.split("if (codes.length === all_codes.length) {")[1].split("\n\t}")[0]
-		self.assertIn('<p style="margin-bottom: 0;"><strong>${frappe.utils.escape_html(country_name)}</strong></p>', collapsed_branch)
-		self.assertIn('<p class="text-muted small">${all_selected_text}</p>', collapsed_branch)
-		# The un-collapsed branch still shows the "US States"/"CA Provinces"
-		# label above the comma-joined, sorted full-name list - also bold and
-		# regular-size, same reasoning as the collapsed branch above.
-		self.assertIn('<p style="margin-bottom: 0;"><strong>${label}</strong></p>', fn)
-		self.assertIn(
-			'.map((code) => taxjar_integration.region_full_name(country, code))\n\t\t.sort()\n\t\t.join(", ");',
-			fn,
-		)
+		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
+		empty_branch = summary_fn.split("if (!frm.doc.taxjar_exemption_type) {")[1].split("\n\t\treturn;")[0]
+		self.assertNotIn("taxjar-exemption-card", empty_branch)
+		self.assertIn('$(\'<div class="taxjar-exemption-card"></div>\')', summary_fn)
+
+	def test_the_header_control_names_itself_in_the_desk_bubble(self):
+		"""The control carries an icon and no text, so `tooltip` is both the
+		bubble on hover and the name a screen reader reads. The bubble says what
+		the dialog behind it is called."""
+		js = self._read_js()
+		header_fn = js.split("function _exemption_header(frm) {")[1].split("\nfunction ")[0]
+		self.assertIn('icon: "pencil"', header_fn)
+		self.assertIn('tooltip: __("Manage Exemption")', header_fn)
+		self.assertIn("taxjar-manage-exemption-btn", header_fn)
+
+	def test_region_overflow_follows_the_nexus_page(self):
+		"""Both pages cap a country's regions and open the rest in place. The
+		Nexus page chose that over a hover panel because a panel is closed to a
+		keyboard and to touch, and drew the hidden regions in a second style in
+		a second place - which is just as true here."""
+		js = self._read_js()
+		chips_fn = js.split("function _render_region_chips($chips, names, open) {")[1].split("\nfunction ")[0]
+		self.assertIn(".badge({", chips_fn)
+		self.assertIn("REGIONS_SHOWN", chips_fn)
+		self.assertIn('__("Show fewer")', chips_fn)
+		self.assertIn("_render_region_chips($chips, names, !open)", chips_fn)
+
+	def test_each_country_carries_its_own_wording(self):
+		"""A country's name, its "all of them" caption and its count live in one
+		entry, so they cannot drift apart."""
+		js = self._read_js()
+		table = js.split("const EXEMPTION_COUNTRIES = [")[1].split("\n];")[0]
+		for expected in (
+			'code: "US"',
+			'__("United States")',
+			'__("All states exempted")',
+			'code: "CA"',
+			'__("Canada")',
+			'__("All provinces exempted")',
+		):
+			self.assertIn(expected, table)
+		# The heading names the place, not the kind of region inside it.
+		self.assertNotIn("US States", js)
+		self.assertNotIn("CA Provinces", js)
 
 	def test_refresh_renders_exemption_summary(self):
 		js = self._read_js()

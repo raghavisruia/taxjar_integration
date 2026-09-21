@@ -13,6 +13,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_QUEUED_STUCK_MINUTES,
+	_EXEMPTION_TYPES_REQUIRING_REGIONS,
 	_customer_sync_companies,
 	_customer_sync_status_fields,
 	_enqueue_customer_sync,
@@ -396,9 +397,16 @@ def configure_exemption(
 	regions = frappe.parse_json(regions) if isinstance(regions, str) else (regions or [])
 	_check_each(customers)
 
-	# No exemption type means no exemption, and an exemption region without one
-	# is meaningless - drop them rather than orphan them.
-	if not exemption_type:
+	# Only three types are scoped to regions. A blank type is no exemption at
+	# all, and "Non Exempt" is one global answer: the customer pays sales tax
+	# everywhere. A region under either is meaningless, so it is dropped rather
+	# than orphaned.
+	#
+	# Dropped here, not only in the dialog that usually sends this: the payload
+	# sync_customer_to_taxjar builds reads the region table whatever the type
+	# says, so a row left behind here travels to TaxJar and sits there under a
+	# non_exempt customer.
+	if exemption_type not in _EXEMPTION_TYPES_REQUIRING_REGIONS:
 		regions = []
 
 	return _apply_exemption(customers, exemption_type or "", regions)

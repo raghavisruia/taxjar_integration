@@ -20,6 +20,7 @@ const SETTINGS_PATH = path.join(
 	APP_ROOT,
 	"taxjar_integration/taxjar_integration/doctype/taxjar_settings/taxjar_settings.js"
 );
+const CUSTOMER_PATH = path.join(JS_ROOT, "customer.js");
 
 // The transaction forms, by the doctype each one registers. Read from disk, not
 // transcribed: a test that copies the handlers out of these files cannot notice
@@ -35,6 +36,7 @@ const FORM_SCRIPTS = {
 const UTILS_SOURCE = fs.readFileSync(UTILS_PATH, "utf8");
 const DESK_SIDEBAR_SOURCE = fs.readFileSync(DESK_SIDEBAR_PATH, "utf8");
 const SETTINGS_SOURCE = fs.readFileSync(SETTINGS_PATH, "utf8");
+const CUSTOMER_SOURCE = fs.readFileSync(CUSTOMER_PATH, "utf8");
 const FORM_SOURCES = Object.fromEntries(
 	Object.entries(FORM_SCRIPTS).map(([doctype, file]) => [doctype, fs.readFileSync(file, "utf8")])
 );
@@ -301,6 +303,28 @@ export function load_taxjar_settings_form() {
 /**
  * Put one grid row in `locals` and hand back what a grid event is called with.
  */
+/**
+ * Evaluate customer.js, and return its handlers by doctype.
+ *
+ * Loaded the same way as the form scripts above, for the same reason: it is a
+ * browser script whose only effect on load is to register handlers through
+ * `frappe.ui.form.on`. taxjar_utils.js has to be loaded first - the exemption
+ * card resolves region codes to full names through it.
+ */
+export function load_customer_form() {
+	// eslint-disable-next-line no-new-func
+	new Function(CUSTOMER_SOURCE)();
+
+	const handlers = {};
+	for (const [doctype, events] of frappe.ui.form.on.mock.calls) {
+		handlers[doctype] = { ...(handlers[doctype] || {}), ...events };
+	}
+	if (!handlers.Customer) {
+		throw new Error("Customer registered no handlers - has its form script moved?");
+	}
+	return handlers.Customer;
+}
+
 export function add_grid_row(doctype, name, values) {
 	globalThis.locals[doctype] = globalThis.locals[doctype] || {};
 	globalThis.locals[doctype][name] = { doctype, name, ...values };

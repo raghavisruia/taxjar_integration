@@ -508,15 +508,20 @@ class TaxJarCustomerConfig {
 		const section = (country, heading, all_label, codes) => {
 			const states = regions.filter((r) => r.country === country).map((r) => r.state);
 			return {
-				heading,
+				// Flag then country name, the same pair the Customer form's
+				// own exemption card heads each block with - this popover
+				// shows the very same regions, so it says them the same way.
+				heading: `${taxjar_integration.country_flag_html(country)}<span>${frappe.utils.escape_html(
+					heading
+				)}</span>`,
 				names: states.map((state) => taxjar_integration.region_full_name(country, state)),
 				all_label: states.length >= codes.length ? all_label : null,
 			};
 		};
 
 		return taxjar_integration.region_hover_card([
-			section("US", __("US States"), __("All states exempted"), taxjar_integration.US_STATE_CODES),
-			section("CA", __("CA Provinces"), __("All provinces exempted"), taxjar_integration.CA_PROVINCE_CODES),
+			section("US", __("United States"), __("All states exempted"), taxjar_integration.US_STATE_CODES),
+			section("CA", __("Canada"), __("All provinces exempted"), taxjar_integration.CA_PROVINCE_CODES),
 		]);
 	}
 

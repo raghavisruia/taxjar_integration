@@ -896,7 +896,13 @@ def get_custom_fields():
 			),
 		],
 		"Customer": [
-			# ── TaxJar Tax Exemption (summary card + sync status) ──
+			# ── TaxJar Tax Exemption ──
+			# One field, the whole width of the section. The summary card that
+			# renders into it is a card: it draws its own bordered box when an
+			# exemption exists, and frappe's empty state - icon, sentence, two
+			# actions - when none does. Both want the full column. Sharing the
+			# section with the sync fields squeezed the card into half of it and
+			# left the empty state's centred actions crowded against the edge.
 			dict(
 				fieldname="taxjar_section_break",
 				fieldtype="Section Break",
@@ -909,15 +915,23 @@ def get_custom_fields():
 				fieldtype="HTML",
 				insert_after="taxjar_section_break",
 			),
+			# ── TaxJar Sync Details (collapsed by default) ───────────────
+			# Everything about the last sync, in one place: what it did, what
+			# went wrong, which record it wrote, and when. Sync Status used to
+			# sit beside the card in the section above, which put the reading
+			# ("Queued") next to the exemption rather than next to the rest of
+			# the sync it belongs to.
 			dict(
-				fieldname="taxjar_column_break",
-				fieldtype="Column Break",
+				fieldname="taxjar_sync_details_section",
+				fieldtype="Section Break",
 				insert_after="taxjar_exemption_summary_html",
+				label="TaxJar Sync Details",
+				collapsible=1,
 			),
 			dict(
 				fieldname="taxjar_customer_sync_status",
 				fieldtype="Select",
-				insert_after="taxjar_column_break",
+				insert_after="taxjar_sync_details_section",
 				label="TaxJar Sync Status",
 				options="\nQueued\nSynced\nFailed",
 				search_index=1,
@@ -949,31 +963,23 @@ def get_custom_fields():
 				hidden=1,
 				no_copy=1,
 			),
-			# ── TaxJar Tax Exemption Sync Details (collapsed by default) ───
 			dict(
-				fieldname="taxjar_sync_details_section",
-				fieldtype="Section Break",
+				fieldname="taxjar_sync_details_cb",
+				fieldtype="Column Break",
 				insert_after="taxjar_customer_sync_queued_at",
-				label="TaxJar Sync Details",
-				collapsible=1,
 			),
 			dict(
 				fieldname="taxjar_customer_id",
 				fieldtype="Data",
-				insert_after="taxjar_sync_details_section",
+				insert_after="taxjar_sync_details_cb",
 				label="TaxJar Customer ID",
 				read_only=1,
 				description="",
 			),
 			dict(
-				fieldname="taxjar_sync_details_cb",
-				fieldtype="Column Break",
-				insert_after="taxjar_customer_id",
-			),
-			dict(
 				fieldname="taxjar_last_synced",
 				fieldtype="Datetime",
-				insert_after="taxjar_sync_details_cb",
+				insert_after="taxjar_customer_id",
 				label="Last Synced to TaxJar",
 				read_only=1,
 			),
