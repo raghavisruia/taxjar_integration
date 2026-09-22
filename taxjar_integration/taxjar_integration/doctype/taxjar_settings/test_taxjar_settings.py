@@ -870,6 +870,79 @@ class TestApplyItemDiscounts(UnitTestCase):
 		_apply_item_discounts(line_items, {1: 1000.0})
 		self.assertEqual(line_items[0]["discount"], 150.0)  # 50 * 3, not 1000
 
+	# ── Credit notes ─────────────────────────────────────────────────────
+	#
+	# A return carries qty < 0, so unit_price x quantity is negative and the
+	# line's taxable amount is meant to be negative too. The bound the tests
+	# above apply from above applies from below here. Every case is a real
+	# arrangement of a credit note, not a synthetic sign flip: ERPNext negates
+	# every amount on a return, so a $50 handling fee charged on the invoice
+	# arrives here as a -$50 row and is distributed as a positive discount.
+
+	def test_return_line_keeps_the_distributed_fee_reversal(self):
+		"""A credit note reversing a 2-unit $100 sale that carried a $50 fee.
+
+		The clamp used to answer -200 here: the whole line amount, which left
+		the line with nothing to refund.
+		"""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": -2}]
+		_apply_item_discounts(line_items, {1: 50.0})
+		self.assertEqual(line_items[0]["discount"], 50.0)
+
+	def test_return_line_reports_the_whole_refund_to_taxjar(self):
+		"""unit_price x quantity - discount is what get_tax_data() sums into
+		"amount" and what TaxJar refunds tax on. -250, never 0."""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": -2}]
+		_apply_item_discounts(line_items, {1: 50.0})
+		line = line_items[0]
+		taxable = line["unit_price"] * line["quantity"] - line["discount"]
+		self.assertEqual(taxable, -250.0)
+
+	def test_return_line_adds_the_distributed_discount_to_its_own(self):
+		"""A return line's own discount is negative (see get_line_item_dict)
+		and the distributed one is positive. Both belong in the total."""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": -2, "discount": -20.0}]
+		_apply_item_discounts(line_items, {1: 50.0})
+		self.assertEqual(line_items[0]["discount"], 30.0)
+
+	def test_return_line_clamps_a_discount_that_would_flip_the_refund_positive(self):
+		"""The mirror of test_clamps_combined_discount_to_the_lines_own_price.
+		A discount past the line amount would report a refund as a sale."""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": -2, "discount": -100.0}]
+		_apply_item_discounts(line_items, {1: -200.0})
+		self.assertEqual(line_items[0]["discount"], -200.0)  # 100 * -2, not -300
+
+	def test_a_returns_own_discount_alone_is_left_where_it_is(self):
+		"""No distributed share, no clamp. The value get_line_item_dict wrote
+		is the value TaxJar gets."""
+		line_items = [{"id": 1, "unit_price": 100.0, "quantity": -2, "discount": -21.40}]
+		_apply_item_discounts(line_items, {1: 0.0})
+		self.assertEqual(line_items[0]["discount"], -21.40)
+
+	def test_taxable_amount_never_takes_the_opposite_sign_to_its_line(self):
+		"""The one rule both clamps serve, over every sign this can meet.
+
+		A line that crosses zero reports a sale as a refund, or a refund as a
+		sale. TaxJar accepts either: get_tax_data() derives "amount" from
+		these same numbers, so the payload stays self-consistent and only the
+		figure is wrong.
+		"""
+		for quantity in (-3, -1, 1, 3):
+			for own_discount in (-500.0, -20.0, 0.0, 20.0, 500.0):
+				for extra_discount in (-500.0, -20.0, 20.0, 500.0):
+					with self.subTest(qty=quantity, own=own_discount, extra=extra_discount):
+						line_items = [{
+							"id": 1, "unit_price": 100.0,
+							"quantity": quantity, "discount": own_discount,
+						}]
+						_apply_item_discounts(line_items, {1: extra_discount})
+						line_amount = 100.0 * quantity
+						taxable = line_amount - line_items[0]["discount"]
+						if line_amount >= 0:
+							self.assertGreaterEqual(taxable, 0)
+						else:
+							self.assertLessEqual(taxable, 0)
+
 
 class TestGetTaxDataForeignRows(UnitTestCase):
 	"""Integration-level: foreign rows wired into get_tax_data()'s actual
@@ -951,6 +1024,77 @@ class TestGetTaxDataForeignRows(UnitTestCase):
 		result = self._call(doc, usd_rate=1.1)
 		synthetic = result["line_items"][1]
 		self.assertAlmostEqual(synthetic["unit_price"], 22.0)
+
+	# ── Credit notes ─────────────────────────────────────────────────────
+
+	def test_credit_note_folds_a_negative_row_into_the_refund(self):
+		"""A credit note reversing a 2-unit $100 sale that carried a $50
+		handling fee. ERPNext negates every amount on a return, so the fee
+		row arrives at -50 and is distributed across the lines.
+
+		The refund TaxJar prices is the goods plus the fee: -250. This used to
+		be 0, because the clamp in _apply_item_discounts() wrote the whole
+		line amount back as the discount.
+		"""
+		items = [_FakeItem(idx=1, qty=-2, rate=100.0, net_amount=-200.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Handling - TC", "Handling Fee", -50.0, idx=2)])
+		result = self._call(doc)
+		self.assertEqual(len(result["line_items"]), 1)
+		self.assertEqual(result["line_items"][0]["quantity"], -2)
+		self.assertEqual(result["line_items"][0]["unit_price"], 100.0)
+		self.assertEqual(result["line_items"][0]["discount"], 50.0)
+		self.assertEqual(result["amount"], -250.0)
+
+	def test_credit_note_splits_a_negative_row_across_its_lines(self):
+		"""Proportional to net_amount, exactly as on a sale - a 3:1 split of
+		the line values gets a 3:1 split of the fee reversal."""
+		items = [
+			_FakeItem(idx=1, qty=-3, rate=100.0, net_amount=-300.0),
+			_FakeItem(idx=2, qty=-1, rate=100.0, net_amount=-100.0),
+		]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Handling - TC", "Handling Fee", -40.0, idx=3)])
+		result = self._call(doc)
+		self.assertAlmostEqual(result["line_items"][0]["discount"], 30.0)
+		self.assertAlmostEqual(result["line_items"][1]["discount"], 10.0)
+		self.assertEqual(result["amount"], -440.0)
+
+	def test_credit_note_positive_row_becomes_its_own_line_item(self):
+		"""The reversal of a discount row arrives positive, so it is a
+		synthetic line rather than a distributed discount - and it makes the
+		refund smaller, which is what reversing a discount does."""
+		items = [_FakeItem(idx=1, qty=-2, rate=100.0, net_amount=-200.0)]
+		doc = _make_doc(items=items, taxes=[_make_tax_row("Loyalty Discount - TC", "Loyalty", 50.0, idx=2)])
+		result = self._call(doc)
+		self.assertEqual(len(result["line_items"]), 2)
+		self.assertEqual(result["line_items"][1]["unit_price"], 50.0)
+		self.assertEqual(result["line_items"][1]["quantity"], 1)
+		self.assertEqual(result["amount"], -150.0)
+
+	def test_credit_note_amount_equals_the_sum_of_its_line_items(self):
+		"""TaxJar's own validation rejects a request whose "amount" does not
+		equal the sum of its line items plus shipping. It holds on a refund
+		the same way it holds on an order."""
+		items = [
+			_FakeItem(idx=1, qty=-2, rate=100.0, net_amount=-200.0),
+			_FakeItem(idx=2, qty=-1, rate=60.0, net_amount=-45.0),
+		]
+		doc = _make_doc(items=items, taxes=[
+			_make_tax_row("Freight - TC", "Shipping", -15.0, idx=1),
+			_make_tax_row("Handling - TC", "Handling Fee", -30.0, idx=2),
+		])
+		result = self._call(doc)
+
+		# -200 goods and -60 goods, a -15 item-level discount already on the
+		# second line, a -30 fee reversal split 200:45 between them, and -15
+		# of shipping. The old clamp answered -15: both lines reported zero.
+		self.assertEqual(result["shipping"], -15.0)
+		self.assertEqual(result["amount"], -290.0)
+
+		line_total = sum(
+			line["unit_price"] * line["quantity"] - line.get("discount", 0)
+			for line in result["line_items"]
+		)
+		self.assertAlmostEqual(result["amount"], flt(line_total + result["shipping"], 2))
 
 
 # ── Part C: preview_foreign_tax_rows (design doc §5) ──────────────────────────

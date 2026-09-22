@@ -1274,17 +1274,32 @@ def _distribute_negative_total(doc, negative_total):
 
 
 def _apply_item_discounts(line_items, item_discounts):
+	"""Fold each line's share of a foreign negative row into its discount.
+
+	The clamp keeps the line's taxable amount - unit_price × quantity minus
+	discount - on the side of zero the line itself is on. On a sale that means
+	a discount no larger than the line: a big foreign discount row distributed
+	onto a line that already carries a big item-level discount would otherwise
+	send TaxJar a negative taxable amount for that line.
+
+	A credit note carries qty < 0, so its lines are negative and the same bound
+	applies from below instead. min() alone clamped every return line to the
+	whole line amount: a $50 fee reversal spread onto a -$200 line was written
+	back as a -$200 discount, the line reported nothing to refund, and the
+	credit note filed a refund of zero tax on it. TaxJar accepts that payload -
+	get_tax_data() derives "amount" from these same numbers - so the only sign
+	of it was the figure itself. Same mistake, and the same correction, as the
+	clamp in get_line_item_dict().
+	"""
 	for line_item in line_items:
 		extra_discount = item_discounts.get(line_item.get("id"))
 		if extra_discount:
-			# Clamp to the line's own price, same as get_line_item_dict()'s own
-			# discount - otherwise a large foreign discount row distributed
-			# onto a line that already carries a big item-level discount could
-			# push the combined discount above unit_price × quantity, sending
-			# TaxJar a negative effective taxable amount for that line.
-			max_discount = flt(line_item.get("unit_price")) * flt(line_item.get("quantity"))
+			line_amount = flt(line_item.get("unit_price")) * flt(line_item.get("quantity"))
 			total_discount = flt(line_item.get("discount", 0) + extra_discount)
-			line_item["discount"] = min(total_discount, max_discount)
+			if line_amount >= 0:
+				line_item["discount"] = min(total_discount, line_amount)
+			else:
+				line_item["discount"] = max(total_discount, line_amount)
 
 
 @frappe.whitelist()
