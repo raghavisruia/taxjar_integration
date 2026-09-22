@@ -316,4 +316,62 @@ describe("the sidebar pill on a draft", () => {
 
 		expect(sidebar_section().length).toBe(0);
 	});
+
+	// Both address fields repaint this pill, so two picks in quick succession
+	// leave two lookups running. The one asked first can be the one to answer
+	// last, and the pill would then describe the address the user left.
+	it("drops an answer for an address the document no longer has", async () => {
+		const settle = {};
+		frappe.xcall.mockImplementation((method, args) => {
+			if (method === SCOPE_METHOD) return Promise.resolve(US_FILE);
+			return new Promise((resolve) => {
+				settle[args.address] = resolve;
+			});
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		frm.doc.customer_address = "ADDR-NJ";
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		// New Jersey answers first, then India - the address the form has left.
+		settle["ADDR-NJ"]({});
+		await flush();
+		settle["ADDR-IN"]({ country: "India" });
+		await flush();
+
+		const text = sidebar_section().text();
+		expect(text).toContain("Submit to Sync");
+		expect(text).not.toContain("Excluded");
+	});
+
+	// The other order, which was always right, and has to stay right: the
+	// answer for the address the document still has must paint.
+	it("paints the answer for the address the document still has", async () => {
+		const settle = {};
+		frappe.xcall.mockImplementation((method, args) => {
+			if (method === SCOPE_METHOD) return Promise.resolve(US_FILE);
+			return new Promise((resolve) => {
+				settle[args.address] = resolve;
+			});
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-NJ" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		frm.doc.customer_address = "ADDR-IN";
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		settle["ADDR-NJ"]({});
+		await flush();
+		settle["ADDR-IN"]({ country: "India" });
+		await flush();
+
+		expect(sidebar_section().text()).toContain("Excluded");
+	});
 });

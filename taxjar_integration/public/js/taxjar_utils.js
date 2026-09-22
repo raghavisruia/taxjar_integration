@@ -1981,6 +1981,14 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 			// The form can move to another document while this is in flight, and
 			// a stale answer describes another sale.
 			if (frm.doc.name !== docname) return;
+			// It can move to another address on the same document too, and that
+			// answer is just as stale. Both address fields repaint this pill, so
+			// two picks in quick succession leave two lookups running, and the
+			// one asked first can be the one to answer last - which would leave
+			// the pill describing a destination the document no longer has. Same
+			// guard _show_no_address_tax_message and the nexus check above
+			// already apply to the same lookup.
+			if ((frm.doc.shipping_address_name || frm.doc.customer_address) !== address) return;
 			taxjar_integration._render_taxjar_sync_status_pill(frm, Boolean(export_to));
 		});
 	});
