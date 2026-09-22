@@ -43,11 +43,16 @@ const FORM_SOURCES = Object.fromEntries(
 
 export const TRANSACTION_DOCTYPES = Object.keys(FORM_SCRIPTS);
 
-// ── The six company profiles ──
-// The same six the Python fixture uses (TaxJarCompanyProfile in
+// ── The company profiles ──
+// The first six are the ones the Python fixture uses (TaxJarCompanyProfile in
 // test_taxjar_settings.py), written here as the payload get_company_scope
 // returns for each. One vocabulary across both suites: a case named US_CALC in
 // one file means the same company in the other.
+//
+// US_SITE_OFF is the seventh, and it is not a seventh company. It is the site
+// switch, which company_scope() answers ahead of every company fact - so it
+// arrives at the client as one more scope payload, and the client has to handle
+// it like one.
 function scope_payload(company, { in_scope, calculates, files, reason, country }) {
 	return {
 		company,
@@ -114,8 +119,20 @@ export const US_UNCONFIGURED = scope_payload("US Unconfigured Co", {
 	country: "United States",
 });
 
-export const ALL_PROFILES = [US_CALC, US_FILE, US_OFF, IN_CO, IN_FLAGGED, US_UNCONFIGURED];
-export const OUT_OF_SCOPE_PROFILES = [IN_CO, IN_FLAGGED, US_UNCONFIGURED];
+// TaxJar is switched off for the whole site. Every company reads this way while
+// the switch is off, whatever its own country or configuration says.
+export const US_SITE_OFF = scope_payload("US Site Off Co", {
+	in_scope: false,
+	calculates: false,
+	files: false,
+	reason: "site_off",
+	country: "United States",
+});
+
+export const ALL_PROFILES = [
+	US_CALC, US_FILE, US_OFF, IN_CO, IN_FLAGGED, US_UNCONFIGURED, US_SITE_OFF,
+];
+export const OUT_OF_SCOPE_PROFILES = [IN_CO, IN_FLAGGED, US_UNCONFIGURED, US_SITE_OFF];
 
 export const SCOPE_METHOD = "taxjar_integration.taxjar_integration.taxjar_integration.get_company_scope";
 
@@ -162,6 +179,12 @@ function escape_html(value) {
  * sets it with `answer_xcall` below, which keeps the method name in the test
  * rather than in a shared default nobody reads.
  */
+function badge_html(opts = {}) {
+	const theme = opts.theme === "orange" ? "amber" : opts.theme;
+	const attr = theme && theme !== "gray" ? ` data-theme="${theme}"` : "";
+	return `<span class="es-badge"${attr}>${escape_html(opts.label || "")}</span>`;
+}
+
 export function install_desk() {
 	const frappe = {
 		xcall: vi.fn(() => Promise.resolve(null)),
@@ -201,20 +224,16 @@ export function install_desk() {
 			is_html: (text) => /<[a-z][\s\S]*>/i.test(String(text)),
 		},
 		ui: {
-			// The element form other tests already read, plus the markup-string
-			// form `frappe.ui.badge.html` that a badge built inside a template
-			// literal needs. The string form follows badge.js: the label is
-			// escaped, and a theme rides as `data-theme` unless it is the
-			// default gray, which is exactly what the assertions read.
+			// Both forms badge.js offers, from one piece of markup so they cannot
+			// drift apart. The label is escaped, and a theme rides as
+			// `data-theme` unless it is the default gray, which is exactly what
+			// the assertions read. `frappe.ui.badge` itself returns an element -
+			// the sidebar pill hangs a style and a hover card off the one it
+			// gets back - while `frappe.ui.badge.html` returns the markup a
+			// badge built inside a template literal needs.
 			badge: Object.assign(
-				vi.fn((label) => `<span class="badge">${label}</span>`),
-				{
-					html: (opts = {}) => {
-						const theme = opts.theme === "orange" ? "amber" : opts.theme;
-						const attr = theme && theme !== "gray" ? ` data-theme="${theme}"` : "";
-						return `<span class="es-badge"${attr}>${escape_html(opts.label || "")}</span>`;
-					},
-				}
+				vi.fn((opts = {}) => $(badge_html(opts))),
+				{ html: badge_html }
 			),
 			hover_card: vi.fn(),
 			empty_state: vi.fn(() => "<div class='empty-state'></div>"),

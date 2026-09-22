@@ -12184,6 +12184,49 @@ class TestTaxBreakdownJS(UnitTestCase):
 
 # ── TaxJar Sync Status: sidebar pill ────────────────────────────────────────
 
+class TestScopeCacheIsCleared(UnitTestCase):
+	"""The client memoises one scope answer per company for the life of the page.
+
+	Desk routing never reloads the page, so the memo outlives the configuration
+	it describes. A user who switched a feature on then had to hard-refresh
+	before any transaction form agreed. The two screens that can change the
+	configuration clear the memo when they write, so the next form load asks
+	again.
+	"""
+
+	def _app_js(self, *parts):
+		import os
+		path = os.path.normpath(os.path.join(os.path.dirname(__file__), *parts))
+		with open(path) as f:
+			return f.read()
+
+	def test_the_bundle_offers_one_way_to_clear_it(self):
+		"""Named, not reached into. Two callers assign to the same private object
+		otherwise, and neither says why."""
+		js = self._app_js("..", "..", "..", "public", "js", "taxjar_utils.js")
+		self.assertIn("taxjar_integration.clear_scope_cache = function () {", js)
+		fn = js.split("taxjar_integration.clear_scope_cache = function () {")[1].split("\n};")[0]
+		self.assertIn("taxjar_integration._scope_cache = {}", fn)
+
+	def test_the_settings_form_clears_it_on_save(self):
+		js = self._app_js("taxjar_settings.js")
+		events = js.split("frappe.ui.form.on('TaxJar Settings', {")[1]
+		fn = events.split("after_save() {")[1].split("\n\t}")[0]
+		self.assertIn("taxjar_integration.clear_scope_cache()", fn)
+
+	def test_the_guided_setup_clears_it_on_every_call(self):
+		"""Blunt on purpose. Several steps on that page write the configuration,
+		and clearing a client-side memo costs nothing - so one line in the one
+		funnel every step goes through beats a list of method names to keep in
+		step with the savers."""
+		js = self._app_js(
+			"..", "..", "page", "taxjar_setup", "taxjar_setup.js",
+		)
+		fn = js.split("\t_call(method, args) {")[1].split("\n\t}")[0]
+		self.assertIn("taxjar_integration.clear_scope_cache()", fn)
+		self.assertLess(fn.index("clear_scope_cache"), fn.index("frappe.xcall"))
+
+
 class TestSyncStatusSidebarPill(UnitTestCase):
 
 	def _js_dir(self):
@@ -12211,7 +12254,7 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		is_taxjar_enabled_for_company has confirmed TaxJar applies to this
 		company, so it no longer needs its own "not enabled" branch."""
 		js = self._read_js("taxjar_utils.js")
-		return js.split("_render_taxjar_sync_status_pill = function (frm) {")[1].split("\n};")[0]
+		return js.split("_render_taxjar_sync_status_pill = function (frm, is_export) {")[1].split("\n};")[0]
 
 	def test_status_colors_match_transactions_page(self):
 		"""Same mapping as STATUS_COLORS in taxjar_transactions.js, kept as
@@ -12302,14 +12345,31 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		)
 
 		# The decision moved up to the dispatcher, which only reaches this at all
-		# for a company already known to be in scope - so what matters now is that
-		# this renders unconditionally rather than re-deciding with a stale answer.
+		# for a company the setup page can help - so what matters now is that this
+		# renders unconditionally rather than re-deciding with a stale answer.
 		dispatcher = self._dispatcher_fn()
-		self.assertIn("if (!scope || !scope.in_scope) return;", dispatcher)
+		self.assertIn('if (scope.reason === "not_us") return;', dispatcher)
 		self.assertLess(
-			dispatcher.index("in_scope"),
+			dispatcher.index("not_us"),
 			dispatcher.index("_render_taxjar_not_enabled_link"),
 		)
+
+	def test_every_fixable_no_gets_the_setup_link(self):
+		"""The site switch off, a company with no TaxJar row, and a company with
+		both features off all used to render nothing at all - which left a reader
+		who had switched TaxJar off site-wide with no cue that this was why. They
+		are all fixed on the same page, so they all get the same link.
+
+		in_scope is what used to gate this, and it is false for all three. The
+		gate is the reason now, so only the one no that nothing can fix -
+		a company registered outside the United States - still renders nothing."""
+		dispatcher = self._dispatcher_fn()
+		self.assertNotIn("in_scope", dispatcher)
+		self.assertIn('if (scope.reason === "not_us") return;', dispatcher)
+
+		# A scope that could not be read claims nothing, not even the link.
+		self.assertIn("if (!scope) return;", dispatcher)
+		self.assertLess(dispatcher.index("if (!scope) return;"), dispatcher.index("not_us"))
 
 	def test_draft_shows_submit_to_sync_label(self):
 		fn = self._render_fn()
@@ -12322,8 +12382,80 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		nothing has gone wrong, there is just nothing to sync yet. Reading as
 		a sentence, not as a "Please..." plea: the pill already said what the
 		state is, this says what turns it into a sync."""
-		draft_branch = self._render_fn().split("docstatus === 0")[1].split("} else if")[0]
+		draft_branch = (
+			self._render_fn()
+			.split("frm.doc.docstatus === 0) {")[1]
+			.split("} else if")[0]
+		)
 		self.assertIn('info_text = __("Submit this document to sync it with TaxJar.")', draft_branch)
+
+	def test_an_export_draft_is_called_excluded_before_submit(self):
+		"""Every other draft is told what to do, because nothing syncs before
+		submit. An export is the one draft whose answer is already settled: the
+		destination decides it, and the submit will exclude it. "Submit to Sync"
+		would promise a sync that the submit cannot make."""
+		export_branch = (
+			self._render_fn()
+			.split("frm.doc.docstatus === 0 && is_export) {")[1]
+			.split("} else if")[0]
+		)
+		self.assertIn('label = __("Excluded")', export_branch)
+		self.assertIn("color = taxjar_integration.SYNC_STATUS_COLORS.Excluded", export_branch)
+		self.assertIn(
+			'taxjar_integration.exclusion_reason_text("Destination outside TaxJar coverage")',
+			export_branch,
+		)
+
+		# Ahead of the plain draft branch, which would otherwise answer first.
+		fn = self._render_fn()
+		self.assertLess(
+			fn.index("frm.doc.docstatus === 0 && is_export"),
+			fn.index('label = __("Submit to Sync")'),
+		)
+
+	def test_only_a_draft_pays_for_the_export_lookup(self):
+		"""A submitted document has its status recorded, so the address read
+		would buy nothing. The dispatcher asks for a draft and hands the answer
+		to the pill."""
+		dispatcher = self._dispatcher_fn()
+		self.assertIn("if (frm.doc.docstatus !== 0) {", dispatcher)
+		self.assertLess(
+			dispatcher.index("frm.doc.docstatus !== 0"),
+			dispatcher.index("taxjar_integration.export_destination(address)"),
+		)
+		self.assertIn(
+			"const address = frm.doc.shipping_address_name || frm.doc.customer_address;",
+			dispatcher,
+		)
+		self.assertIn(
+			"taxjar_integration._render_taxjar_sync_status_pill(frm, Boolean(export_to))",
+			dispatcher,
+		)
+
+	def test_a_late_export_answer_is_dropped(self):
+		"""The form can move to another document while the address read is in
+		flight, and a stale answer describes another sale."""
+		dispatcher = self._dispatcher_fn()
+		late = dispatcher.split("export_destination(address).then((export_to) => {")[1]
+		self.assertIn("if (frm.doc.name !== docname) return;", late)
+
+	def test_the_draft_pill_follows_the_address_the_user_picks(self):
+		"""Both address fields decide the destination, so both repaint the pill.
+		Without this the pill still reads "Submit to Sync" beside a strip that
+		already says the sale is an export."""
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "sales_invoice.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			form_js = f.read()
+
+		for handler in ("customer_address(frm) {", "shipping_address_name(frm) {"):
+			body = form_js.split(handler)[1].split("\n\t}")[0]
+			self.assertIn(
+				"taxjar_integration.render_sync_status_sidebar_pill(frm)", body,
+				f"{handler} does not repaint the sidebar pill",
+			)
 
 	def test_synced_info_text_is_how_long_ago_not_a_timestamp(self):
 		"""The question a status pill raises is how fresh this is, not what
@@ -12517,12 +12649,12 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertNotIn("$(", card)
 
 	def test_every_state_has_a_hover_detail(self):
-		"""Draft, Queued, Synced/Cancelled, Failed/Failed to Cancel and now
-		Excluded each say something on hover. Excluded was the last branch with
-		nothing to add beyond the word itself; it carries the recorded reason
-		the document was kept out."""
+		"""Export draft, plain draft, Queued, Synced/Cancelled, Failed/Failed to
+		Cancel and Excluded each say something on hover. Excluded was the last
+		branch with nothing to add beyond the word itself; it carries the
+		recorded reason the document was kept out."""
 		fn = self._render_fn()
-		self.assertEqual(fn.count("info_text = "), 5)
+		self.assertEqual(fn.count("info_text = "), 6)
 		self.assertIn(
 			"info_text = taxjar_integration.exclusion_reason_text(frm.doc.taxjar_exclusion_reason)", fn
 		)

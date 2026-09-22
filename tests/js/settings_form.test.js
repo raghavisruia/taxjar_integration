@@ -9,16 +9,25 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { add_grid_row, install_desk, load_taxjar_settings_form, load_taxjar_utils } from "./helpers/desk.js";
+import {
+	US_CALC,
+	add_grid_row,
+	answer_scope,
+	install_desk,
+	load_taxjar_settings_form,
+	load_taxjar_utils,
+} from "./helpers/desk.js";
 
 const CONFIG = "TaxJar Company Config";
+const SETTINGS = "TaxJar Settings";
 
 let frappe;
 let handlers;
+let taxjar;
 
 beforeEach(() => {
 	frappe = install_desk();
-	load_taxjar_utils();
+	taxjar = load_taxjar_utils();
 	handlers = load_taxjar_settings_form();
 });
 
@@ -120,5 +129,25 @@ describe("the ledger pickers", () => {
 				filters: { company: "US Off Co", is_group: 0 },
 			});
 		}
+	});
+});
+
+// This record decides what every transaction form is allowed to do, and the
+// forms memoise that answer for the life of the page. Desk routing never
+// reloads the page, so a save here has to say so - otherwise every invoice
+// opened afterwards reports the configuration as it was before the save, and a
+// hard refresh is the only way to see the change.
+describe("saving the settings", () => {
+	it("makes the transaction forms ask about scope again", async () => {
+		answer_scope(frappe, US_CALC);
+
+		await taxjar.scope(US_CALC.company);
+		await taxjar.scope(US_CALC.company);
+		expect(frappe.xcall).toHaveBeenCalledTimes(1);
+
+		handlers[SETTINGS].after_save({});
+
+		await taxjar.scope(US_CALC.company);
+		expect(frappe.xcall).toHaveBeenCalledTimes(2);
 	});
 });

@@ -107,6 +107,15 @@ frappe.ui.form.on('TaxJar Company Config', {
 });
 
 frappe.ui.form.on('TaxJar Settings', {
+	// This record decides what every transaction form is allowed to do, and the
+	// forms memoise that answer per company for the life of the page (see
+	// taxjar_integration.scope). Desk routing never reloads the page, so a save
+	// here used to leave every invoice opened afterwards reporting the old
+	// configuration until a hard refresh.
+	after_save() {
+		taxjar_integration.clear_scope_cache();
+	},
+
 	refresh(frm) {
 		_set_setup_intro(frm);
 		_render_nexus_html(frm);

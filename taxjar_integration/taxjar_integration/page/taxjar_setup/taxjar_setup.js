@@ -184,6 +184,12 @@ class TaxJarSetup {
 
 	// ── server calls ────────────────────────────────────────────────
 	_call(method, args) {
+		// Cleared on every call, not only on the saving ones. This page exists to
+		// change the configuration the transaction forms memoise per company (see
+		// taxjar_integration.scope), several steps here write it, and clearing a
+		// client-side memo costs nothing - so one line here beats a list of
+		// method names to keep in step with the savers below.
+		taxjar_integration.clear_scope_cache();
 		return frappe.xcall(`${SETUP_MODULE}.${method}`, args);
 	}
 

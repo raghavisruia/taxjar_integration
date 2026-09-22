@@ -217,6 +217,16 @@ taxjar_integration.scope = function (company) {
 	return taxjar_integration._scope_cache[company];
 };
 
+// The scope answer is memoised for the life of the page, which is right until
+// somebody changes the configuration it describes. Nothing on a transaction form
+// can change it. The two screens that can - the TaxJar Settings form and the
+// guided setup page - call this when they write, so the next form load asks
+// again instead of painting an answer from before the change. Without it the
+// sidebar reported the old configuration until a hard refresh.
+taxjar_integration.clear_scope_cache = function () {
+	taxjar_integration._scope_cache = {};
+};
+
 // Sugar for the common shape: run `fn` only when the company is in TaxJar's
 // remit and `predicate` holds for it. Every entry point below goes through this,
 // so "does this apply here?" is asked one way in one place.
@@ -1933,15 +1943,46 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 	// config changes after the doc was last written.
 	taxjar_integration.scope(frm.doc.company).then((scope) => {
 		if (frm.doc.name !== docname) return;
-		// Out of TaxJar's remit entirely: no pill, and no link either - the setup
-		// page has nothing to offer a company it cannot serve.
-		if (!scope || !scope.in_scope) return;
+		// The scope could not be read at all. Nothing is known, so nothing is
+		// claimed.
+		if (!scope) return;
 
-		if (scope.files) {
-			taxjar_integration._render_taxjar_sync_status_pill(frm);
-		} else {
+		// TaxJar prices United States sales tax. A company registered elsewhere
+		// is not one with a switch off, it is one the feature cannot serve, so
+		// the setup page has nothing to offer it and the row stays empty.
+		//
+		// Every other no is something the reader can go and change: the site
+		// switch, a company with no TaxJar row, or the two feature switches. All
+		// three used to render nothing at all, which left a reader who had
+		// switched TaxJar off site-wide with no cue that this was why. They now
+		// get the same link, because they are all fixed on the same page.
+		if (scope.reason === "not_us") return;
+
+		if (!scope.files) {
 			taxjar_integration._render_taxjar_not_enabled_link(frm);
+			return;
 		}
+
+		// Every state but one is read off the document itself. An export is the
+		// exception: the destination country decides it, the document carries a
+		// destination from its first draft, and the answer is one column of one
+		// Address rather than anything the sync path writes. So a draft asks,
+		// and the pill is told. Nothing else asks - a submitted document has its
+		// status recorded, and the lookup would buy nothing.
+		if (frm.doc.docstatus !== 0) {
+			taxjar_integration._render_taxjar_sync_status_pill(frm);
+			return;
+		}
+
+		// Ship-to decides the destination. The billing address stands in for a
+		// sale with no separate shipping address, the same way it does for nexus.
+		const address = frm.doc.shipping_address_name || frm.doc.customer_address;
+		return taxjar_integration.export_destination(address).then((export_to) => {
+			// The form can move to another document while this is in flight, and
+			// a stale answer describes another sale.
+			if (frm.doc.name !== docname) return;
+			taxjar_integration._render_taxjar_sync_status_pill(frm, Boolean(export_to));
+		});
 	});
 };
 
@@ -1954,8 +1995,9 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 // service and the guided setup wizard it links to has nothing to offer a
 // non-US company, so the link would just be a dead end for one.
 taxjar_integration._render_taxjar_not_enabled_link = function (frm) {
-	// Reached only for a company already known to be in scope, so the country
-	// round trip this used to make has nothing left to decide.
+	// Reached only for a company the dispatcher has already cleared as one the
+	// setup page can help, so the country round trip this used to make has
+	// nothing left to decide.
 	{
 		const icon = frappe.utils.icon("external-link", "xs", "", "", "", true);
 		// The logo sits beside the link rather than inside it, so it is not
@@ -2023,7 +2065,7 @@ taxjar_integration.exclusion_reason_text = function (reason, is_current) {
 	return "";
 };
 
-taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
+taxjar_integration._render_taxjar_sync_status_pill = function (frm, is_export) {
 	// "Synced"/"Failed" are written by both the on_submit sync path and the
 	// on_cancel delete path (see _set_sync_status), so docstatus === 2 is
 	// what turns those two into the cancel-flow wording below.
@@ -2031,7 +2073,16 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm) {
 	const status = frm.doc.taxjar_sync_status || "Excluded";
 	let label, color, info_text;
 
-	if (frm.doc.docstatus === 0) {
+	if (frm.doc.docstatus === 0 && is_export) {
+		// A draft is told what to do rather than given a status, because nothing
+		// syncs before submit. An export is the one draft whose answer is
+		// already settled: TaxJar prices United States sales tax, this sale is
+		// delivered elsewhere, and the submit will exclude it. "Submit to Sync"
+		// would promise a sync that the submit cannot make.
+		label = __("Excluded");
+		color = taxjar_integration.SYNC_STATUS_COLORS.Excluded;
+		info_text = taxjar_integration.exclusion_reason_text("Destination outside TaxJar coverage");
+	} else if (frm.doc.docstatus === 0) {
 		label = __("Submit to Sync");
 		color = "amber";
 		// The one state whose detail is an instruction rather than a report:

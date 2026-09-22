@@ -45,6 +45,41 @@ describe("taxjar_integration.scope", () => {
 		expect(frappe.xcall).toHaveBeenCalledWith(SCOPE_METHOD, { company: US_CALC.company });
 	});
 
+	// The memo lasts as long as the page, and desk routing never reloads the
+	// page. So a configuration change has to say so, or every form opened
+	// afterwards paints an answer from before the change - which is what made a
+	// hard refresh the only way to see a switch take effect.
+	it("asks again once the cache is cleared", async () => {
+		const answers = [US_CALC, US_OFF];
+		frappe.xcall.mockImplementation(() => Promise.resolve(answers.shift()));
+
+		await expect(taxjar.scope(US_CALC.company)).resolves.toEqual(US_CALC);
+
+		taxjar.clear_scope_cache();
+
+		await expect(taxjar.scope(US_CALC.company)).resolves.toEqual(US_OFF);
+		expect(frappe.xcall).toHaveBeenCalledTimes(2);
+	});
+
+	it("forgets every company, not only the one that changed", async () => {
+		const by_company = { [US_CALC.company]: US_CALC, [US_OFF.company]: US_OFF };
+		frappe.xcall.mockImplementation((method, args) =>
+			Promise.resolve(by_company[args.company])
+		);
+
+		await taxjar.scope(US_CALC.company);
+		await taxjar.scope(US_OFF.company);
+		expect(frappe.xcall).toHaveBeenCalledTimes(2);
+
+		// One save rewrites the whole TaxJar Settings record, company_config
+		// child rows included, so no single company owns the change.
+		taxjar.clear_scope_cache();
+
+		await taxjar.scope(US_CALC.company);
+		await taxjar.scope(US_OFF.company);
+		expect(frappe.xcall).toHaveBeenCalledTimes(4);
+	});
+
 	// The memo is on the promise, not on its result. Four callers that start
 	// together on one form refresh have no result to share yet, so a memo on the
 	// result would let all four race to the server.

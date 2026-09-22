@@ -28,6 +28,11 @@ frappe.ui.form.on("Sales Invoice", {
 	customer_address(frm) {
 		taxjar_integration.apply_region_exemption(frm);
 		taxjar_integration.show_no_address_tax_message(frm);
+		// The draft pill reads the destination too (see
+		// render_sync_status_sidebar_pill), so it is repainted here rather than
+		// left saying "Submit to Sync" beside a strip that already says the sale
+		// is an export.
+		taxjar_integration.render_sync_status_sidebar_pill(frm);
 	},
 
 	validate(frm) {
@@ -53,6 +58,7 @@ frappe.ui.form.on("Sales Invoice", {
 	shipping_address_name(frm) {
 		taxjar_integration.apply_region_exemption(frm);
 		taxjar_integration.show_no_address_tax_message(frm);
+		taxjar_integration.render_sync_status_sidebar_pill(frm);
 	}
 });
 

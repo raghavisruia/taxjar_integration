@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	US_CALC,
+	US_FILE,
 	answer_xcall,
 	flush,
 	install_desk,
@@ -19,6 +20,7 @@ import {
 	make_frm,
 	message_html,
 	message_text,
+	sidebar_section,
 } from "./helpers/desk.js";
 
 const MOD = "taxjar_integration.taxjar_integration.taxjar_integration";
@@ -224,5 +226,94 @@ describe("the endpoint is asked once per address", () => {
 
 		expect(await taxjar.export_destination(undefined)).toBeNull();
 		expect(frappe.xcall).not.toHaveBeenCalled();
+	});
+});
+
+describe("the sidebar pill on a draft", () => {
+	const SYNC_FIELDS = ["taxjar_sync_status"];
+
+	/** An unsubmitted invoice for a company that files, with one address. */
+	function open_draft(doc = {}) {
+		return make_frm({
+			company: US_FILE.company,
+			fields: SYNC_FIELDS,
+			doc: { customer: "Acme Corp", ...doc },
+		});
+	}
+
+	it("says Excluded for an export, not Submit to Sync", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: { country: "India" },
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		const text = sidebar_section().text();
+		expect(text).toContain("Excluded");
+		expect(text).not.toContain("Submit to Sync");
+	});
+
+	it("still says Submit to Sync for a United States destination", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: {},
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-NJ" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		expect(sidebar_section().text()).toContain("Submit to Sync");
+	});
+
+	it("reads the shipping address before the billing address", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: (args) => (args.address === "ADDR-IN" ? { country: "India" } : {}),
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-NJ", shipping_address_name: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		expect(sidebar_section().text()).toContain("Excluded");
+	});
+
+	it("does not read the address of a submitted document", async () => {
+		answer_xcall(frappe, { [SCOPE_METHOD]: US_FILE });
+
+		const frm = open_draft({ customer_address: "ADDR-IN", taxjar_sync_status: "Synced" });
+		frm.doc.docstatus = 1;
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		const calls = frappe.xcall.mock.calls.filter(([method]) => method === EXPORT_METHOD);
+		expect(calls).toHaveLength(0);
+		expect(sidebar_section().text()).toContain("Synced");
+	});
+
+	// The answer lands after the user has moved on. Writing it then would put
+	// one document's status on another's form.
+	it("drops an answer that arrives after the form moved to another document", async () => {
+		let settle;
+		frappe.xcall.mockImplementation((method) => {
+			if (method === SCOPE_METHOD) return Promise.resolve(US_FILE);
+			return new Promise((resolve) => {
+				settle = resolve;
+			});
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		frm.doc.name = "SINV-0002";
+		settle({ country: "India" });
+		await flush();
+
+		expect(sidebar_section().length).toBe(0);
 	});
 });

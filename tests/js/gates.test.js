@@ -15,6 +15,7 @@ import {
 	US_CALC,
 	US_FILE,
 	US_OFF,
+	US_SITE_OFF,
 	US_UNCONFIGURED,
 	answer_scope,
 	flush,
@@ -38,6 +39,13 @@ const passes = {
 	calculates: [US_CALC],
 	files: [US_FILE],
 	in_scope: [US_CALC, US_FILE, US_OFF],
+	// The sidebar is the one place that renders for a company out of scope. A
+	// site switch that is off, and a company TaxJar could serve that nobody has
+	// configured, are both something the reader can go and change - so both get
+	// the setup link rather than an empty column. Only a company registered
+	// outside the United States gets nothing, because nothing on the setup page
+	// can help it.
+	has_sidebar: [US_CALC, US_FILE, US_OFF, US_UNCONFIGURED, US_SITE_OFF],
 };
 
 function should_pass(gate, profile) {
@@ -229,13 +237,13 @@ describe("render_sync_status_sidebar_pill", () => {
 		return frm;
 	}
 
-	it.each(ALL_PROFILES)("renders nothing outside in_scope for $company", async (profile) => {
+	it.each(ALL_PROFILES)("renders for $company only when TaxJar can help it", async (profile) => {
 		await render(profile, { taxjar_sync_status: "Queued" });
 
 		const rendered = taxjar._render_taxjar_sync_status_pill.mock.calls.length > 0;
 		const linked = sidebar_section().length > 0;
 
-		expect(rendered || linked).toBe(should_pass("in_scope", profile));
+		expect(rendered || linked).toBe(should_pass("has_sidebar", profile));
 	});
 
 	it("shows the sync pill for a company that files", async () => {
@@ -259,16 +267,48 @@ describe("render_sync_status_sidebar_pill", () => {
 		);
 	});
 
-	// No link either for a company out of scope: the setup page has nothing to
-	// offer a company TaxJar cannot serve, so the link would be a dead end.
-	it.each([IN_CO, IN_FLAGGED, US_UNCONFIGURED])(
-		"offers no setup link for $company",
+	// No link for a company registered outside the United States: the setup page
+	// has nothing to offer a company TaxJar cannot serve, so the link would be a
+	// dead end.
+	it.each([IN_CO, IN_FLAGGED])("offers no setup link for $company", async (profile) => {
+		await render(profile, { taxjar_sync_status: "Queued" });
+
+		expect(sidebar_section().length).toBe(0);
+	});
+
+	// Both of these used to render nothing at all, which left a reader who had
+	// switched TaxJar off site-wide with no cue that this was why.
+	it.each([US_SITE_OFF, US_UNCONFIGURED])(
+		"offers the setup link for $company",
 		async (profile) => {
 			await render(profile, { taxjar_sync_status: "Queued" });
 
-			expect(sidebar_section().length).toBe(0);
+			expect(taxjar._render_taxjar_sync_status_pill).not.toHaveBeenCalled();
+
+			const section = sidebar_section();
+			expect(section.length).toBe(1);
+			expect(section.find("a.taxjar-not-enabled-link").attr("href")).toBe(
+				"/app/taxjar-setup?focus=features"
+			);
 		}
 	);
+
+	// Nothing is known, so nothing is claimed - not even the link.
+	it("renders nothing when the scope could not be read", async () => {
+		frappe.xcall.mockRejectedValue(new Error("network"));
+		taxjar._render_taxjar_sync_status_pill = vi.fn();
+
+		const frm = make_frm({
+			company: US_FILE.company,
+			fields,
+			doc: { taxjar_sync_status: "Queued" },
+		});
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		expect(taxjar._render_taxjar_sync_status_pill).not.toHaveBeenCalled();
+		expect(sidebar_section().length).toBe(0);
+	});
 
 	it("leaves no stale row behind on a document with no sync field", async () => {
 		await render(US_CALC, { taxjar_sync_status: "Queued" });
