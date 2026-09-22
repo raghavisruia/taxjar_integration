@@ -406,7 +406,52 @@ describe("what the preview reads off the invoice", () => {
 		expect(text).toContain("2026-08-14");
 		expect(text).toContain("USD 4820.00");
 		expect(text).toContain("USD 312.30");
+		expect(text).toContain("TaxJar Status");
 		expect(text).toContain("Synced");
+	});
+
+	// The invoice's own sidebar shows this status as a pill. Two readings of
+	// one status, in two colours, would have the reader wondering which is
+	// right - so both read off SYNC_STATUS_COLORS.
+	it("draws the status as the pill the sidebar draws, in the sidebar's colour", async () => {
+		await tick_is_return(open_credit_note(US_FILE));
+
+		dialogs[0].set_value("return_against", "ACC-SINV-2026-00318");
+		await flush();
+
+		const $pill = dialogs[0].fields_dict.taxjar_return_preview.$wrapper.find(".es-badge");
+		expect($pill).toHaveLength(1);
+		expect($pill.text()).toBe("Synced");
+		expect($pill.attr("data-theme")).toBe(window.taxjar_integration.SYNC_STATUS_COLORS.Synced);
+	});
+
+	it.each([
+		["Failed", "red"],
+		["Queued", "blue"],
+	])("draws %s in the sidebar's own colour", async (status, theme) => {
+		answer_invoice_reads(1, { taxjar_sync_status: status });
+
+		await tick_is_return(open_credit_note(US_FILE));
+		dialogs[0].set_value("return_against", "ACC-SINV-2026-00318");
+		await flush();
+
+		const $pill = dialogs[0].fields_dict.taxjar_return_preview.$wrapper.find(".es-badge");
+		expect($pill.text()).toBe(status);
+		expect($pill.attr("data-theme")).toBe(theme);
+		expect(window.taxjar_integration.SYNC_STATUS_COLORS[status]).toBe(theme);
+	});
+
+	// Gray is the badge's own default, so frappe leaves the attribute off.
+	it("draws Excluded with no colour of its own", async () => {
+		answer_invoice_reads(1, { taxjar_sync_status: "Excluded" });
+
+		await tick_is_return(open_credit_note(US_FILE));
+		dialogs[0].set_value("return_against", "ACC-SINV-2026-00318");
+		await flush();
+
+		const $pill = dialogs[0].fields_dict.taxjar_return_preview.$wrapper.find(".es-badge");
+		expect($pill.text()).toBe("Excluded");
+		expect($pill.attr("data-theme")).toBeUndefined();
 	});
 
 	// An invoice TaxJar never received has nothing for a credit note to file
@@ -418,9 +463,9 @@ describe("what the preview reads off the invoice", () => {
 		dialogs[0].set_value("return_against", "ACC-SINV-2026-00318");
 		await flush();
 
-		expect(dialogs[0].fields_dict.taxjar_return_preview.$wrapper.text()).toContain(
-			"Not synced"
-		);
+		const $pill = dialogs[0].fields_dict.taxjar_return_preview.$wrapper.find(".es-badge");
+		expect($pill.text()).toBe("Not synced");
+		expect($pill.attr("data-theme")).toBeUndefined();
 	});
 
 	// A second pick can land while the first read is still in flight. The field

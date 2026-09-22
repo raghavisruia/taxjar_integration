@@ -1074,6 +1074,25 @@ taxjar_integration.show_no_returnable_invoice_dialog = function (frm) {
 // What the user is about to reverse, read from the invoice itself rather than
 // guessed from its name. The sync status is here because a credit note against
 // an invoice TaxJar never received has nothing to file against.
+// The same pill the invoice's own sidebar shows, off the same colour map, so a
+// status does not read green in one place and grey in another.
+//
+// Only the submitted states: the picker offers submitted invoices and nothing
+// else, so the sidebar's draft and cancelled wording has nothing to describe
+// here. An invoice with no status at all was submitted before this app watched
+// it - "Excluded" would claim a decision nobody made, so it says what is true.
+taxjar_integration.sync_status_badge_html = function (status) {
+	if (!status) {
+		return frappe.ui.badge.html({ label: __("Not synced"), theme: "gray", size: "sm" });
+	}
+
+	return frappe.ui.badge.html({
+		label: __(status),
+		theme: taxjar_integration.SYNC_STATUS_COLORS[status] || "gray",
+		size: "sm",
+	});
+};
+
 taxjar_integration.render_return_invoice_preview = function (d) {
 	const invoice_name = d.get_value("return_against");
 	const $wrapper = d.fields_dict.taxjar_return_preview.$wrapper;
@@ -1097,11 +1116,19 @@ taxjar_integration.render_return_invoice_preview = function (d) {
 			if (d.get_value("return_against") !== invoice_name) return;
 
 			const row = (result && result.message) || {};
+
+			// Every value but the last is text this escapes; the status is a
+			// pill, which is markup this builds itself. Escaping that would
+			// print the tags, so the value carries its own HTML and the plain
+			// ones are escaped as they are put in.
+			const text = (value) =>
+				frappe.utils.escape_html(value === undefined || value === null ? "" : value);
+
 			const rows = [
-				[__("Posting date"), frappe.datetime.str_to_user(row.posting_date)],
-				[__("Grand total"), format_currency(row.grand_total, row.currency)],
-				[__("Sales tax"), format_currency(row.total_taxes_and_charges, row.currency)],
-				[__("TaxJar"), row.taxjar_sync_status || __("Not synced")],
+				[__("Posting date"), text(frappe.datetime.str_to_user(row.posting_date))],
+				[__("Grand total"), text(format_currency(row.grand_total, row.currency))],
+				[__("Sales tax"), text(format_currency(row.total_taxes_and_charges, row.currency))],
+				[__("TaxJar Status"), taxjar_integration.sync_status_badge_html(row.taxjar_sync_status)],
 			];
 
 			$wrapper.html(`<div class="taxjar-return-preview">
@@ -1109,7 +1136,7 @@ taxjar_integration.render_return_invoice_preview = function (d) {
 					.map(
 						([label, value]) => `<div class="taxjar-return-preview-row">
 							<span class="text-muted">${label}</span>
-							<span>${frappe.utils.escape_html(value === undefined || value === null ? "" : value)}</span>
+							<span>${value}</span>
 						</div>`
 					)
 					.join("")}
@@ -1146,8 +1173,8 @@ taxjar_integration._inject_return_reference_styles = function () {
 	style.textContent = `
 		.taxjar-return-warning {
 			background-color: var(--bg-yellow);
-			border-radius: var(--border-radius);
-			padding: 10px 12px;
+			border-radius: var(--radius);
+			padding: 12px 14px;
 			margin-bottom: 10px;
 			font-size: var(--text-md);
 		}
@@ -1155,14 +1182,20 @@ taxjar_integration._inject_return_reference_styles = function () {
 			font-weight: 600;
 			margin-bottom: 2px;
 		}
+		/* The card the rest of this app already draws (.taxjar-exemption-card in
+		   the bundle's scss): the page's own card fill, one hairline, and the
+		   8px corner --radius carries. --subtle-fg was the same grey the gray
+		   status pill is filled with, so Excluded read as plain text on it. */
 		.taxjar-return-preview {
-			background-color: var(--subtle-fg);
-			border-radius: var(--border-radius);
-			padding: 10px 12px;
+			background-color: var(--card-bg);
+			border: 1px solid var(--border-color);
+			border-radius: var(--radius);
+			padding: 12px 14px;
 			font-size: var(--text-md);
 		}
 		.taxjar-return-preview-row {
 			display: flex;
+			align-items: center;
 			justify-content: space-between;
 			gap: 12px;
 		}

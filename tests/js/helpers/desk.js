@@ -201,7 +201,21 @@ export function install_desk() {
 			is_html: (text) => /<[a-z][\s\S]*>/i.test(String(text)),
 		},
 		ui: {
-			badge: vi.fn((label) => `<span class="badge">${label}</span>`),
+			// The element form other tests already read, plus the markup-string
+			// form `frappe.ui.badge.html` that a badge built inside a template
+			// literal needs. The string form follows badge.js: the label is
+			// escaped, and a theme rides as `data-theme` unless it is the
+			// default gray, which is exactly what the assertions read.
+			badge: Object.assign(
+				vi.fn((label) => `<span class="badge">${label}</span>`),
+				{
+					html: (opts = {}) => {
+						const theme = opts.theme === "orange" ? "amber" : opts.theme;
+						const attr = theme && theme !== "gray" ? ` data-theme="${theme}"` : "";
+						return `<span class="es-badge"${attr}>${escape_html(opts.label || "")}</span>`;
+					},
+				}
+			),
 			hover_card: vi.fn(),
 			empty_state: vi.fn(() => "<div class='empty-state'></div>"),
 			Dialog: vi.fn(function Dialog(options) {
