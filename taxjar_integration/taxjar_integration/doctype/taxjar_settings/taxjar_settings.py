@@ -24,6 +24,7 @@ import taxjar
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	SUPPORTED_STATE_CODES,
 	TRANSACTION_EXCLUSION_REASONS,
+	TRANSACTION_NATURES,
 	_is_taxjar_enabled,
 	clear_company_config_cache,
 	get_catalogue_client,
@@ -853,9 +854,34 @@ def get_custom_fields():
 				depends_on="eval: doc.docstatus === 1 && doc.taxjar_sync_status == 'Excluded'",
 			),
 			dict(
+				# Export or Domestic, written on every save by
+				# set_transaction_nature(). Indexed because the Transaction Sync
+				# page filters and COUNTs on it for every tab, the same reason
+				# taxjar_sync_status above is indexed.
+				#
+				# Hidden: the form already says an export is an export, in the
+				# tax message strip and in the sidebar pill, and both say it
+				# before the first save. This field exists so the Transaction
+				# Sync page can filter on one indexed column instead of asking
+				# the database for every invoice with a foreign destination.
+				#
+				# The leading "" yields a blank first option, which is what a row
+				# written before this field existed holds until the backfill
+				# patch runs.
+				fieldname="taxjar_transaction_nature",
+				fieldtype="Select",
+				insert_after="taxjar_exclusion_reason",
+				label="Transaction Nature",
+				options="\n" + "\n".join(TRANSACTION_NATURES),
+				search_index=1,
+				read_only=1,
+				hidden=1,
+				allow_on_submit=1,
+			),
+			dict(
 				fieldname="taxjar_last_synced",
 				fieldtype="Datetime",
-				insert_after="taxjar_exclusion_reason",
+				insert_after="taxjar_transaction_nature",
 				label="Last Synced",
 				read_only=1,
 				allow_on_submit=1,

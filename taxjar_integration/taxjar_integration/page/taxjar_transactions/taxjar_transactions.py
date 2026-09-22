@@ -12,6 +12,8 @@ from taxjar_integration.taxjar_integration.pagination import (
 	permitted_count,
 )
 from taxjar_integration.taxjar_integration.taxjar_integration import (
+	DOMESTIC_NATURE,
+	EXPORT_NATURE,
 	_publish_transaction_update,
 	transaction_exclusion_reason,
 )
@@ -21,6 +23,11 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 _TAXJAR_INVOICE_COLUMN = "taxjar_sync_status"
 
 _DOC_STATUS_LABELS = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
+
+# What the Nature column holds, and the invoice field it is read from. Both
+# defined next to the integration's other invoice fields - see
+# set_transaction_nature(), which writes this one on every save.
+_NATURE_COLUMN = "taxjar_transaction_nature"
 
 # The page's tabs. Five of them are one per state a transaction can be in, and
 # between them they partition the table: every invoice in range lands in exactly
@@ -124,6 +131,10 @@ def _fetch_invoices(conditions, scope, start, page_size, truncate_errors=True):
 			# invoice then read as the wrong amount of the wrong money.
 			"currency",
 			"is_return", "is_debit_note", "company",
+			# The Nature column, read straight off the invoice. Written on every
+			# save by set_transaction_nature() - see its docstring for why this
+			# is stored rather than worked out here.
+			"taxjar_transaction_nature",
 			"taxjar_sync_status", "taxjar_last_synced", "taxjar_sync_error",
 			"taxjar_exclusion_reason",
 		],
@@ -297,6 +308,7 @@ def _export_columns():
 		{"label": _("Transaction ID"), "fieldname": "name"},
 		{"label": _("Customer"), "fieldname": "customer_name"},
 		{"label": _("Type"), "fieldname": "transaction_type"},
+		{"label": _("Nature"), "fieldname": _NATURE_COLUMN},
 		{"label": _("Company"), "fieldname": "company"},
 		{"label": _("Currency"), "fieldname": "currency"},
 		{"label": _("Grand Total"), "fieldname": "grand_total"},
@@ -419,6 +431,28 @@ def _build_conditions(filters, scope=ALL_SCOPE):
 
 	_add_column_search(conditions, filters)
 
+	return _add_nature_filter(conditions, filters)
+
+
+def _add_nature_filter(conditions, filters):
+	"""Narrow the result set to exports or to domestic sales, when asked.
+
+	One indexed test on the invoice's own column, which is why
+	set_transaction_nature() stores the answer instead of the page working it
+	out - see that function for what the stored field replaced.
+
+	Export is the positive test and domestic is everything else, rather than two
+	equality tests. A row written before the field existed holds a blank until
+	the backfill patch runs, and a blank says nothing about the sale leaving the
+	United States. That is the same reading the column always had.
+	"""
+	nature = filters.get("transaction_nature")
+	if nature not in (EXPORT_NATURE, DOMESTIC_NATURE):
+		return conditions
+
+	conditions[_NATURE_COLUMN] = (
+		("=", EXPORT_NATURE) if nature == EXPORT_NATURE else ("!=", EXPORT_NATURE)
+	)
 	return conditions
 
 

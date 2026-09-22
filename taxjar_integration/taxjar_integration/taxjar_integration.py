@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import traceback
+import unicodedata
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -354,11 +355,16 @@ _NOT_CONFIGURED_ERROR = describe_missing_credential
 EXCLUSION_TAXJAR_DISABLED = "TaxJar Disabled"
 EXCLUSION_SYNC_NOT_ENABLED = "Transaction Sync not enabled for company"
 EXCLUSION_REMOVED_FROM_TAXJAR = "Removed from TaxJar"
-# An export. TaxJar files United States sales tax state by state, and a sale
-# delivered to another country belongs to no state, so there is nowhere to file
-# it. This is the one exclusion reason that is a fact about the document rather
-# than about a switch - see is_export_destination().
-EXCLUSION_OUTSIDE_COVERAGE = "Destination outside TaxJar coverage"
+# An export, kept out by its company's own choice. TaxJar prices United States
+# sales tax, so an export is taxed at zero either way; whether it is still filed
+# is a per-company setting - Include Export Transactions on TaxJar Company
+# Config. See _export_is_excluded(), which every gate asks.
+EXCLUSION_OUTSIDE_COVERAGE = "Export Transaction"
+
+# Why an export carries no tax, in one sentence the document keeps. Named rather
+# than written at each site: the invoice stores it, the API log repeats it, and
+# the form paints the same words before the first save.
+EXPORT_NO_TAX_REASON = "Sales taxes are not applicable on export transactions."
 
 # Drives the Select's options - see make_custom_fields, which re-runs on every
 # migrate, so the field and this list cannot drift apart.
@@ -368,6 +374,14 @@ TRANSACTION_EXCLUSION_REASONS = (
 	EXCLUSION_REMOVED_FROM_TAXJAR,
 	EXCLUSION_OUTSIDE_COVERAGE,
 )
+
+# What kind of sale this is, stored on the invoice as taxjar_transaction_nature.
+# An export is delivered outside the United States; everything else is domestic.
+# Words rather than a flag, so the Transaction Sync page and its spreadsheet
+# both read straight off the field.
+EXPORT_NATURE = "Export"
+DOMESTIC_NATURE = "Domestic"
+TRANSACTION_NATURES = (DOMESTIC_NATURE, EXPORT_NATURE)
 
 
 def enqueue_taxjar_sync(doc, method):
@@ -410,10 +424,11 @@ def enqueue_taxjar_sync(doc, method):
 		_publish_transaction_update(doc.name, "Excluded")
 		return
 
-	if is_export_destination(doc):
-		# An export is excluded, not failed. TaxJar files state by state, this
-		# sale is delivered to no state, and no payload can be built for it - so
-		# it used to submit, fail with "No TaxJar payload could be built", and be
+	if _export_is_excluded(doc, scope):
+		# An export is excluded, not failed. The company has chosen to keep its
+		# exports out of TaxJar, and this sale is delivered outside the United
+		# States - so there is nothing to send and nothing has gone wrong. It
+		# used to submit, fail with "No TaxJar payload could be built", and be
 		# re-sent by the retry cron every fifteen minutes until it ran out of
 		# attempts, all to report a document that is complete and correct.
 		#
@@ -473,11 +488,13 @@ def enqueue_taxjar_delete(doc, method):
 	if not company_scope(doc.company).files:
 		return
 
-	# An export was never filed, so there is nothing in TaxJar to remove. Without
-	# this the delete runs, TaxJar answers 404, and the 404 is read as "already
-	# absent" - which writes status Synced onto a document that never reached
-	# TaxJar at all.
-	if is_export_destination(doc):
+	# An export the company does not file was never sent, so there is nothing in
+	# TaxJar to remove. Without this the delete runs, TaxJar answers 404, and the
+	# 404 is read as "already absent" - which writes status Synced onto a
+	# document that never reached TaxJar at all. An export that WAS filed is
+	# deleted like any other transaction, which is why the switch is asked here
+	# rather than the country alone.
+	if _export_is_excluded(doc):
 		return
 
 	if not get_client(doc.company):
@@ -579,9 +596,20 @@ def sync_transaction_to_taxjar(invoice_name):
 
 	# Re-checked here, not just at enqueue time: a job can sit in the queue or be
 	# retried by the cron long after the configuration that queued it changed.
-	if not company_scope(doc.company).files:
+	scope = company_scope(doc.company)
+	if not scope.files:
 		log_taxjar_call(action="create_transaction", status="skipped",
 			error="Company no longer files transactions through TaxJar", context=ctx)
+		return
+
+	# Asked before the payload is built, not after. An export now builds a
+	# perfectly good payload, so "no payload" no longer stands in for "do not
+	# send this" - the question has to be put on its own. The retry cron and the
+	# Sync to TaxJar button both land here without passing enqueue_taxjar_sync.
+	if _export_is_excluded(doc, scope):
+		_set_sync_status(invoice_name, "Excluded", exclusion_reason=EXCLUSION_OUTSIDE_COVERAGE)
+		log_taxjar_call(action="create_transaction", status="skipped",
+			error=EXCLUSION_OUTSIDE_COVERAGE, context=ctx)
 		return
 
 	client = get_client(doc.company)
@@ -616,7 +644,7 @@ def sync_transaction_to_taxjar(invoice_name):
 		# this worker is also reached from the retry cron and the Sync to TaxJar
 		# button - including for documents submitted before exports were
 		# excluded, which is how those clear themselves.
-		if is_export_destination(doc):
+		if _export_is_excluded(doc):
 			_set_sync_status(invoice_name, "Excluded", exclusion_reason=EXCLUSION_OUTSIDE_COVERAGE)
 			log_taxjar_call(action="create_transaction", status="skipped",
 				error=EXCLUSION_OUTSIDE_COVERAGE, context=ctx)
@@ -1036,9 +1064,16 @@ def get_tax_data(doc):
 	if to_shipping_state not in SUPPORTED_STATE_CODES:
 		to_shipping_state = get_state_code(to_address, "Shipping")
 
-	# No usable state at either end means TaxJar has nothing to price this
-	# against. The caller records why; it is not a reason to stop the save.
-	if not from_shipping_state or not to_shipping_state:
+	# The company end must always resolve. TaxJar files United States sales tax
+	# state by state, so a payload with no ship-from state belongs nowhere.
+	if not from_shipping_state:
+		return None
+
+	# The destination end is not the same question. A United States sale with no
+	# usable state is a gap in the data, and the caller records why. An export to
+	# a country with no ISO region, or to an address that names none, is a
+	# complete sale - TaxJar is told what there is.
+	if not to_shipping_state and to_country_code == "US":
 		return None
 
 	usd_rate = _get_usd_exchange_rate(doc)
@@ -1078,7 +1113,7 @@ def get_tax_data(doc):
 		"to_zip": to_address.pincode,
 		"to_city": to_address.city,
 		"to_street": to_address.address_line1,
-		"to_state": to_shipping_state,
+		"to_state": to_shipping_state or "",
 		"shipping": shipping,
 		"amount": flt(amount, 2),
 		"plugin": "erpnext",
@@ -1114,7 +1149,17 @@ def get_state_code(address, location):
 		return None
 
 	state_code = get_iso_3166_2_state_code(address)
-	return state_code if state_code in SUPPORTED_STATE_CODES else None
+	if not state_code:
+		return None
+
+	# A United States address must name one of the fifty states, because TaxJar
+	# prices nothing else there and a nexus row can match nothing else. Anywhere
+	# else the ISO 3166-2 code is simply the region TaxJar is told about, and
+	# "GJ" for Gujarat rides along exactly as "FL" does.
+	country_code = (frappe.db.get_value("Country", address.get("country"), "code", cache=True) or "").upper()
+	if country_code == "US":
+		return state_code if state_code in SUPPORTED_STATE_CODES else None
+	return state_code
 
 
 def _get_item_product_tax_category(item):
@@ -1430,6 +1475,29 @@ def set_sales_tax(doc, method):
 		_remove_taxjar_rows(doc, company_config)
 		return
 
+	# No TaxJar call for an export, whether or not the company files it. Nexus is
+	# a registration with a United States state, so a sale delivered elsewhere is
+	# taxed at zero whatever TaxJar would answer - and asking costs one round
+	# trip per export to be told so.
+	#
+	# Read off the payload rather than the Address: get_tax_data() has already
+	# resolved the destination, so this is the same fact without a second query.
+	# A country that is named and is not the United States, rather than "not the
+	# United States", because a payload with no country named settles nothing.
+	to_country = tax_dict.get("to_country")
+	if to_country and to_country != "US":
+		_set_tax_status_fields(
+			doc,
+			has_nexus=False,
+			nexus_reason=EXPORT_NO_TAX_REASON,
+			ship_from=_format_address_short(tax_dict, "from"),
+			ship_to=_format_address_short(tax_dict, "to"),
+		)
+		log_taxjar_call(action="tax_for_order", status="skipped",
+			error=EXPORT_NO_TAX_REASON, context=_ctx)
+		_remove_taxjar_rows(doc, company_config)
+		return
+
 	if not check_for_nexus(doc, tax_dict):
 		return
 
@@ -1577,6 +1645,45 @@ def is_export_destination(doc):
 	return bool(export_destination_country(_destination_address(doc)))
 
 
+def set_transaction_nature(doc, method=None):
+	"""validate hook: record whether this sale is an export or a domestic sale.
+
+	Stored rather than worked out when the Transaction Sync page draws a row.
+	That page has to filter on the answer as well as show it, and a filter has
+	to narrow the whole result set before the page is cut - which meant asking
+	the database for every invoice whose destination Address is foreign. The
+	column and the filter then resolved the same fact by two different routes
+	and could disagree, and frappe.get_list cannot take a subquery as a filter
+	value at all: it walks the value looking for empty strings, and a query
+	builder has no end to walk to.
+
+	One indexed field answers both, and the Address is read here - once per
+	save, on a document whose destination the save is already looking at.
+
+	The answer is the sale's own, so it is not re-read after submit. An Address
+	edited afterwards corrects a record; it does not turn a shipped export into
+	a domestic sale.
+	"""
+	doc.taxjar_transaction_nature = EXPORT_NATURE if is_export_destination(doc) else DOMESTIC_NATURE
+
+
+def _export_is_excluded(doc, scope=None):
+	"""Whether this document is an export its company keeps out of TaxJar.
+
+	Two questions in one, because every gate asks both. Is this sale delivered
+	outside the United States, and has the company turned Include Export
+	Transactions off? Only both together mean "do not file it".
+
+	``scope`` is passed in where the caller already has one, so a submit does not
+	resolve the same company twice.
+	"""
+	if not is_export_destination(doc):
+		return False
+	if scope is None:
+		scope = company_scope(doc.company)
+	return not scope.files_exports
+
+
 def _destination_outside_coverage_reason(doc):
 	"""Why no payload could be built, in the destination's own terms.
 
@@ -1591,7 +1698,7 @@ def _destination_outside_coverage_reason(doc):
 	country = _destination_country(doc)
 
 	if country and country != "United States":
-		return f"Destination is in {country}, which TaxJar does not price"
+		return EXPORT_NO_TAX_REASON
 	return "Destination has no United States state TaxJar can price"
 
 
@@ -2393,7 +2500,14 @@ def check_nexus(shipping_address_name: str, company: str):
 		# have.
 		export_country = export_destination_country(shipping_address_name)
 		if export_country:
-			return {"outside_coverage": True, "country": export_country}
+			# The switch rides along for the same reason check_export_destination
+			# carries it: the strip and the pill describe one sale, and only the
+			# company says whether an export of it is filed.
+			return {
+				"outside_coverage": True,
+				"country": export_country,
+				"files_exports": company_scope(company).files_exports,
+			}
 
 		state_code = get_iso_3166_2_state_code(address)
 
@@ -2410,15 +2524,18 @@ def check_nexus(shipping_address_name: str, company: str):
 
 
 @frappe.whitelist()
-def check_export_destination(address: str):
-	"""Whether this address is an export - a country TaxJar does not price.
+def check_export_destination(address: str, company: str | None = None):
+	"""Whether this address is an export, and whether this company files one.
 
-	The one fact three parts of the form need before the first save: the message
+	The one fact four parts of the form need before the first save: the message
 	strip says so instead of naming a state, the shipping-address prompt stops
-	asking for a destination TaxJar will not read, and the exemption override is
-	pre-set to exempt. check_nexus() answers the same question for the strip, on
-	a call it already makes; this is for the other two, which run at their own
-	moments.
+	asking for a destination TaxJar will not read, the exemption override is
+	pre-set to exempt, and the sync pill says what the submit will do.
+
+	``files_exports`` rides along because the last of those four cannot be
+	answered by the country alone - the same export is filed for one company and
+	excluded for the next. It is left out when no company is given, so a caller
+	that only wants the country is not handed a false no.
 	"""
 	if not isinstance(address, str) or not address.strip():
 		return {}
@@ -2429,7 +2546,14 @@ def check_export_destination(address: str):
 	frappe.has_permission("Address", "read", doc=address, throw=True)
 
 	country = export_destination_country(address)
-	return {"country": country} if country else {}
+	if not country:
+		return {}
+
+	answer = {"country": country}
+	if isinstance(company, str) and company.strip():
+		frappe.has_permission("Company", "read", doc=company, throw=True)
+		answer["files_exports"] = company_scope(company).files_exports
+	return answer
 
 
 @frappe.whitelist()
@@ -2500,11 +2624,38 @@ def get_iso_3166_2_state_code(address):
 		states = [pystate.code for pystate in pycountry.subdivisions.get(country_code=country_code.upper()) or []]
 		return state if address_state in states else None
 
-	try:
-		lookup_state = pycountry.subdivisions.lookup(state)
-	except LookupError:
+	return _region_code_by_name(country_code, state)
+
+
+def _plain_name(value):
+	"""A region name with its diacritics removed, in upper case.
+
+	"Gujarat" is written "Gujarāt" in ISO 3166-2, with a macron over the second
+	a, and an address carries the plain spelling. An exact match on the name then
+	finds nothing at all, and the sale gets no region code. The same gap closes
+	over Maharashtra, Tamil Nadu, and many names in Vietnam, Turkey and Spain.
+	"""
+	decomposed = unicodedata.normalize("NFKD", value or "")
+	return "".join(c for c in decomposed if not unicodedata.combining(c)).upper().strip()
+
+
+def _region_code_by_name(country_code, state):
+	"""The ISO 3166-2 region code for a region name, or None.
+
+	Scoped to one country on purpose. pycountry's own lookup() searches every
+	country at once, so "Ontario" typed on a Florida address came back as "ON" -
+	a real region code, for the wrong country, on a sale with one destination.
+	"""
+	import pycountry
+
+	wanted = _plain_name(state)
+	if not wanted:
 		return None
-	return lookup_state.code.split("-")[1]
+
+	for region in pycountry.subdivisions.get(country_code=country_code.upper()) or []:
+		if _plain_name(region.name) == wanted:
+			return region.code.split("-")[1]
+	return None
 
 
 def taxjar_serves_any_company(settings=None):
@@ -2719,6 +2870,10 @@ class CompanyScope:
 	files: bool
 	config: object | None
 	reason: str | None
+	# Whether an export is filed along with the rest. Meaningless on its own -
+	# a company that files nothing files no exports either - so it is already
+	# folded into ``files``, exactly as ``files`` folds in ``in_scope``.
+	files_exports: bool = False
 
 	@property
 	def uses_taxjar(self) -> bool:
@@ -2750,13 +2905,17 @@ def company_scope(company, config=None) -> CompanyScope:
 	if not config:
 		return CompanyScope(company, False, False, False, None, SCOPE_NOT_CONFIGURED)
 
+	files = bool(config.taxjar_create_transactions)
 	return CompanyScope(
 		company,
 		True,
 		bool(config.taxjar_calculate_tax),
-		bool(config.taxjar_create_transactions),
+		files,
 		config,
 		None,
+		# getattr, not config.get(): the row is a child Document here and a stand-in
+		# in the tests, and only attribute access reads the same on both.
+		files and bool(getattr(config, "taxjar_include_exports", 0)),
 	)
 
 
@@ -2802,6 +2961,7 @@ def get_company_scope(company: str):
 		"in_scope": scope.in_scope,
 		"calculates": scope.calculates,
 		"files": scope.files,
+		"files_exports": scope.files_exports,
 		"uses_taxjar": scope.uses_taxjar,
 		"reason": scope.reason,
 		"country": get_region(company),

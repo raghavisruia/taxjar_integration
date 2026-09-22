@@ -100,6 +100,7 @@ def get_setup_state():
 			"shipping_account_head": cfg.shipping_account_head,
 			"calculate": bool(cfg.taxjar_calculate_tax),
 			"file": bool(cfg.taxjar_create_transactions),
+			"include_exports": bool(cfg.get("taxjar_include_exports")),
 		}
 		for cfg in (settings.company_config or [])
 	]
@@ -559,7 +560,7 @@ def verify_company_address(company: str, address: str):
 
 @frappe.whitelist(methods=["POST"])
 def save_features(company_flags: list | str | None = None):
-	"""Set each company's Calculate/File flags. Flags for a company without an
+	"""Set each company's Calculate/File/Include Exports flags. Flags for a company without an
 	existing company_config row are silently skipped — the Accounts step must
 	run first to create that row.
 
@@ -598,6 +599,12 @@ def save_features(company_flags: list | str | None = None):
 				continue
 			cfg.taxjar_calculate_tax = cint(row.get("calculate"))
 			cfg.taxjar_create_transactions = cint(row.get("file"))
+			# Only meaningful while transactions are filed at all. The card hides
+			# the switch when filing is off, so a client that files nothing sends
+			# nothing about exports - and the stored answer stays as it was,
+			# ready for the day filing is turned back on.
+			if cfg.taxjar_create_transactions:
+				cfg.taxjar_include_exports = cint(row.get("include_exports"))
 
 		if any(
 			cfg.taxjar_calculate_tax or cfg.taxjar_create_transactions

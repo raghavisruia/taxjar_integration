@@ -4,3 +4,4 @@
 taxjar_integration.patches.remove_old_taxjar_integration_module
 taxjar_integration.patches.remove_item_breakdown_fields
 taxjar_integration.patches.namespace_item_tax_fields
+taxjar_integration.patches.backfill_transaction_nature

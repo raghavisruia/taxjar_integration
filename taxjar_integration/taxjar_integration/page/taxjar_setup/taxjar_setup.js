@@ -1718,7 +1718,16 @@ class TaxJarSetup {
 					</div>
 					<div class="ts-togrow">
 						<div class="ts-field-file"></div>
-						<div class="ts-togtext"><b>${__("Sync Transactions to TaxJar")}</b><p>${__("File your sales tax return with {0}", [`<a href="${AUTOFILE_DOC_URL}" target="_blank" rel="noopener noreferrer">${__("TaxJar AutoFile")}</a>`])}</p></div>
+						<div class="ts-togtext"><b>${__("Sync Transactions to TaxJar")}</b><p>${__("File your sales tax return with {0}", [`<a href="${AUTOFILE_DOC_URL}" target="_blank" rel="noopener noreferrer">${__("TaxJar AutoFile")}</a>`])}</p>
+							<!-- Inside the File row's own text column, not beside it. This
+							     narrows what that row sends rather than asking a third
+							     question, and sitting here it lines up under the label above
+							     by construction - with no indent measured against a checkbox
+							     whose width this file does not own. -->
+							<div class="ts-field-exports">
+								<div class="ts-exports-pick"></div>
+							</div>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -1734,7 +1743,39 @@ class TaxJarSetup {
 		});
 		file.set_value(c.file ? 1 : 0);
 
-		this._featureCards.push({ company: c.company, controls: { calc, file } });
+		// frappe.ui.TabButtons, the desk's segmented single-select, rather than a
+		// switch. Both answers get named: a switch labelled "include exports"
+		// says what turning it on does and leaves the reader to work out what
+		// leaving it off does. Two pills say both, and the one that is pressed
+		// is the sentence the card is making.
+		//
+		// The class rather than frappe.ui.tab_buttons(), because the card needs
+		// the instance later for get_value() - the helper returns the element
+		// and hides the instance on .data().
+		//
+		// Values are 0 and 1, the same pair the field stores. find_by_value()
+		// compares with Object.is and value_of() tests "value" in option, so a
+		// value of 0 selects its pill rather than falling back to the label.
+		const exports = new frappe.ui.TabButtons({
+			options: [
+				{ label: __("Domestic only"), value: 0 },
+				{ label: __("Domestic + Export"), value: 1 },
+			],
+			value: c.include_exports ? 1 : 0,
+			size: "md",
+			label: __("Transactions to send"),
+		});
+		$card.find(".ts-exports-pick").append(exports.$el);
+
+		// Shown only while transactions are filed at all, because it decides
+		// which of them are filed. A company that files nothing has no exports
+		// to include, and the row would ask a question with no consequence.
+		const toggle_exports = () =>
+			$card.find(".ts-field-exports").toggleClass("hide", !file.get_value());
+		file.df.change = toggle_exports;
+		toggle_exports();
+
+		this._featureCards.push({ company: c.company, controls: { calc, file, exports } });
 	}
 
 	_save_features() {
@@ -1746,6 +1787,7 @@ class TaxJarSetup {
 			company: c.company,
 			calculate: c.controls.calc.get_value() ? 1 : 0,
 			file: c.controls.file.get_value() ? 1 : 0,
+			include_exports: c.controls.exports.get_value() ? 1 : 0,
 		}));
 
 		const $next = this.$root.find(".ts-next").prop("disabled", true);

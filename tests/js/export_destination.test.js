@@ -50,7 +50,10 @@ function open_invoice(doc = {}) {
 }
 
 describe("the message strip", () => {
-	it("names the country of an export", async () => {
+	it("states why an export carries no tax", async () => {
+		// The country is not in the sentence. It is already on the address
+		// above, and whether the export is filed changes nothing about the tax -
+		// so one sentence covers both, and neither of them says "null".
 		answer_xcall(frappe, {
 			[SCOPE_METHOD]: US_CALC,
 			[EXPORT_METHOD]: { country: "India" },
@@ -59,14 +62,13 @@ describe("the message strip", () => {
 		const frm = open_invoice({
 			customer_address: "ADDR-IN",
 			taxjar_has_nexus: 0,
-			taxjar_nexus_reason: "Destination is in India, which TaxJar does not price",
+			taxjar_nexus_reason: "Sales taxes are not applicable on export transactions.",
 		});
 		await taxjar.show_no_address_tax_message(frm);
 		await flush();
 
-		expect(message_text(frm)).toContain("India");
+		expect(message_text(frm)).toContain("Sales taxes are not applicable on export transactions.");
 		expect(message_text(frm)).not.toContain("null");
-		expect(message_text(frm)).toContain("no taxes are charged");
 	});
 
 	it("offers no nexus link on an export", () => {
@@ -282,17 +284,61 @@ describe("the sidebar pill on a draft", () => {
 		expect(sidebar_section().text()).toContain("Excluded");
 	});
 
-	it("does not read the address of a submitted document", async () => {
-		answer_xcall(frappe, { [SCOPE_METHOD]: US_FILE });
+	it("reads the address of a submitted document too", async () => {
+		// It used to skip the lookup here, because the status was already
+		// recorded. The status no longer says everything: a filed export reads
+		// "Synced" exactly like a domestic sale, and only the country tells the
+		// detail line which of the two this is.
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: { country: "India", files_exports: true },
+		});
 
-		const frm = open_draft({ customer_address: "ADDR-IN", taxjar_sync_status: "Synced" });
+		const frm = open_draft({
+			customer_address: "ADDR-IN",
+			taxjar_sync_status: "Synced",
+			taxjar_last_synced: "2026-09-22 10:00:00",
+		});
 		frm.doc.docstatus = 1;
 		taxjar.render_sync_status_sidebar_pill(frm);
 		await flush();
 
 		const calls = frappe.xcall.mock.calls.filter(([method]) => method === EXPORT_METHOD);
-		expect(calls).toHaveLength(0);
+		expect(calls).toHaveLength(1);
 		expect(sidebar_section().text()).toContain("Synced");
+	});
+
+	it("says a filed export will sync, rather than that it is excluded", async () => {
+		// The country alone no longer settles it. This company files its
+		// exports, so the submit really will sync this one, and the draft is
+		// told what to do like any other.
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: { country: "India", files_exports: true },
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		expect(sidebar_section().text()).toContain("Submit to Sync");
+		expect(sidebar_section().text()).not.toContain("Excluded");
+	});
+
+	it("names the setting when an export is kept out", async () => {
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: { country: "India", files_exports: false },
+		});
+
+		const frm = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(frm);
+		await flush();
+
+		expect(sidebar_section().text()).toContain("Excluded");
+		expect(taxjar.exclusion_reason_text("Export Transaction")).toBe(
+			"As per your setting export transactions aren't synced to TaxJar"
+		);
 	});
 
 	// The answer lands after the user has moved on. Writing it then would put

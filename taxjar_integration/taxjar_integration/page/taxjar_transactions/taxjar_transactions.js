@@ -148,6 +148,22 @@ class TaxJarTransactionSync {
 				{ label: __("Debit Note"), value: "Debit Note" },
 			],
 		});
+
+		// Nature sits here rather than in the table's own filter row, where
+		// Transaction Type would be its only neighbour: that row searches
+		// Transaction ID and Customer and nothing else, and a column it cannot
+		// narrow would offer a box that does nothing. The server reads the two
+		// words, so they are sent untranslated and shown translated.
+		this.filter_transaction_nature = this.add_filter({
+			fieldname: "transaction_nature",
+			label: __("Nature"),
+			fieldtype: "Select",
+			options: [
+				{ label: __("All"), value: "" },
+				{ label: __("Domestic"), value: "Domestic" },
+				{ label: __("Export"), value: "Export" },
+			],
+		});
 	}
 
 	// frappe.ui.form.make_control() directly, rather than page.add_field(),
@@ -325,6 +341,9 @@ class TaxJarTransactionSync {
 		const transaction_type = this.filter_transaction_type?.get_value();
 		if (transaction_type) filters.transaction_type = transaction_type;
 
+		const transaction_nature = this.filter_transaction_nature?.get_value();
+		if (transaction_nature) filters.transaction_nature = transaction_nature;
+
 		// The datatable's inline filter row, resolved server-side so it
 		// narrows the whole result set rather than the loaded page.
 		if (Object.keys(this.column_search).length) filters.search = this.column_search;
@@ -453,6 +472,16 @@ class TaxJarTransactionSync {
 			},
 			{ label: __("Customer"), fieldname: "customer_name" },
 			{ label: __("Type"), fieldname: "transaction_type" },
+			{
+				// The invoice's own field, sent as it is stored. Two words, kept
+				// untranslated on the wire so the server's filter can compare
+				// them, and translated here where they are read. A row written
+				// before the field existed holds a blank until the backfill patch
+				// runs, and a blank cell says less than a guess would.
+				label: __("Nature"),
+				fieldname: "taxjar_transaction_nature",
+				_html: (value) => (value ? frappe.utils.escape_html(__(value)) : ""),
+			},
 			{
 				label: __("Grand Total"),
 				fieldname: "grand_total",

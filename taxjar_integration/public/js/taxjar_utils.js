@@ -250,25 +250,30 @@ taxjar_integration.when_scoped = function (frm, predicate, fn) {
 // one Address.
 taxjar_integration._export_cache = {};
 
-taxjar_integration.export_destination = function (address) {
+taxjar_integration.export_destination = function (address, company) {
 	if (!address) return Promise.resolve(null);
 
-	if (!taxjar_integration._export_cache[address]) {
-		taxjar_integration._export_cache[address] = frappe
+	// Keyed by both, not by the address alone. Whether an export is filed is a
+	// per-company setting, so the same address answers differently for two
+	// companies and one cached answer would speak for both.
+	const key = `${company || ""}::${address}`;
+
+	if (!taxjar_integration._export_cache[key]) {
+		taxjar_integration._export_cache[key] = frappe
 			.xcall(
 				"taxjar_integration.taxjar_integration.taxjar_integration.check_export_destination",
-				{ address }
+				{ address, company }
 			)
 			.then((answer) => (answer && answer.country ? answer : null))
 			.catch(() => {
 				// Same reason scope() clears its own entry on failure: a failed
 				// read must not become a permanent answer.
-				delete taxjar_integration._export_cache[address];
+				delete taxjar_integration._export_cache[key];
 				return null;
 			});
 	}
 
-	return taxjar_integration._export_cache[address];
+	return taxjar_integration._export_cache[key];
 };
 
 // The reason an export is exempt, as one of the Select's own options. TaxJar
@@ -500,7 +505,7 @@ taxjar_integration._prompt_unless_export = function (frm, party_name) {
 		return taxjar_integration._prompt_for_shipping_address(frm, party_name);
 	}
 
-	return taxjar_integration.export_destination(frm.doc.customer_address).then((export_to) => {
+	return taxjar_integration.export_destination(frm.doc.customer_address, frm.doc.company).then((export_to) => {
 		if (export_to) return;
 		return taxjar_integration._prompt_for_shipping_address(frm, party_name);
 	});
@@ -1283,13 +1288,13 @@ taxjar_integration._show_tax_message = function (frm) {
 	// reader somewhere that cannot change the outcome.
 	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
 
-	return taxjar_integration.export_destination(address).then((export_to) => {
+	return taxjar_integration.export_destination(address, frm.doc.company).then((export_to) => {
 		// The pick can change while this is in flight, and a stale answer names
 		// the wrong country - the same guard the nexus check below applies.
 		if ((frm.doc.shipping_address_name || frm.doc.customer_address) !== address) return;
 
 		if (export_to) {
-			taxjar_integration._show_outside_coverage_message(frm, export_to.country);
+			taxjar_integration._show_outside_coverage_message(frm);
 			return;
 		}
 
@@ -1310,14 +1315,17 @@ taxjar_integration._show_tax_message = function (frm) {
 // Same strip, same colour, one sentence and no link: the reader is not missing
 // a registration, the sale is simply outside what TaxJar prices. The country is
 // escaped because it is rendered as HTML.
-taxjar_integration._show_outside_coverage_message = function (frm, country) {
-	const text = country
-		? __("Destination is in {0}, which TaxJar does not price, hence no taxes are charged.", [
-				frappe.utils.escape_html(country),
-		  ])
-		: __("Destination is outside the United States, which TaxJar does not price, hence no taxes are charged.");
-
-	taxjar_integration._set_tax_message(frm, text, "yellow");
+taxjar_integration._show_outside_coverage_message = function (frm) {
+	// One sentence for both, and no country in it. Whether the export is filed
+	// changes nothing about the tax: a sale delivered outside the United States
+	// carries none either way, and naming the country only repeated what the
+	// address above already says. The same words the server stores on the
+	// document - see EXPORT_NO_TAX_REASON in taxjar_integration.py.
+	taxjar_integration._set_tax_message(
+		frm,
+		__("Sales taxes are not applicable on export transactions."),
+		"yellow"
+	);
 };
 
 // Yellow, not blue: no tax on a sale is a caveat about the outcome, not a note
@@ -1372,9 +1380,9 @@ taxjar_integration._check_nexus_for_selected_address = function (frm) {
 			if (missing && missing.outside_coverage) {
 				// The endpoint answers the export case itself, so a caller that
 				// reaches it without asking about the country first still gets
-				// a sentence about the country rather than "Nexus not
-				// configured for null".
-				taxjar_integration._show_outside_coverage_message(frm, missing.country);
+				// the export sentence rather than "Nexus not configured for
+				// null".
+				taxjar_integration._show_outside_coverage_message(frm);
 			} else if (missing) {
 				// The full state name, same as the reason the server stores
 				// once the document is saved - a two-letter code has to be
@@ -1477,7 +1485,7 @@ taxjar_integration._apply_region_exemption = function (frm) {
 			// The customer's own exemption is asked first because TaxJar
 			// applies that one itself, off the matched customer - see
 			// _get_effective_exemption() in taxjar_integration.py.
-			return taxjar_integration.export_destination(address).then((export_to) => {
+			return taxjar_integration.export_destination(address, frm.doc.company).then((export_to) => {
 				if (!export_to) {
 					unlock();
 					return;
@@ -1966,18 +1974,18 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 		// Every state but one is read off the document itself. An export is the
 		// exception: the destination country decides it, the document carries a
 		// destination from its first draft, and the answer is one column of one
-		// Address rather than anything the sync path writes. So a draft asks,
-		// and the pill is told. Nothing else asks - a submitted document has its
-		// status recorded, and the lookup would buy nothing.
-		if (frm.doc.docstatus !== 0) {
-			taxjar_integration._render_taxjar_sync_status_pill(frm);
-			return;
-		}
-
+		// Address rather than anything the sync path writes.
+		//
+		// A submitted document asks as well. It used to skip the lookup, on the
+		// grounds that its status was already recorded - but the status alone no
+		// longer says everything the pill says. A filed export reads "Synced"
+		// like any other sale, and only the country makes its detail line name
+		// it as an export.
+		//
 		// Ship-to decides the destination. The billing address stands in for a
 		// sale with no separate shipping address, the same way it does for nexus.
 		const address = frm.doc.shipping_address_name || frm.doc.customer_address;
-		return taxjar_integration.export_destination(address).then((export_to) => {
+		return taxjar_integration.export_destination(address, frm.doc.company).then((export_to) => {
 			// The form can move to another document while this is in flight, and
 			// a stale answer describes another sale.
 			if (frm.doc.name !== docname) return;
@@ -1989,7 +1997,10 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 			// guard _show_no_address_tax_message and the nexus check above
 			// already apply to the same lookup.
 			if ((frm.doc.shipping_address_name || frm.doc.customer_address) !== address) return;
-			taxjar_integration._render_taxjar_sync_status_pill(frm, Boolean(export_to));
+			// The whole answer, not a boolean: the pill needs the country to know
+			// this is an export, and files_exports to know what the submit will
+			// do about it.
+			taxjar_integration._render_taxjar_sync_status_pill(frm, export_to);
 		});
 	});
 };
@@ -2063,33 +2074,39 @@ taxjar_integration.exclusion_reason_text = function (reason, is_current) {
 		return __("This transaction was removed from TaxJar.");
 	}
 
-	if (reason === "Destination outside TaxJar coverage") {
-		// No "when this document was submitted" past tense here, and no switch
-		// to go and change: where a sale is delivered is a fact about the
-		// document, and it reads the same today as it did at submit.
-		return __("Export transactions aren't synced to TaxJar.");
+	if (reason === "Export Transaction") {
+		// Present tense, and it names the setting rather than the country: an
+		// export is kept out by a choice someone made and can unmake, not by
+		// where the sale went. See Include Export Transactions on TaxJar
+		// Company Config.
+		return __("As per your setting export transactions aren't synced to TaxJar");
 	}
 
 	return "";
 };
 
-taxjar_integration._render_taxjar_sync_status_pill = function (frm, is_export) {
+taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 	// "Synced"/"Failed" are written by both the on_submit sync path and the
 	// on_cancel delete path (see _set_sync_status), so docstatus === 2 is
 	// what turns those two into the cancel-flow wording below.
 	const cancelled = frm.doc.docstatus === 2;
 	const status = frm.doc.taxjar_sync_status || "Excluded";
+	const is_export = Boolean(export_to);
+	// An export this company does not file. The country alone no longer decides
+	// it: the same sale is filed for one company and kept out for the next.
+	const export_excluded = is_export && !export_to.files_exports;
 	let label, color, info_text;
 
-	if (frm.doc.docstatus === 0 && is_export) {
+	if (frm.doc.docstatus === 0 && export_excluded) {
 		// A draft is told what to do rather than given a status, because nothing
-		// syncs before submit. An export is the one draft whose answer is
-		// already settled: TaxJar prices United States sales tax, this sale is
-		// delivered elsewhere, and the submit will exclude it. "Submit to Sync"
-		// would promise a sync that the submit cannot make.
+		// syncs before submit. An export the company keeps out is the one draft
+		// whose answer is already settled, so the submit will exclude it and
+		// "Submit to Sync" would promise a sync that cannot happen. An export
+		// the company does file falls through to that promise like any other
+		// draft, because for it the promise is true.
 		label = __("Excluded");
 		color = taxjar_integration.SYNC_STATUS_COLORS.Excluded;
-		info_text = taxjar_integration.exclusion_reason_text("Destination outside TaxJar coverage");
+		info_text = taxjar_integration.exclusion_reason_text("Export Transaction");
 	} else if (frm.doc.docstatus === 0) {
 		label = __("Submit to Sync");
 		color = "amber";
@@ -2108,7 +2125,7 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, is_export) {
 		// on_cancel delete path (see _set_sync_status), so both read the same
 		// way: when TaxJar last heard about this document.
 		info_text = frm.doc.taxjar_last_synced
-			? taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced)
+			? taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced, is_export)
 			: __("Synced with TaxJar");
 	} else if (status === "Failed") {
 		label = cancelled ? __("Failed to Cancel") : __("Failed");
@@ -2180,8 +2197,18 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, is_export) {
 // a site whose System Settings timezone runs ahead of the browser's own
 // produces for a sync that has only just happened, so fall back to the
 // absolute user-tz time rather than to a bare "Synced".
-taxjar_integration._synced_ago_text = function (timestamp) {
+taxjar_integration._synced_ago_text = function (timestamp, is_export) {
 	const ago = frappe.datetime.prettyDate(timestamp);
+
+	// An export that reached TaxJar says so. The status beside it reads "Synced"
+	// exactly like a domestic sale, and this line is the only place the document
+	// names which of the two it is.
+	if (is_export) {
+		return ago
+			? __("Export transaction synced {0}", [ago])
+			: __("Export transaction synced on {0}", [frappe.datetime.str_to_user(timestamp)]);
+	}
+
 	return ago ? __("Synced {0}", [ago]) : __("Synced on {0}", [frappe.datetime.str_to_user(timestamp)]);
 };
 

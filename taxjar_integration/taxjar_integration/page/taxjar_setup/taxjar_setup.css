@@ -393,6 +393,18 @@
 .taxjar-setup .ts-togrow + .ts-togrow { border-top: 1px solid var(--border-color); }
 .taxjar-setup .ts-togtext b { font-size: var(--text-md); }
 .taxjar-setup .ts-togtext p { margin: 2px 0 0; font-size: var(--text-base); color: var(--text-muted); }
+
+/* Which transactions the File row above sends. It lives in that row's own text
+   column, so it is already indented under that row's label - the space around
+   it is all this adds. */
+.taxjar-setup .ts-field-exports { margin-top: 12px; }
+/* es-tab-buttons ships inline-flex, sized by its labels, so the two pills come
+   out different widths and the group stops short of the card. Span the column
+   and share it evenly - the same override the desk sidebar panel makes, and for
+   the same reason. Only the box changes; the rail, pill, sizing and states all
+   still come from the component. */
+.taxjar-setup .ts-exports-pick .es-tab-buttons { display: flex; }
+.taxjar-setup .ts-exports-pick .es-pill { flex: 1 1 0; min-width: 0; }
 /* gap: 0 - .ts-togrow brings its own 12px padding on both sides, so the
    divider between rows gets 12px above and 12px below. A grid gap here
    would stack on top of the upper row's padding only (the border sits at

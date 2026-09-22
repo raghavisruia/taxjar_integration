@@ -9479,7 +9479,11 @@ class TestHooksUpdated(UnitTestCase):
 	def test_sales_invoice_validate_has_return_against(self):
 		from taxjar_integration import hooks
 		si_events = hooks.doc_events.get("Sales Invoice", {})
-		self.assertIn("validate_return_against", si_events.get("validate", ""))
+		# A list since set_transaction_nature joined it on the same event.
+		# frappe reads either form; this test has to read both.
+		validate = si_events.get("validate", "")
+		handlers = [validate] if isinstance(validate, str) else validate
+		self.assertTrue(any("validate_return_against" in handler for handler in handlers))
 
 	def test_customer_retry_cron_registered(self):
 		from taxjar_integration import hooks
@@ -12601,7 +12605,7 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		is_taxjar_enabled_for_company has confirmed TaxJar applies to this
 		company, so it no longer needs its own "not enabled" branch."""
 		js = self._read_js("taxjar_utils.js")
-		return js.split("_render_taxjar_sync_status_pill = function (frm, is_export) {")[1].split("\n};")[0]
+		return js.split("_render_taxjar_sync_status_pill = function (frm, export_to) {")[1].split("\n};")[0]
 
 	def test_status_colors_match_transactions_page(self):
 		"""Same mapping as STATUS_COLORS in taxjar_transactions.js, kept as
@@ -12630,9 +12634,12 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn("!frm.doc.company", fn)
 
 	def test_dispatcher_dispatches_on_response(self):
+		"""One of two rows, and the pill always carries the export answer with
+		it - a submitted document reads it too, so there is no second call that
+		hands the pill nothing."""
 		fn = self._dispatcher_fn()
 		self.assertIn("_render_taxjar_not_enabled_link(frm)", fn)
-		self.assertIn("_render_taxjar_sync_status_pill(frm)", fn)
+		self.assertIn("_render_taxjar_sync_status_pill(frm, export_to)", fn)
 
 	def test_not_enabled_link_has_no_status_label(self):
 		"""No bold "TaxJar Status" heading and no indicator-pill background -
@@ -12741,41 +12748,57 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		submit. An export is the one draft whose answer is already settled: the
 		destination decides it, and the submit will exclude it. "Submit to Sync"
 		would promise a sync that the submit cannot make."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			EXCLUSION_OUTSIDE_COVERAGE,
+		)
+
 		export_branch = (
 			self._render_fn()
-			.split("frm.doc.docstatus === 0 && is_export) {")[1]
+			.split("frm.doc.docstatus === 0 && export_excluded) {")[1]
 			.split("} else if")[0]
 		)
 		self.assertIn('label = __("Excluded")', export_branch)
 		self.assertIn("color = taxjar_integration.SYNC_STATUS_COLORS.Excluded", export_branch)
 		self.assertIn(
-			'taxjar_integration.exclusion_reason_text("Destination outside TaxJar coverage")',
+			f'taxjar_integration.exclusion_reason_text("{EXCLUSION_OUTSIDE_COVERAGE}")',
 			export_branch,
 		)
 
 		# Ahead of the plain draft branch, which would otherwise answer first.
 		fn = self._render_fn()
 		self.assertLess(
-			fn.index("frm.doc.docstatus === 0 && is_export"),
+			fn.index("frm.doc.docstatus === 0 && export_excluded"),
 			fn.index('label = __("Submit to Sync")'),
 		)
 
-	def test_only_a_draft_pays_for_the_export_lookup(self):
-		"""A submitted document has its status recorded, so the address read
-		would buy nothing. The dispatcher asks for a draft and hands the answer
-		to the pill."""
+	def test_a_filed_export_draft_is_told_to_submit_like_any_other(self):
+		"""The country alone no longer settles it. Only an export the company
+		keeps out is called Excluded before submit; one it files will really
+		sync, so the draft is told to submit."""
+		fn = self._render_fn()
+		self.assertIn("const export_excluded = is_export && !export_to.files_exports;", fn)
+
+	def test_every_document_pays_for_the_export_lookup(self):
+		"""A submitted document used to skip the address read, because its status
+		was already recorded. The status no longer says everything the pill says:
+		a filed export reads "Synced" like a domestic sale, and only the country
+		makes its detail line name it as an export.
+
+		The whole answer is handed over, not a boolean - the pill needs the
+		country to know this is an export and files_exports to know what the
+		submit will do about it."""
 		dispatcher = self._dispatcher_fn()
-		self.assertIn("if (frm.doc.docstatus !== 0) {", dispatcher)
-		self.assertLess(
-			dispatcher.index("frm.doc.docstatus !== 0"),
-			dispatcher.index("taxjar_integration.export_destination(address)"),
-		)
+		self.assertNotIn("if (frm.doc.docstatus !== 0) {", dispatcher)
 		self.assertIn(
 			"const address = frm.doc.shipping_address_name || frm.doc.customer_address;",
 			dispatcher,
 		)
 		self.assertIn(
-			"taxjar_integration._render_taxjar_sync_status_pill(frm, Boolean(export_to))",
+			"taxjar_integration.export_destination(address, frm.doc.company)",
+			dispatcher,
+		)
+		self.assertIn(
+			"taxjar_integration._render_taxjar_sync_status_pill(frm, export_to)",
 			dispatcher,
 		)
 
@@ -12783,7 +12806,7 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		"""The form can move to another document while the address read is in
 		flight, and a stale answer describes another sale."""
 		dispatcher = self._dispatcher_fn()
-		late = dispatcher.split("export_destination(address).then((export_to) => {")[1]
+		late = dispatcher.split("export_destination(address, frm.doc.company).then((export_to) => {")[1]
 		self.assertIn("if (frm.doc.name !== docname) return;", late)
 
 	def test_the_draft_pill_follows_the_address_the_user_picks(self):
@@ -12809,7 +12832,9 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		the clock read - so "Synced 5 minutes ago", off prettyDate."""
 		fn = self._render_fn()
 		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
-		self.assertIn("taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced)", synced_branch)
+		self.assertIn(
+			"taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced, is_export)", synced_branch
+		)
 		self.assertIn("taxjar_last_synced", synced_branch)
 		self.assertNotIn("Last synced:", synced_branch)
 
@@ -12820,10 +12845,17 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		a sync that has only just happened. Falling through to str_to_user
 		keeps that case saying something rather than a bare "Synced"."""
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("taxjar_integration._synced_ago_text = function (timestamp) {")[1].split("\n};")[0]
+		fn = js.split("taxjar_integration._synced_ago_text = function (timestamp, is_export) {")[1].split("\n};")[0]
 		self.assertIn("frappe.datetime.prettyDate(timestamp)", fn)
 		self.assertIn('__("Synced {0}", [ago])', fn)
 		self.assertIn("frappe.datetime.str_to_user(timestamp)", fn)
+
+		# An export that reached TaxJar says so. The status beside it reads
+		# "Synced" exactly like a domestic sale, and this line is the only place
+		# the document names which of the two it is. Both halves of the fallback
+		# get the wording, not just the pretty one.
+		self.assertIn('__("Export transaction synced {0}", [ago])', fn)
+		self.assertIn('__("Export transaction synced on {0}"', fn)
 
 	def test_cancelled_hover_also_says_when_it_synced(self):
 		"""Cancelled is the same "Synced" status value written by the
@@ -17668,12 +17700,16 @@ class TestAppConventionChecks(UnitTestCase):
 class TaxJarCompanyProfile:
 	"""One company's TaxJar-relevant facts, in the shape the code reads them."""
 
-	def __init__(self, name, country="United States", calculate=0, file=0, configured=True):
+	def __init__(self, name, country="United States", calculate=0, file=0, configured=True,
+	             include_exports=1):
 		self.name = name
 		self.country = country
 		self.calculate = calculate
 		self.file = file
 		self.configured = configured
+		# On by default, the same as the field's own default. A company that
+		# files its transactions files its exports unless somebody says not to.
+		self.include_exports = include_exports
 
 	@property
 	def config(self):
@@ -17689,6 +17725,7 @@ class TaxJarCompanyProfile:
 		row.company = self.name
 		row.taxjar_calculate_tax = self.calculate
 		row.taxjar_create_transactions = self.file
+		row.taxjar_include_exports = self.include_exports
 		row.tax_account_head = f"Sales Tax - {self.name}"
 		row.shipping_account_head = f"Freight - {self.name}"
 		return row
@@ -17699,6 +17736,11 @@ class TaxJarCompanyProfile:
 # easily confused with "not in scope at all", and they want different messages.
 US_CALC = TaxJarCompanyProfile("US Calc Co", calculate=1, file=0)
 US_FILE = TaxJarCompanyProfile("US File Co", calculate=0, file=1)
+
+# The same company with Include Export Transactions turned off. An export is the
+# one sale whose fate differs between these two, and every gate has to read the
+# switch rather than the country alone.
+US_FILE_NO_EXPORTS = TaxJarCompanyProfile("US File No Exports Co", calculate=0, file=1, include_exports=0)
 US_OFF = TaxJarCompanyProfile("US Off Co", calculate=0, file=0)
 IN_CO = TaxJarCompanyProfile("India Co", country="India", configured=False)
 
@@ -17712,7 +17754,7 @@ IN_FLAGGED = TaxJarCompanyProfile("India Flagged Co", country="India", calculate
 # reader somewhere different.
 US_UNCONFIGURED = TaxJarCompanyProfile("US Unconfigured Co", configured=False)
 
-TAXJAR_COMPANIES = (US_CALC, US_FILE, US_OFF, IN_CO, IN_FLAGGED, US_UNCONFIGURED)
+TAXJAR_COMPANIES = (US_CALC, US_FILE, US_FILE_NO_EXPORTS, US_OFF, IN_CO, IN_FLAGGED, US_UNCONFIGURED)
 _BY_NAME = {profile.name: profile for profile in TAXJAR_COMPANIES}
 
 
@@ -18581,7 +18623,7 @@ class TestExportsAreExcludedNotFailed(TaxJarTestCase):
 	def test_submitting_an_export_stamps_excluded_with_its_own_reason(self):
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
-		doc = self._doc()
+		doc = self._doc(company=US_FILE_NO_EXPORTS.name)
 		with self.scope_patches(), \
 		     patch.object(module, "is_export_destination", return_value=True), \
 		     patch.object(module, "get_client", return_value=MagicMock()), \
@@ -18594,13 +18636,29 @@ class TestExportsAreExcludedNotFailed(TaxJarTestCase):
 		self.assertEqual(written["taxjar_exclusion_reason"], module.EXCLUSION_OUTSIDE_COVERAGE)
 		enqueue.assert_not_called()
 
+	def test_submitting_an_export_queues_it_when_the_company_includes_exports(self):
+		"""The other side of the same switch. The country is identical; only
+		Include Export Transactions differs, and the sale is filed."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = self._doc(company=US_FILE.name)
+		with self.scope_patches(), \
+		     patch.object(module, "is_export_destination", return_value=True), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "_publish_transaction_update"), \
+		     patch.object(module.frappe, "enqueue") as enqueue:
+			module.enqueue_taxjar_sync(doc, None)
+
+		doc.db_set.assert_called_with("taxjar_sync_status", "Queued", update_modified=False)
+		enqueue.assert_called_once()
+
 	def test_cancelling_an_export_sends_no_delete(self):
 		"""Nothing was filed, so there is nothing to remove - and TaxJar answers
 		a delete for an order it never had with a 404, which the worker reads as
 		"already absent" and records as Synced."""
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
-		doc = self._doc()
+		doc = self._doc(company=US_FILE_NO_EXPORTS.name)
 		with self.scope_patches(), \
 		     patch.object(module, "is_export_destination", return_value=True), \
 		     patch.object(module, "get_client", return_value=MagicMock()), \
@@ -18611,6 +18669,21 @@ class TestExportsAreExcludedNotFailed(TaxJarTestCase):
 		enqueue.assert_not_called()
 		doc.db_set.assert_not_called()
 
+	def test_cancelling_a_filed_export_does_send_a_delete(self):
+		"""An export this company files is in TaxJar like any other transaction,
+		so cancelling it has to take it back out."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = self._doc(company=US_FILE.name)
+		with self.scope_patches(), \
+		     patch.object(module, "is_export_destination", return_value=True), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "_publish_transaction_update"), \
+		     patch.object(module.frappe, "enqueue") as enqueue:
+			module.enqueue_taxjar_delete(doc, None)
+
+		enqueue.assert_called_once()
+
 	def test_the_worker_excludes_an_export_rather_than_failing_it(self):
 		"""The retry cron and the Sync to TaxJar button both come through here,
 		which is how an invoice submitted before this rule existed clears itself."""
@@ -18618,7 +18691,7 @@ class TestExportsAreExcludedNotFailed(TaxJarTestCase):
 
 		doc = MagicMock()
 		doc.docstatus = 1
-		doc.company = US_FILE.name
+		doc.company = US_FILE_NO_EXPORTS.name
 		doc.taxes = []
 
 		with self.scope_patches(), \
@@ -18633,6 +18706,32 @@ class TestExportsAreExcludedNotFailed(TaxJarTestCase):
 
 		set_status.assert_called_once_with(
 			"SINV-EXPORT-001", "Excluded", exclusion_reason=module.EXCLUSION_OUTSIDE_COVERAGE
+		)
+
+	def test_the_worker_asks_the_switch_before_it_builds_a_payload(self):
+		"""The gate moved ahead of get_tax_data. An export now builds a perfectly
+		good payload, so "no payload" no longer stands in for "do not send it" -
+		and the retry cron and the Sync to TaxJar button both land here."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = MagicMock()
+		doc.docstatus = 1
+		doc.company = US_FILE_NO_EXPORTS.name
+		doc.taxes = []
+
+		with self.scope_patches(), \
+		     patch.object(module, "frappe") as fake_frappe, \
+		     patch.object(module, "is_export_destination", return_value=True), \
+		     patch.object(module, "get_client", return_value=MagicMock()), \
+		     patch.object(module, "get_tax_data", return_value={"to_country": "IN"}) as get_tax_data, \
+		     patch.object(module, "log_taxjar_call"), \
+		     patch.object(module, "_set_sync_status") as set_status:
+			fake_frappe.get_doc.return_value = doc
+			module.sync_transaction_to_taxjar("SINV-EXPORT-002")
+
+		get_tax_data.assert_not_called()
+		set_status.assert_called_once_with(
+			"SINV-EXPORT-002", "Excluded", exclusion_reason=module.EXCLUSION_OUTSIDE_COVERAGE
 		)
 
 	def test_a_missing_state_still_fails_and_still_retries(self):
@@ -18702,7 +18801,9 @@ class TestExportDestinationIsNamedNotNumbered(TaxJarTestCase):
 		self.assertEqual(module.check_export_destination(""), {})
 		self.assertEqual(module.check_export_destination("   "), {})
 
-	def test_the_stored_reason_names_the_country(self):
+	def test_the_stored_reason_states_why_an_export_carries_no_tax(self):
+		"""The country used to be in the sentence. It says nothing the address
+		does not already say, and the rule is the same for every country."""
 		from taxjar_integration.taxjar_integration import taxjar_integration as module
 
 		doc = _make_doc(company=US_CALC.name, taxes=[])
@@ -18711,7 +18812,7 @@ class TestExportDestinationIsNamedNotNumbered(TaxJarTestCase):
 		with patch.object(module, "_address_country", return_value="India"):
 			self.assertEqual(
 				module._destination_outside_coverage_reason(doc),
-				"Destination is in India, which TaxJar does not price",
+				module.EXPORT_NO_TAX_REASON,
 			)
 
 
@@ -18727,19 +18828,24 @@ class TestExportFormBehaviourJS(UnitTestCase):
 		with open(os.path.join(self._js_dir(), filename)) as f:
 			return f.read()
 
-	def test_the_strip_names_the_country_and_offers_no_nexus_link(self):
+	def test_the_strip_states_the_rule_and_offers_no_nexus_link(self):
 		"""Nexus is a registration with a United States state. No amount of it
 		makes a sale to Mumbai taxable, so the link would send the reader
-		somewhere that cannot change the outcome."""
+		somewhere that cannot change the outcome.
+
+		The sentence is the same one the server stores on the document, so the
+		form before its first save and the form after it read alike."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import EXPORT_NO_TAX_REASON
+
 		utils = self._read_js("taxjar_utils.js")
 		self.assertIn(
-			'taxjar_integration._show_outside_coverage_message = function (frm, country) {', utils
+			"taxjar_integration._show_outside_coverage_message = function (frm) {", utils
 		)
 
 		fn = utils.split(
-			"taxjar_integration._show_outside_coverage_message = function (frm, country) {"
+			"taxjar_integration._show_outside_coverage_message = function (frm) {"
 		)[1].split("\n};")[0]
-		self.assertIn("Destination is in {0}, which TaxJar does not price", fn)
+		self.assertIn(EXPORT_NO_TAX_REASON, fn)
 		self.assertNotIn("TAXJAR_NEXUS_URL", fn)
 
 	def test_the_shipping_address_prompt_is_skipped_for_an_export(self):
@@ -18749,7 +18855,11 @@ class TestExportFormBehaviourJS(UnitTestCase):
 		fn = utils.split(
 			"taxjar_integration._prompt_unless_export = function (frm, party_name) {"
 		)[1].split("\n};")[0]
-		self.assertIn("taxjar_integration.export_destination(frm.doc.customer_address)", fn)
+		# The company rides along: whether an export is filed is a per-company
+		# setting, so the same address answers differently for two companies.
+		self.assertIn(
+			"taxjar_integration.export_destination(frm.doc.customer_address, frm.doc.company)", fn
+		)
 		self.assertIn("if (export_to) return;", fn)
 
 	def test_an_export_is_pre_set_to_exempt_for_other(self):
@@ -18788,11 +18898,469 @@ class TestExportFormBehaviourJS(UnitTestCase):
 	def test_the_sync_button_is_not_offered_for_an_export(self):
 		"""Every other exclusion is a switch someone can turn on, and the button
 		files the document once they have. This one is not."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			EXCLUSION_OUTSIDE_COVERAGE,
+		)
+
 		js = self._read_js("sales_invoice.js")
 		self.assertIn(
-			'if (frm.doc.taxjar_exclusion_reason === "Destination outside TaxJar coverage") return;',
+			f'if (frm.doc.taxjar_exclusion_reason === "{EXCLUSION_OUTSIDE_COVERAGE}") return;',
 			js,
 		)
+
+
+class TestARegionOutsideTheUnitedStatesResolves(UnitTestCase):
+	"""An export needs a region code, and the old lookup could not find one.
+
+	TaxJar is told where a sale is delivered, and the destination end of the
+	payload used to accept United States states only. Every export therefore
+	built no payload at all, whatever the company had chosen.
+	"""
+
+	def test_a_region_name_with_diacritics_still_resolves(self):
+		"""ISO 3166-2 writes "Gujarat" with a macron over the second a, and an
+		address carries the plain spelling. The exact match found nothing, so a
+		sale to Gujarat got no region code and no payload."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _region_code_by_name
+
+		self.assertEqual(_region_code_by_name("IN", "GUJARAT"), "GJ")
+		self.assertEqual(_region_code_by_name("IN", "Maharashtra"), "MH")
+		self.assertEqual(_region_code_by_name("IN", "Tamil Nadu"), "TN")
+
+	def test_the_united_states_still_resolves_the_same_way(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _region_code_by_name
+
+		self.assertEqual(_region_code_by_name("US", "FLORIDA"), "FL")
+
+	def test_a_name_is_matched_inside_its_own_country_only(self):
+		"""pycountry's own lookup() searches every country at once, so "Ontario"
+		typed on a Florida address came back as "ON" - a real region code, for
+		the wrong country, on a sale with one destination."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _region_code_by_name
+
+		self.assertIsNone(_region_code_by_name("US", "Ontario"))
+		self.assertIsNone(_region_code_by_name("IN", "Bavaria"))
+
+	def test_a_united_states_address_must_name_one_of_the_fifty(self):
+		"""TaxJar prices nothing else there, and a nexus row can match nothing
+		else - so a United States address keeps the stricter rule."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		address = frappe._dict(country="United States", state="Ontario")
+		with patch.object(module.frappe.db, "get_value", return_value="US"):
+			self.assertIsNone(module.get_state_code(address, "Shipping"))
+
+	def test_a_region_outside_the_united_states_rides_along(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		address = frappe._dict(country="India", state="Gujarat")
+		with patch.object(module.frappe.db, "get_value", return_value="IN"):
+			self.assertEqual(module.get_state_code(address, "Shipping"), "GJ")
+
+
+class TestAnExportWithNoRegionIsStillASale(UnitTestCase):
+	"""The two ends of the payload answer different questions.
+
+	The company end must always resolve, because TaxJar files United States
+	sales tax state by state. The destination end need not: a country with no
+	ISO region, or an address that names none, is still a complete sale.
+	"""
+
+	def _tax_data(self, to_country, to_state):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		doc = _make_doc(company=US_FILE.name, taxes=[])
+		doc.items = []
+
+		def _state_code(address, location):
+			return "FL" if location == "Company" else to_state
+
+		with patch.object(module, "get_company_config", return_value=MagicMock(
+			tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch.object(module, "get_company_address_details", return_value=frappe._dict(
+			name="ADDR-FL", country="United States", state="FL", pincode="33602",
+			city="Tampa", address_line1="1 Main St")), \
+		     patch.object(module, "get_shipping_address_details", return_value=frappe._dict(
+			name="ADDR-X", country="Somewhere", state=to_state or "", pincode="",
+			city="Surat", address_line1="102 Happy Residency")), \
+		     patch.object(module.frappe.db, "get_value", side_effect=["US", to_country]), \
+		     patch.object(module, "_classify_foreign_tax_rows", return_value={
+			"item_discounts": {}, "synthetic_items": []}), \
+		     patch.object(module, "_get_usd_exchange_rate", return_value=None), \
+		     patch.object(module, "_get_taxjar_customer_id", return_value=None), \
+		     patch.object(module, "_get_effective_exemption", return_value=(None, None)), \
+		     patch.object(module, "get_state_code", side_effect=_state_code):
+			return module.get_tax_data(doc)
+
+	def test_an_export_with_no_region_still_builds_a_payload(self):
+		tax_dict = self._tax_data("IN", None)
+
+		self.assertIsNotNone(tax_dict)
+		self.assertEqual(tax_dict["to_country"], "IN")
+		# Empty, never None: the value is posted to TaxJar verbatim.
+		self.assertEqual(tax_dict["to_state"], "")
+
+	def test_a_united_states_sale_with_no_state_still_builds_nothing(self):
+		"""The gap in the data the reader should go and fill. Naming it as an
+		export would file a domestic sale nowhere and say nothing about it."""
+		self.assertIsNone(self._tax_data("US", None))
+
+
+class TestTheExportSwitchReachesTheBrowser(TaxJarTestCase):
+	"""The form paints an export before the first save, so it has to be told
+	both halves: that this is an export, and what this company does with one."""
+
+	def test_check_export_destination_carries_the_switch(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), \
+		     patch.object(module.frappe.db, "exists", return_value=True), \
+		     patch.object(module.frappe, "has_permission", return_value=True), \
+		     patch.object(module, "export_destination_country", return_value="India"):
+			included = module.check_export_destination("ADDR-IN", US_FILE.name)
+			excluded = module.check_export_destination("ADDR-IN", US_FILE_NO_EXPORTS.name)
+
+		self.assertEqual(included, {"country": "India", "files_exports": True})
+		self.assertEqual(excluded, {"country": "India", "files_exports": False})
+
+	def test_the_answer_leaves_the_switch_out_when_no_company_is_given(self):
+		"""A caller that only wants the country is not handed a false no."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), \
+		     patch.object(module.frappe.db, "exists", return_value=True), \
+		     patch.object(module.frappe, "has_permission", return_value=True), \
+		     patch.object(module, "export_destination_country", return_value="India"):
+			self.assertEqual(module.check_export_destination("ADDR-IN"), {"country": "India"})
+
+	def test_the_scope_endpoint_carries_the_switch(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), patch.object(module.frappe, "has_permission", return_value=True):
+			self.assertTrue(module.get_company_scope(US_FILE.name)["files_exports"])
+			self.assertFalse(module.get_company_scope(US_FILE_NO_EXPORTS.name)["files_exports"])
+
+	def test_a_company_that_files_nothing_files_no_exports(self):
+		"""Already folded into files, exactly as files folds in in_scope. No
+		caller should have to remember to check both."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches():
+			self.assertFalse(module.company_scope(US_CALC.name).files_exports)
+			self.assertFalse(module.company_scope(US_OFF.name).files_exports)
+
+
+class TestTheNatureColumn(UnitTestCase):
+	"""Export or Domestic, on every row of the Transaction Sync page.
+
+	The answer is stored on the invoice by set_transaction_nature() and read
+	back by the page. It used to be worked out while the page drew each row,
+	with a matching subquery behind the filter. Two resolvers for one fact could
+	disagree, and frappe.get_list cannot take a subquery as a filter value at
+	all - it walks the value looking for empty strings, and a query builder has
+	no end to walk to, so the first use of the filter spun a worker at full CPU.
+	"""
+
+	def _nature_of(self, doc, countries):
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		with patch.object(ti, "_address_country", side_effect=lambda name: countries.get(name)):
+			ti.set_transaction_nature(doc)
+		return doc.taxjar_transaction_nature
+
+	def test_a_sale_is_named_by_the_country_it_is_delivered_to(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		countries = {"ADDR-IN": "India", "ADDR-FL": "United States", "ADDR-BLANK": None}
+
+		# Ship-to wins over bill-to, the same fallback the tax engine uses.
+		self.assertEqual(
+			self._nature_of(
+				frappe._dict(shipping_address_name="ADDR-IN", customer_address="ADDR-FL"), countries
+			),
+			page.EXPORT_NATURE,
+		)
+		self.assertEqual(
+			self._nature_of(
+				frappe._dict(shipping_address_name="ADDR-FL", customer_address="ADDR-IN"), countries
+			),
+			page.DOMESTIC_NATURE,
+		)
+		# Bill-to stands in when there is no shipping address.
+		self.assertEqual(
+			self._nature_of(
+				frappe._dict(shipping_address_name=None, customer_address="ADDR-IN"), countries
+			),
+			page.EXPORT_NATURE,
+		)
+		# No address, and an address naming no country, are both domestic:
+		# nothing about them says the sale leaves the United States.
+		self.assertEqual(
+			self._nature_of(
+				frappe._dict(shipping_address_name=None, customer_address=None), countries
+			),
+			page.DOMESTIC_NATURE,
+		)
+		self.assertEqual(
+			self._nature_of(
+				frappe._dict(shipping_address_name="ADDR-BLANK", customer_address=None), countries
+			),
+			page.DOMESTIC_NATURE,
+		)
+
+	def test_every_save_writes_the_field(self):
+		"""A draft's destination can change until it is submitted, so the hook
+		runs on validate rather than once at submit."""
+		import taxjar_integration.hooks as hooks
+
+		validate = hooks.doc_events["Sales Invoice"]["validate"]
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.set_transaction_nature",
+			validate,
+		)
+
+	def test_the_field_is_declared_with_an_index(self):
+		"""The page filters and COUNTs on this column for every tab, the same
+		reason taxjar_sync_status carries an index."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings import (
+			taxjar_settings as settings,
+		)
+
+		fields = settings.get_custom_fields()["Sales Invoice"]
+		field = next(f for f in fields if f.get("fieldname") == "taxjar_transaction_nature")
+
+		self.assertEqual(field["search_index"], 1)
+		self.assertEqual(field["fieldtype"], "Select")
+		# The leading blank is what a row written before the field existed holds.
+		self.assertEqual(field["options"], "\nDomestic\nExport")
+
+	def test_the_column_is_on_the_sheet_as_well_as_the_screen(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		fieldnames = [c.get("fieldname") for c in page._export_columns()]
+		self.assertIn("taxjar_transaction_nature", fieldnames)
+
+	def test_the_filter_is_one_test_on_the_invoices_own_column(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		conditions = page._build_conditions({"transaction_nature": "Export"}, page.ALL_SCOPE)
+
+		self.assertIsInstance(conditions, dict)
+		self.assertEqual(conditions["taxjar_transaction_nature"], ("=", "Export"))
+
+	def test_domestic_is_everything_that_is_not_an_export(self):
+		"""Not an equality test on "Domestic". A row written before the field
+		existed holds a blank until the backfill patch runs, and a blank says
+		nothing about the sale leaving the United States - which is the reading
+		the column always had."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		conditions = page._build_conditions({"transaction_nature": "Domestic"}, page.ALL_SCOPE)
+
+		self.assertEqual(conditions["taxjar_transaction_nature"], ("!=", "Export"))
+
+	def test_the_filter_and_a_transaction_id_search_both_survive(self):
+		"""They test different fields now, so one dict holds both. The filter
+		used to test `name`, which the Transaction ID search also tests."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		conditions = page._build_conditions(
+			{"transaction_nature": "Export", "search": {"name": "SINV"}}, page.ALL_SCOPE
+		)
+
+		self.assertEqual(conditions["taxjar_transaction_nature"], ("=", "Export"))
+		self.assertEqual(conditions["name"][0], "like")
+
+	def test_an_unasked_filter_leaves_the_conditions_alone(self):
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		self.assertNotIn(
+			"taxjar_transaction_nature", page._build_conditions({}, page.ALL_SCOPE)
+		)
+		self.assertNotIn(
+			"taxjar_transaction_nature",
+			page._build_conditions({"transaction_nature": "Anything Else"}, page.ALL_SCOPE),
+		)
+
+	def test_the_backfill_reads_the_destination_the_way_the_hook_does(self):
+		"""Python falls back with ``or``, which treats an empty string as
+		nothing. COALESCE falls back only on NULL. An unset Link is stored as an
+		empty string as often as it is stored as NULL, so without NULLIF an
+		invoice with an empty shipping address and a foreign billing address
+		would be written Domestic by the patch and read Export everywhere else.
+		"""
+		import inspect
+
+		from taxjar_integration.patches import backfill_transaction_nature as patch_module
+
+		sql = " ".join(inspect.getsource(patch_module).upper().split())
+
+		self.assertIn("NULLIF(SI.SHIPPING_ADDRESS_NAME, '')", sql)
+		self.assertIn("NULLIF(SI.CUSTOMER_ADDRESS, '')", sql)
+		# An address naming no country is domestic, in the patch as in the hook.
+		self.assertIn("COALESCE(ADDR.COUNTRY, '') NOT IN ('', 'UNITED STATES')", sql)
+		# Only rows that hold nothing yet. A submitted invoice keeps the nature
+		# it was sold under, even if the Address is corrected later.
+		self.assertIn("WHERE COALESCE(SI.TAXJAR_TRANSACTION_NATURE, '') = ''", sql)
+
+	def test_the_patch_is_registered(self):
+		"""A patch nobody lists is a patch that never runs, and every invoice
+		written before this release then keeps a blank Nature for good."""
+		import os
+
+		import taxjar_integration
+
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			self.assertIn("taxjar_integration.patches.backfill_transaction_nature", handle.read())
+
+	def test_the_patch_creates_the_field_before_it_fills_it(self):
+		"""This app creates its custom fields from after_migrate, and
+		after_migrate runs after patches. On the migrate that first ships the
+		field the column does not exist yet, so a patch that only checked for it
+		skipped every row and was still recorded as done - which left the
+		backfill to never run at all. Seen on the test site before this guard."""
+		from taxjar_integration.patches import backfill_transaction_nature as patch_module
+
+		made = []
+		with patch.object(patch_module.frappe.db, "has_column", return_value=False), patch.object(
+			patch_module.frappe.db, "sql"
+		) as sql, patch.object(
+			patch_module, "make_custom_fields", side_effect=lambda: made.append(True)
+		):
+			patch_module.execute()
+
+		self.assertTrue(made, "the patch filled the column without creating it")
+		self.assertTrue(sql.called)
+
+	def test_the_database_accepts_the_filter(self):
+		"""The one thing a mock cannot answer: whether get_list takes these
+		conditions at all. Run for real, against this site, because the previous
+		design passed a query builder here and hung the worker outright."""
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import (
+			taxjar_transactions as page,
+		)
+
+		for nature in (page.EXPORT_NATURE, page.DOMESTIC_NATURE):
+			with self.subTest(nature=nature):
+				conditions = page._build_conditions({"transaction_nature": nature}, page.ALL_SCOPE)
+				rows = frappe.get_list(
+					"Sales Invoice", filters=conditions, fields=["name"], limit_page_length=5
+				)
+				self.assertIsInstance(rows, list)
+
+
+class TestTheWizardCarriesTheExportSwitch(UnitTestCase):
+	"""The card in the setup wizard writes the same field the settings form does."""
+
+	def _js(self):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def _exports_block(self):
+		return self._js().split("new frappe.ui.TabButtons({")[1].split("});")[0]
+
+	def test_the_row_names_both_answers_rather_than_one(self):
+		"""A switch labelled "include exports" says what turning it on does and
+		leaves the reader to work out what leaving it off does. Two pills say
+		both, and the pressed one is the sentence the card is making."""
+		block = self._exports_block()
+		self.assertIn('label: __("Domestic only"), value: 0', block)
+		self.assertIn('label: __("Domestic + Export"), value: 1', block)
+
+	def test_the_pills_carry_the_values_the_field_stores(self):
+		"""0 and 1, not two labels mapped back afterwards. find_by_value()
+		compares with Object.is and value_of() tests "value" in option, so a
+		value of 0 selects its pill instead of falling back to the label."""
+		block = self._exports_block()
+		self.assertIn("value: c.include_exports ? 1 : 0,", block)
+		self.assertIn("include_exports: c.controls.exports.get_value() ? 1 : 0,", self._js())
+
+	def test_the_picker_sits_inside_the_file_rows_text_column(self):
+		"""That is what indents it under "Sync Transactions to TaxJar". A
+		padding measured against the checkbox beside that label would be a
+		number this file does not own, and the two would drift apart."""
+		js = self._js()
+		file_row = js.split('<div class="ts-field-file"></div>')[1].split("</div>\n\t\t\t\t</div>")[0]
+		self.assertIn('<div class="ts-field-exports">', file_row)
+
+	def test_the_pills_stand_on_their_own(self):
+		"""No heading above them and no line below them. The two labels already
+		say what each one sends, and the row sits under "Sync Transactions to
+		TaxJar", which says what is being narrowed."""
+		js = self._js()
+		css = self._setup_css()
+		for gone in ("ts-exports-label", "ts-exports-note"):
+			self.assertNotIn(gone, js)
+			self.assertNotIn(gone, css)
+
+	def test_the_group_still_carries_a_name_for_a_screen_reader(self):
+		"""Nothing on screen names the pair now, so the accessible name is the
+		only thing left saying what the choice is about. Without it the group is
+		announced as just "radio group" - see TabButtons, which sets aria-label
+		from this option."""
+		self.assertIn('label: __("Transactions to send"),', self._exports_block())
+
+	def test_the_two_pills_share_the_width(self):
+		"""es-tab-buttons ships inline-flex, sized by its labels, so the two
+		come out different widths and the group stops short of the card."""
+		css = self._setup_css()
+		self.assertIn(".taxjar-setup .ts-exports-pick .es-tab-buttons { display: flex; }", css)
+		self.assertIn(".taxjar-setup .ts-exports-pick .es-pill { flex: 1 1 0; min-width: 0; }", css)
+
+	def _setup_css(self):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.css"
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def test_the_row_is_hidden_while_nothing_is_filed(self):
+		"""It decides which transactions are filed. A company that files none
+		has no exports to include, so the question would have no consequence."""
+		js = self._js()
+		self.assertIn('$card.find(".ts-field-exports").toggleClass("hide", !file.get_value())', js)
+
+	def test_the_card_sends_the_answer_with_the_other_two(self):
+		self.assertIn("include_exports: c.controls.exports.get_value() ? 1 : 0,", self._js())
+
+	def test_the_field_is_written_only_while_transactions_are_filed(self):
+		"""The card hides the switch when filing is off, so a client that files
+		nothing sends nothing about exports - and the stored answer stays as it
+		was, ready for the day filing is turned back on."""
+		from taxjar_integration.taxjar_integration.page.taxjar_setup import taxjar_setup as page
+
+		cfg = MagicMock()
+		settings = MagicMock()
+		settings.company_config = [cfg]
+		cfg.company = "Frappe Tech"
+
+		with patch.object(page.frappe, "has_permission", return_value=True), \
+		     patch.object(page, "settings_write_lock"), \
+		     patch.object(page.frappe, "get_single", return_value=settings):
+			page.save_features([{"company": "Frappe Tech", "calculate": 0, "file": 0,
+			                     "include_exports": 1}])
+
+		self.assertEqual(cfg.taxjar_create_transactions, 0)
+		# Never assigned, because filing is off.
+		self.assertNotIsInstance(cfg.taxjar_include_exports, int)
 
 
 class TestMissingCredentialSaysWhichKind(UnitTestCase):

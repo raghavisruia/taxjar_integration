@@ -9,7 +9,8 @@
   "tax_account_head",
   "shipping_account_head",
   "taxjar_calculate_tax",
-  "taxjar_create_transactions"
+  "taxjar_create_transactions",
+  "taxjar_include_exports"
  ],
  "fields": [
   {
@@ -35,6 +36,15 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "File Transactions"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.taxjar_create_transactions",
+   "description": "Sync zero rated export transactions to TaxJar.",
+   "fieldname": "taxjar_include_exports",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Include Export Transactions"
   },
   {
    "description": "Sales Tax Ledger where the tax liability will accumulate",

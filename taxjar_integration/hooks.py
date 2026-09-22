@@ -138,7 +138,13 @@ after_uninstall = "taxjar_integration.uninstall.after_uninstall"
 
 doc_events = {
 	"Sales Invoice": {
-		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.validate_return_against",
+		"validate": [
+			"taxjar_integration.taxjar_integration.taxjar_integration.validate_return_against",
+			# On every save, including a draft: the destination can change until
+			# the document is submitted, and the sidebar pill and the Transaction
+			# Sync page both read the stored answer.
+			"taxjar_integration.taxjar_integration.taxjar_integration.set_transaction_nature",
+		],
 		# At submit, not at save: an incomplete draft is unfinished, not wrong.
 		"before_submit": "taxjar_integration.taxjar_integration.taxjar_integration.validate_taxable_destination",
 		"on_submit": "taxjar_integration.taxjar_integration.taxjar_integration.enqueue_taxjar_sync",
