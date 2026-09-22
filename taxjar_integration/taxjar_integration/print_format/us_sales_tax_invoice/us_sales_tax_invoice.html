@@ -118,26 +118,32 @@
 		<!-- Items Table -->
 		{% set item_naming_by = frappe.db.get_single_value("Stock Settings", "item_naming_by") %}
 		{#
-			List rate / discount here mirror get_line_item_dict() in
-			taxjar_integration.py (the same function that builds the TaxJar
-			API payload) rather than the raw discount_percentage/
-			discount_amount fields directly:
+			Rate / discount here mirror get_line_item_dict() in
+			taxjar_integration.py, the same function that builds the TaxJar
+			API payload, rather than the raw discount_percentage/
+			discount_amount fields:
 
-			- list_rate is the pre-discount unit price - max(rate_with_margin,
-			  price_list_rate, rate), not price_list_rate alone, so a line
-			  priced above its price list (margin, or a rate typed directly
-			  with a stale/lower price_list_rate) still shows its real list
-			  price rather than an understated one.
-			- discount is list_rate*qty minus net_amount - net_amount is
-			  ERPNext's own final chargeable figure for the line, so this
-			  reads the same total discount get_line_item_dict() sends to
-			  TaxJar (item-level discount plus this line's share of any
-			  document-level Additional Discount/distributed_discount_amount),
-			  not just the item-level fields. Not clamped to >=0 - on a
-			  return/credit note qty (and so net_amount, and so this whole
-			  subtraction) is negative, and clamping to 0 was silently
-			  zeroing out a real discount rather than just flipping its
-			  sign. abs() at use converts it to a magnitude either way.
+			- unit_price is item.rate, the price the line is billed at and
+			  the number ERPNext builds its own amount and total from. It
+			  used to be max(rate_with_margin, price_list_rate, rate), on the
+			  reading that the Rate column should show a pre-discount price.
+			  That printed a line billed at 200 as a rate of 1000 with a
+			  discount of 833.33, and it stopped mirroring the payload the
+			  day get_line_item_dict() started reading item.rate.
+			- line_discount is unit_price*qty minus net_amount. net_amount is
+			  ERPNext's own final chargeable figure for the line, so what is
+			  left here is this line's share of any document-level Additional
+			  Discount, distributed by ERPNext itself - the same number the
+			  payload carries. An item-level discount is in the rate now, not
+			  in this column. Not clamped to >=0 - on a return/credit note qty
+			  (and so net_amount, and so this whole subtraction) is negative,
+			  and clamping to 0 was silently zeroing out a real discount
+			  rather than just flipping its sign. abs() at use converts it to
+			  a magnitude either way.
+
+			So the row foots: rate x quantity minus discount is the Amount
+			column, and the Amount column foots to the Net Total the totals
+			block starts from.
 
 			The Discount column only earns its place when at least one line
 			actually has one - on an invoice with no discounts, an all-dash
@@ -145,9 +151,9 @@
 		#}
 		{% set ns = namespace(any_item_discount=false) %}
 		{% for item in doc.items %}
-			{% set list_rate = [item.rate_with_margin or 0, item.price_list_rate or 0, item.rate or 0] | max %}
-			{% set list_amount = list_rate * (item.qty or 0) %}
-			{% set line_discount = (list_amount - (item.net_amount or 0)) | abs %}
+			{% set unit_price = item.rate or 0 %}
+			{% set line_amount = unit_price * (item.qty or 0) %}
+			{% set line_discount = (line_amount - (item.net_amount or 0)) | abs %}
 			{% if line_discount > 0.005 %}
 				{% set ns.any_item_discount = true %}
 			{% endif %}
@@ -170,9 +176,9 @@
 			</thead>
 			<tbody>
 				{% for item in doc.items %}
-				{% set list_rate = [item.rate_with_margin or 0, item.price_list_rate or 0, item.rate or 0] | max %}
-				{% set list_amount = list_rate * (item.qty or 0) %}
-				{% set line_discount = (list_amount - (item.net_amount or 0)) | abs %}
+				{% set unit_price = item.rate or 0 %}
+				{% set line_amount = unit_price * (item.qty or 0) %}
+				{% set line_discount = (line_amount - (item.net_amount or 0)) | abs %}
 				<tr>
 					<td class="text-center">{{ loop.index }}</td>
 					<td class="text-left">
@@ -185,7 +191,7 @@
 					<td class="text-left">{{ item.item_code }}</td>
 					{% endif %}
 					<td class="text-right">{{ item.get_formatted("qty", doc) }} {{ item.uom }}</td>
-					<td class="text-right">{{ frappe.utils.fmt_money(list_rate, None, doc.currency) }}</td>
+					<td class="text-right">{{ frappe.utils.fmt_money(unit_price, None, doc.currency) }}</td>
 					{% if ns.any_item_discount %}
 					<td class="text-right">
 						{% if line_discount > 0.005 %}

@@ -1885,6 +1885,106 @@ class TestGetLineItemDict(UnitTestCase):
 		self.assertNotIn("discount", result)
 
 
+class TestPrintFormatLineFigures(UnitTestCase):
+	"""The US Sales Tax Invoice's own Rate and Discount columns.
+
+	A standard print format keeps its HTML in the app file, so this reads that
+	file, pulls out the three expressions the item row sets, and renders them.
+	The template under test is the one the printer reads. A copy of those
+	expressions in the test would have gone on passing while the file stopped
+	mirroring get_line_item_dict(), which is exactly what happened.
+	"""
+
+	SET_BLOCK = re.compile(
+		r"\{%\s*set unit_price = .*?%\}\s*"
+		r"\{%\s*set line_amount = .*?%\}\s*"
+		r"\{%\s*set line_discount = .*?%\}",
+		re.S,
+	)
+
+	def _template(self):
+		import os
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"print_format", "us_sales_tax_invoice", "us_sales_tax_invoice.html",
+		))
+		with open(path) as f:
+			html = f.read()
+
+		block = self.SET_BLOCK.search(html)
+		self.assertIsNotNone(
+			block, "the item row no longer sets unit_price, line_amount and line_discount"
+		)
+		return block.group(0) + "{{ unit_price }}|{{ line_discount }}"
+
+	def _printed(self, **item):
+		"""What the Rate and Discount columns show for one item row."""
+		rendered = frappe.render_template(self._template(), {"item": frappe._dict(item)})
+		rate, discount = rendered.strip().split("|")
+		return flt(rate), flt(discount)
+
+	def test_the_rate_column_is_the_price_the_line_is_billed_at(self):
+		"""ACC-SINV-2026-00027 line 2: a Price List rate of 1000, a rate typed
+		down to 200, and 33.33 of the invoice's own 200 discount.
+
+		This printed 1000 and 833.33 until 2026-09-22 - a rate the customer
+		never paid, beside a discount that was two different things added
+		together.
+		"""
+		rate, discount = self._printed(
+			qty=1, rate=200.0, price_list_rate=1000.0, rate_with_margin=1000.0, net_amount=166.67
+		)
+		self.assertEqual(rate, 200.0)
+		self.assertAlmostEqual(discount, 33.33)
+
+	def test_a_line_with_no_document_discount_prints_no_discount(self):
+		"""An item-level discount is in the rate now. Nothing is left to
+		announce, and the Discount column drops out of the table."""
+		rate, discount = self._printed(
+			qty=1, rate=800.0, price_list_rate=1000.0, net_amount=800.0
+		)
+		self.assertEqual(rate, 800.0)
+		self.assertEqual(discount, 0.0)
+
+	def test_a_credit_note_line_prints_its_discount_as_a_magnitude(self):
+		"""Every figure on a return is negative, and a printed document reads
+		better with the sign in the column heading than in the number."""
+		rate, discount = self._printed(qty=-2, rate=100.0, net_amount=-180.0)
+		self.assertEqual(rate, 100.0)
+		self.assertAlmostEqual(discount, 20.0)
+
+	def test_the_printed_row_foots_to_its_amount_column(self):
+		"""Rate x quantity minus discount is the Amount column, which is
+		net_amount. The totals block starts at Net Total and carries no
+		discount row of its own, so this is what makes the page add up.
+		"""
+		for qty, rate, net_amount in ((1, 200.0, 166.67), (3, 50.0, 140.0), (-2, 100.0, -180.0)):
+			with self.subTest(qty=qty, rate=rate):
+				printed_rate, discount = self._printed(qty=qty, rate=rate, net_amount=net_amount)
+				signed_discount = discount if printed_rate * qty >= 0 else -discount
+				self.assertAlmostEqual(printed_rate * qty - signed_discount, net_amount)
+
+	def test_the_printed_figures_are_the_payloads_own(self):
+		"""The mirror itself, on one item, through both readers.
+
+		get_line_item_dict() omits a discount of zero, and the template prints
+		a magnitude, so the two are compared the way each states its answer.
+		"""
+		for item in (
+			frappe._dict(qty=1, rate=200.0, price_list_rate=1000.0, net_amount=166.67),
+			frappe._dict(qty=1, rate=800.0, price_list_rate=1000.0, net_amount=800.0),
+			frappe._dict(qty=-2, rate=100.0, price_list_rate=100.0, net_amount=-180.0),
+			frappe._dict(qty=3, rate=50.0, rate_with_margin=80.0, net_amount=140.0),
+		):
+			with self.subTest(rate=item.rate, qty=item.qty):
+				payload = get_line_item_dict(item, docstatus=0)
+				printed_rate, printed_discount = self._printed(**item)
+
+				self.assertEqual(printed_rate, payload["unit_price"])
+				self.assertAlmostEqual(printed_discount, abs(payload.get("discount", 0)))
+
+
 # ── Phase 2: sync_transaction_to_taxjar row detection ────────────────────────
 
 class TestSyncTransactionRowDetection(UnitTestCase):
