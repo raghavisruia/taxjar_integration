@@ -19201,19 +19201,43 @@ class TestTheNatureColumn(UnitTestCase):
 		invoice with an empty shipping address and a foreign billing address
 		would be written Domestic by the patch and read Export everywhere else.
 		"""
+		from taxjar_integration.patches import backfill_transaction_nature as patch_module
+
+		sql = " ".join(str(patch_module._export_query()).upper().split())
+
+		self.assertIn("NULLIF(`SHIPPING_ADDRESS_NAME`,'')", sql)
+		self.assertIn("NULLIF(`CUSTOMER_ADDRESS`,'')", sql)
+		# An address naming no country is domestic, in the patch as in the hook.
+		self.assertIn("COALESCE(`COUNTRY`,'') NOT IN ('','UNITED STATES')", sql)
+		# Only rows that hold nothing yet. A submitted invoice keeps the nature
+		# it was sold under, even if the Address is corrected later.
+		self.assertIn("WHERE COALESCE(`TAXJAR_TRANSACTION_NATURE`,'')=''", sql)
+
+	def test_the_backfill_leaves_the_sql_to_the_query_builder(self):
+		"""An UPDATE that joins a second table is written one way on MariaDB and
+		another way on Postgres, so the patch reads the Address rows with a
+		subquery instead. frappe.qb then writes both statements for the database
+		the site runs on, and neither one is assembled here as a string."""
 		import inspect
 
 		from taxjar_integration.patches import backfill_transaction_nature as patch_module
 
-		sql = " ".join(inspect.getsource(patch_module).upper().split())
+		self.assertNotIn("frappe.db.sql", inspect.getsource(patch_module))
 
-		self.assertIn("NULLIF(SI.SHIPPING_ADDRESS_NAME, '')", sql)
-		self.assertIn("NULLIF(SI.CUSTOMER_ADDRESS, '')", sql)
-		# An address naming no country is domestic, in the patch as in the hook.
-		self.assertIn("COALESCE(ADDR.COUNTRY, '') NOT IN ('', 'UNITED STATES')", sql)
-		# Only rows that hold nothing yet. A submitted invoice keeps the nature
-		# it was sold under, even if the Address is corrected later.
-		self.assertIn("WHERE COALESCE(SI.TAXJAR_TRANSACTION_NATURE, '') = ''", sql)
+	def test_the_backfill_gives_every_other_invoice_the_domestic_answer(self):
+		"""The second statement runs after the first, so the rows it still finds
+		are the rows the export statement passed over. An invoice whose address
+		is missing, empty or deleted lands here - the answer the hook gives it.
+		"""
+		from taxjar_integration.patches import backfill_transaction_nature as patch_module
+
+		sql = " ".join(str(patch_module._domestic_query()).upper().split())
+
+		self.assertIn("SET `TAXJAR_TRANSACTION_NATURE`='DOMESTIC'", sql)
+		self.assertIn("WHERE COALESCE(`TAXJAR_TRANSACTION_NATURE`,'')=''", sql)
+		# It names one table. A row is domestic because nothing marked it an
+		# export, not because a second read of the Address said so.
+		self.assertNotIn("TABADDRESS", sql)
 
 	def test_the_patch_is_registered(self):
 		"""A patch nobody lists is a patch that never runs, and every invoice
@@ -19236,14 +19260,17 @@ class TestTheNatureColumn(UnitTestCase):
 
 		made = []
 		with patch.object(patch_module.frappe.db, "has_column", return_value=False), patch.object(
-			patch_module.frappe.db, "sql"
-		) as sql, patch.object(
+			patch_module, "_export_query"
+		) as export_query, patch.object(
+			patch_module, "_domestic_query"
+		) as domestic_query, patch.object(
 			patch_module, "make_custom_fields", side_effect=lambda: made.append(True)
 		):
 			patch_module.execute()
 
 		self.assertTrue(made, "the patch filled the column without creating it")
-		self.assertTrue(sql.called)
+		export_query.return_value.run.assert_called_once()
+		domestic_query.return_value.run.assert_called_once()
 
 	def test_the_database_accepts_the_filter(self):
 		"""The one thing a mock cannot answer: whether get_list takes these
