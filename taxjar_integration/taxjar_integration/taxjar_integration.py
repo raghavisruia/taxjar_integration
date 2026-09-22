@@ -1481,7 +1481,12 @@ def set_sales_tax(doc, method):
 
 		_store_breakdown_data(tax_data, doc, usd_rate=usd_rate)
 
-		product_status, product_reason = _compute_product_taxable(doc, tax_data, usd_rate)
+		# The payload itself, not usd_rate: the line amounts TaxJar answered
+		# about are in tax_dict, already converted, and are what its own
+		# taxable_amount is measured against.
+		product_status, product_reason = _compute_product_taxable(
+			doc, tax_data, tax_dict.get("line_items")
+		)
 		to_state = region_full_name(tax_dict.get("to_country"), tax_dict.get("to_state", ""))
 		# The status matrix reports what the CUSTOMER MASTER says, not the
 		# effective outcome: a transaction-level override used to flip this to
@@ -1744,29 +1749,54 @@ def _format_address_short(tax_dict, prefix):
 	return result.strip()
 
 
-def _compute_product_taxable(doc, tax_data, usd_rate=None):
+def _compute_product_taxable(doc, tax_data, line_items=None):
 	"""Return (status, reason) for product taxability, read back from TaxJar's
 	own per-line taxable_amount rather than guessed from the item's tax
 	category code - a real exemption category (e.g. "81100" for books) looks
 	just like an ordinary taxable one by code alone, but TaxJar has already
-	worked out, per line and per jurisdiction, how much of it was taxable."""
+	worked out, per line and per jurisdiction, how much of it was taxable.
+
+	``line_items`` is the payload that was sent, and each taxable_amount is
+	measured against the line it belongs to. The item's own net_amount is a
+	different number: a foreign Sales Taxes and Charges row is folded into the
+	line it was distributed onto (see _apply_item_discounts), so a
+	document-level discount row leaves the line worth less than net_amount, and
+	a credit note's fee reversal leaves it worth more. Measured against
+	net_amount both read as "not taxable" while TaxJar had taxed the whole line.
+	The payload also carries the currency the answer came back in, so neither
+	side needs converting.
+
+	Compared by magnitude. A credit note's amounts are negative, and a plain >=
+	then asks which number is larger when the question is which is bigger - so
+	a refund TaxJar taxed in full was reported as not taxable at all, and one
+	it taxed not at all was reported as taxable.
+
+	A line the payload does not name falls back to net_amount, which is what
+	every caller without a payload - a document with no tax_data of its own -
+	has to be judged on.
+	"""
 	total = len(doc.items)
 	if not total:
 		return "", ""
+
+	# Keyed by the payload's own id for the row, which is its idx (one-based).
+	sent_by_id = {
+		line.get("id"): flt(line.get("unit_price")) * flt(line.get("quantity")) - flt(line.get("discount"))
+		for line in (line_items or [])
+	}
 
 	taxable_by_idx = {}
 	for line in (tax_data.breakdown.line_items if (tax_data and tax_data.breakdown) else []):
 		idx = cint(line.id) - 1
 		if 0 <= idx < total:
-			taxable_amount = flt(line.taxable_amount)
-			if usd_rate:
-				taxable_amount = flt(taxable_amount / usd_rate)
-			taxable_by_idx[idx] = taxable_amount
+			taxable_by_idx[idx] = flt(line.taxable_amount)
 
 	taxable_count = 0
 	for idx, item in enumerate(doc.items):
-		net_amount = flt(item.get("net_amount"))
-		if taxable_by_idx.get(idx, 0) >= net_amount - 0.01:
+		sent = sent_by_id.get(idx + 1)
+		if sent is None:
+			sent = flt(item.get("net_amount"))
+		if abs(taxable_by_idx.get(idx, 0)) >= abs(sent) - 0.01:
 			taxable_count += 1
 
 	if taxable_count == total:

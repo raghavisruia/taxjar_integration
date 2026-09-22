@@ -1382,6 +1382,38 @@ class TestSetSalesTax(UnitTestCase):
 		self.assertEqual(len(tax_rows), 1)
 		self.assertEqual(tax_rows[0].tax_amount, 90.0)
 
+	def test_product_taxable_is_judged_on_the_payload_not_on_net_amount(self):
+		"""Wiring guard for _compute_product_taxable's third argument.
+
+		A sale carrying a document-level "Loyalty Discount" row of -30: the
+		line is sent worth 70 and TaxJar taxes all 70, so the line is fully
+		taxable. Handed the item's net_amount of 100 instead of the payload,
+		the card reads "0 of 1 items taxable" for a line nothing exempted.
+		"""
+		doc = _make_doc(taxes=[], items=[_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)])
+
+		tax_dict = {
+			"line_items": [{"id": 1, "unit_price": 100.0, "quantity": 1, "discount": 30.0}],
+		}
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 5.78
+		tax_data.breakdown.line_items = [MagicMock(id=1, taxable_amount=70.0, tax_collectable=5.78)]
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value=tax_dict), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		self.assertEqual(doc.taxjar_product_taxable, "Yes")
+		self.assertEqual(doc.taxjar_product_taxable_reason, "1 of 1 items taxable")
+
 	def test_customer_taxable_status_true_when_not_exempt(self):
 		"""No taxjar_exemption_type set on the customer - status stays "Taxable",
 		matching the pre-existing default behaviour."""
@@ -13076,6 +13108,14 @@ class TestComputeProductTaxable(UnitTestCase):
 		]
 		return tax_data
 
+	def _sent(self, lines):
+		"""The payload as get_tax_data() built it: (id, unit_price, quantity,
+		discount) per line, in the currency it was sent in."""
+		return [
+			{"id": line_id, "unit_price": unit_price, "quantity": quantity, "discount": discount}
+			for line_id, unit_price, quantity, discount in lines
+		]
+
 	def test_all_taxable(self):
 		doc = _make_doc()
 		doc.items = [_FakeItem(idx=1, net_amount=100.0), _FakeItem(idx=2, net_amount=50.0)]
@@ -13119,21 +13159,89 @@ class TestComputeProductTaxable(UnitTestCase):
 		status, reason = _compute_product_taxable(doc, None)
 		self.assertEqual(status, "Yes")
 
-	def test_no_usd_rate_uses_taxable_amount_directly(self):
+	def test_no_payload_falls_back_to_net_amount(self):
 		doc = _make_doc()
 		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
 		tax_data = self._make_tax_data([(1, 100.0)])
-		status, reason = _compute_product_taxable(doc, tax_data, usd_rate=None)
+		status, reason = _compute_product_taxable(doc, tax_data)
 		self.assertEqual(status, "Yes")
 
-	def test_usd_rate_converts_taxable_amount_back_to_doc_currency(self):
-		"""taxable_amount comes back from TaxJar in USD; dividing by usd_rate
-		mirrors how taxjar_tax_collectable is converted back to doc currency."""
+	def test_a_foreign_currency_document_is_judged_in_the_currency_it_was_sent_in(self):
+		"""Both sides come from the same place: the payload was converted to
+		USD before it was sent, and taxable_amount comes back in USD.
+		net_amount is the only number here in document currency, and it is the
+		one that is not used.
+
+		A EUR line of 100 at a rate of 2 is sent as 200, and TaxJar taxes half
+		of it. Read against net_amount, 100 taxed of 100 reads as a fully
+		taxable line - the exchange rate cancelling out the exemption.
+		"""
+		doc = _make_doc(currency="EUR")
+		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
+		tax_data = self._make_tax_data([(1, 100.0)])
+		status, reason = _compute_product_taxable(doc, tax_data, self._sent([(1, 200.0, 1, 0)]))
+		self.assertEqual(status, "No")
+
+	# ── Lines a foreign Sales Taxes and Charges row was folded into ───────
+	#
+	# _apply_item_discounts() moves such a row onto the lines, so the line
+	# TaxJar answered about is worth something other than the item's own
+	# net_amount. Judged against net_amount, every one of these read wrong.
+
+	def test_a_line_carrying_a_distributed_discount_is_still_taxable(self):
+		"""A sale with a document-level "Loyalty Discount" row of -30. The
+		line is sent worth 70 and TaxJar taxes all 70. Against net_amount of
+		100 this used to read "0 of 1 items taxable"."""
 		doc = _make_doc()
 		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
-		tax_data = self._make_tax_data([(1, 200.0)])
-		status, reason = _compute_product_taxable(doc, tax_data, usd_rate=2.0)
+		tax_data = self._make_tax_data([(1, 70.0)])
+		status, reason = _compute_product_taxable(doc, tax_data, self._sent([(1, 100.0, 1, 30.0)]))
 		self.assertEqual(status, "Yes")
+		self.assertIn("1 of 1", reason)
+
+	def test_a_credit_note_line_taxed_in_full_is_taxable(self):
+		"""The $50 fee reversal case: the line is sent worth -250 and TaxJar
+		taxes all -250."""
+		doc = _make_doc()
+		doc.items = [_FakeItem(idx=1, qty=-2, rate=100.0, net_amount=-200.0)]
+		tax_data = self._make_tax_data([(1, -250.0)])
+		status, reason = _compute_product_taxable(doc, tax_data, self._sent([(1, 100.0, -2, 50.0)]))
+		self.assertEqual(status, "Yes")
+
+	def test_a_credit_note_line_taxed_not_at_all_is_not_taxable(self):
+		"""The answer the old comparison got backwards in both directions:
+		0 >= -200 is true, so an exempt refund line read as taxable."""
+		doc = _make_doc()
+		doc.items = [_FakeItem(idx=1, qty=-2, rate=100.0, net_amount=-200.0)]
+		tax_data = self._make_tax_data([(1, 0.0)])
+		status, reason = _compute_product_taxable(doc, tax_data, self._sent([(1, 100.0, -2, 0)]))
+		self.assertEqual(status, "No")
+
+	def test_a_credit_note_counts_its_taxable_lines_the_same_way(self):
+		doc = _make_doc()
+		doc.items = [
+			_FakeItem(idx=1, qty=-2, rate=100.0, net_amount=-200.0),
+			_FakeItem(idx=2, qty=-1, rate=50.0, net_amount=-50.0),
+		]
+		tax_data = self._make_tax_data([(1, -200.0), (2, 0.0)])
+		status, reason = _compute_product_taxable(
+			doc, tax_data, self._sent([(1, 100.0, -2, 0), (2, 50.0, -1, 0)])
+		)
+		self.assertEqual(status, "Partially")
+		self.assertIn("1 of 2", reason)
+
+	def test_a_synthetic_charge_line_is_not_counted_as_an_item(self):
+		"""_classify_foreign_tax_rows() sends a positive foreign row as its
+		own line, numbered from _SYNTHETIC_LINE_ID_OFFSET. It is not one of
+		the document's items and must not move the count."""
+		doc = _make_doc()
+		doc.items = [_FakeItem(idx=1, net_amount=100.0)]
+		tax_data = self._make_tax_data([(1, 100.0), (1002, 20.0)])
+		status, reason = _compute_product_taxable(
+			doc, tax_data, self._sent([(1, 100.0, 1, 0), (1002, 20.0, 1, 0)])
+		)
+		self.assertEqual(status, "Yes")
+		self.assertIn("1 of 1", reason)
 
 
 class TestCheckForNexusStatusFields(UnitTestCase):
