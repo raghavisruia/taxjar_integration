@@ -1139,36 +1139,48 @@ def _get_item_product_tax_category(item):
 def get_line_item_dict(item, docstatus):
 	product_tax_code = _get_item_product_tax_category(item)
 
-	# list_rate is the pre-discount unit price - the max of rate_with_margin,
-	# price_list_rate, and rate, so that whichever field actually reflects
-	# the highest price this line was offered at wins. max() rather than an
-	# "or" fallback chain matters for a line with rate typed directly above a
-	# stale/lower price_list_rate and no margin fields populated (e.g. a
-	# programmatically created document that bypassed ERPNext's client-side
-	# margin auto-set) - an "or" chain would pick the lower price_list_rate,
-	# clamp the resulting negative discount to 0, and silently under-report
-	# the amount actually charged.
-	# discount is sourced from net_amount, ERPNext's own final chargeable
-	# amount for the line - it already folds in both item-level discount and
-	# this line's proportional share of any document-level Additional
-	# Discount (except the Grand Total + cash/non-trade mode, where net_amount
-	# is deliberately left untouched and discount correctly computes to 0).
+	# unit_price is the price the line is billed at: item.rate, the number
+	# ERPNext builds its own amount and total from.
 	#
-	# Clamped to [0, list_amount] on a normal sale, but a credit note/return
-	# has qty < 0, which makes list_amount (and so the "natural" discount
+	# It used to be the highest of rate_with_margin, price_list_rate and rate,
+	# on the reading that TaxJar wants a pre-discount price with the discount
+	# named beside it. That reading reports a sale the invoice never made. A
+	# line with a Price List rate of 1000 and a rate typed down to 200 went out
+	# as a 1000 line with an 800 discount, and the document-level Additional
+	# Discount's own share was then added on top: a discount of 833.33 on a
+	# line the customer paid 200 for. The tax was right - TaxJar taxes
+	# unit_price x quantity minus discount, which still came to 166.67 - but
+	# every other figure on the line was wrong. One live invoice reported 2000
+	# of sales and 1000 of discounts where its own books say 1200 and 200.
+	# _extract_breakdown_data() already reads the line this way (item_amount is
+	# qty x rate), so the payload and the breakdown table on the same invoice
+	# disagreed about the same line.
+	#
+	# The one case the max() was there for goes with it. A rate typed above a
+	# stale, lower price_list_rate can no longer produce a negative discount to
+	# clamp away, because price_list_rate is not read at all.
+	#
+	# discount is sourced from net_amount, ERPNext's own final chargeable
+	# amount for the line. Against item.rate what is left in it is this line's
+	# share of the document-level Additional Discount, distributed by ERPNext
+	# itself (except the Grand Total + cash/non-trade mode, where net_amount is
+	# deliberately left untouched and discount correctly computes to 0).
+	#
+	# Clamped to [0, line_amount] on a normal sale, but a credit note/return
+	# has qty < 0, which makes line_amount (and so the "natural" discount
 	# range) negative too - unit_price stays positive and quantity carries
 	# the sign unmodified (see get_tax_data's amount formula below), so
-	# discount has to be allowed to go negative in step with list_amount for
+	# discount has to be allowed to go negative in step with line_amount for
 	# `unit_price * quantity - discount` to still reconstruct net_amount.
-	# min(max(discount, 0), list_amount) assumed list_amount >= 0 and
+	# min(max(discount, 0), line_amount) assumed line_amount >= 0 and
 	# silently clamped a real -$21.40 return-line discount to -$1000
 	# instead, which then failed the `discount > 0` check below and got
 	# dropped from the TaxJar payload entirely - the return was taxed on
 	# the full undiscounted amount instead of the discounted one.
-	list_rate = max(flt(item.get("rate_with_margin")), flt(item.get("price_list_rate")), flt(item.get("rate")))
-	list_amount = list_rate * flt(item.get("qty"))
-	discount = list_amount - flt(item.get("net_amount"))
-	discount = max(min(discount, max(0, list_amount)), min(0, list_amount))
+	unit_price = flt(item.get("rate"))
+	line_amount = unit_price * flt(item.get("qty"))
+	discount = line_amount - flt(item.get("net_amount"))
+	discount = max(min(discount, max(0, line_amount)), min(0, line_amount))
 
 	# product_identifier is the Item master's own name - item_code is what
 	# the row is fetched from and, by this app's autoname convention
@@ -1191,7 +1203,7 @@ def get_line_item_dict(item, docstatus):
 		product_tax_code=product_tax_code,
 		product_identifier=item_code,
 		description=full_description,
-		unit_price=list_rate,
+		unit_price=unit_price,
 	)
 
 	# Not `> 0` - a return's meaningful discount value is negative (it moves

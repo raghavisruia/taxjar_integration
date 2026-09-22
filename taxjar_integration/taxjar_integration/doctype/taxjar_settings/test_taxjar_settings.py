@@ -1732,13 +1732,20 @@ class TestGetLineItemDict(UnitTestCase):
 	# price_list_rate vs rate, so it survives Margin and picks up both
 	# item-level and document-level Additional Discount for free.
 
-	def test_item_level_discount_only(self):
+	def test_item_level_discount_lives_in_the_price_not_in_the_discount(self):
 		"""No document-level discount: net_amount is just this line's own
-		post-item-discount amount (rate * qty, no distribution applied)."""
+		post-item-discount amount (rate * qty, no distribution applied).
+
+		The line is billed at 800, so that is the unit price, and there is
+		nothing left over to call a discount. This test read unit_price 1000
+		with a discount of 200 until 2026-09-22: the same taxable 800, told as
+		a sale the invoice never made. See get_line_item_dict's own comment.
+		"""
 		item = self._make_item(qty=1, rate=800.0, price_list_rate=1000.0, net_amount=800.0)
 		result = self._call(item)
-		self.assertEqual(result["unit_price"], 1000.0)
-		self.assertEqual(result["discount"], 200.0)
+		self.assertEqual(result["unit_price"], 800.0)
+		self.assertNotIn("discount", result)
+		self.assertEqual(result["unit_price"] * result["quantity"], 800.0)
 
 	def test_document_level_discount_only_net_total_mode(self):
 		"""No item-level discount (price_list_rate == rate); net_amount is
@@ -1759,21 +1766,85 @@ class TestGetLineItemDict(UnitTestCase):
 		self.assertEqual(result["discount"], 30.0)
 
 	def test_item_and_document_level_discount_combined(self):
-		"""Live-verified against ACC-SINV-2026-00069 (design doc §3.2.1):
-		Margin pushes list_rate to rate_with_margin (price_list_rate alone
-		would understate it), an item-level discount and a distributed
-		Additional Discount are both already folded into net_amount."""
+		"""Live-verified against ACC-SINV-2026-00069 (design doc §3.2.1): a
+		Margin, an item-level discount and a distributed Additional Discount,
+		all three already folded into net_amount.
+
+		The same two rows, with the same net_amount. What each line is billed
+		at is its rate, and what is left in discount is its share of the
+		Additional Discount alone. The taxable amount is what it always was -
+		asserted below, because that is the number the tax is charged on and
+		the one this change must not move.
+		"""
 		shoes = self._make_item(qty=1, rate=1800.0, price_list_rate=1000.0,
 			rate_with_margin=2000.0, net_amount=1523.08)
 		result = self._call(shoes)
-		self.assertEqual(result["unit_price"], 2000.0)
-		self.assertAlmostEqual(result["discount"], 476.92)
+		self.assertEqual(result["unit_price"], 1800.0)
+		self.assertAlmostEqual(result["discount"], 276.92)
+		self.assertAlmostEqual(
+			result["unit_price"] * result["quantity"] - result["discount"], 1523.08
+		)
 
 		sandwich = self._make_item(qty=1, rate=150.0, price_list_rate=120.0,
 			rate_with_margin=200.0, net_amount=126.92)
 		result = self._call(sandwich)
+		self.assertEqual(result["unit_price"], 150.0)
+		self.assertAlmostEqual(result["discount"], 23.08)
+		self.assertAlmostEqual(
+			result["unit_price"] * result["quantity"] - result["discount"], 126.92
+		)
+
+	# ── A rate typed straight onto the row ───────────────────────────────
+
+	def test_a_rate_typed_below_the_price_list_is_not_a_discount(self):
+		"""Live-verified against ACC-SINV-2026-00027.
+
+		Price List 1000, rate typed down to 200, and a 200 Additional Discount
+		on the invoice of which this line carries 33.33. The line is billed at
+		200. It used to go out as a 1000 line with a discount of 833.33 - the
+		800 of price difference and the 33.33 share, consolidated into one
+		number that named neither.
+		"""
+		item = self._make_item(qty=1, rate=200.0, price_list_rate=1000.0, net_amount=166.67)
+		result = self._call(item)
 		self.assertEqual(result["unit_price"], 200.0)
-		self.assertAlmostEqual(result["discount"], 73.08)
+		self.assertAlmostEqual(result["discount"], 33.33)
+		self.assertAlmostEqual(
+			result["unit_price"] * result["quantity"] - result["discount"], 166.67
+		)
+
+	def test_the_payload_reports_the_invoices_own_gross_and_discount(self):
+		"""Both lines of ACC-SINV-2026-00027, as ERPNext holds them.
+
+		The invoice's books say 1200 of sales, 200 of discount and 1000
+		taxable. The payload used to say 2000 and 1000 for the first two, while
+		getting the third right - the tax was never wrong, every other figure
+		was.
+		"""
+		lines = [
+			self._make_item(qty=1, rate=1000.0, price_list_rate=1000.0,
+				rate_with_margin=1000.0, net_amount=833.33),
+			self._make_item(qty=1, rate=200.0, price_list_rate=1000.0,
+				rate_with_margin=1000.0, net_amount=166.67),
+		]
+		results = [self._call(line) for line in lines]
+
+		gross = sum(r["unit_price"] * r["quantity"] for r in results)
+		discount = sum(r.get("discount", 0) for r in results)
+
+		self.assertAlmostEqual(gross, 1200.0)          # doc.total
+		self.assertAlmostEqual(discount, 200.0)        # doc.discount_amount
+		self.assertAlmostEqual(gross - discount, 1000.0)  # doc.net_total
+
+	def test_a_rate_typed_above_a_stale_price_list_is_not_under_reported(self):
+		"""The one case the old max() over three fields existed for. Reading
+		price_list_rate alone would have made the discount negative, clamped it
+		to 0, and taxed 100 of a line billed at 200. Reading the rate cannot
+		reach that state at all."""
+		item = self._make_item(qty=1, rate=200.0, price_list_rate=100.0, net_amount=200.0)
+		result = self._call(item)
+		self.assertEqual(result["unit_price"], 200.0)
+		self.assertNotIn("discount", result)
 
 	def test_grand_total_cash_or_non_trade_discount_yields_zero_discount(self):
 		"""ERPNext leaves net_amount untouched for this one mode (the
