@@ -90,6 +90,18 @@ describe("the handler the form registers", () => {
 });
 
 describe("which companies are asked", () => {
+	// A dialog focuses its first input as it opens, and a focused Link control
+	// drops its list open with it - so the picker arrived under a list of every
+	// customer, covering its own title.
+	it("opens without a list over it", async () => {
+		answer_scope(frappe, US_FILE);
+		answer_invoice_reads();
+
+		await tick_is_return(open_credit_note(US_FILE));
+
+		expect(dialogs[0].options.no_focus).toBe(true);
+	});
+
 	it("asks a company that files its transactions", async () => {
 		answer_scope(frappe, US_FILE);
 		answer_invoice_reads();
@@ -346,41 +358,54 @@ describe("the customer with nothing to reverse", () => {
 	});
 });
 
-describe("what the draft loses", () => {
+describe("the requirements banner", () => {
 	beforeEach(() => {
 		answer_scope(frappe, US_FILE);
 		answer_invoice_reads();
 	});
 
-	// A new Sales Invoice starts with one blank row. Warning about losing that
-	// is a warning about nothing, and it would show on every credit note.
-	it("says nothing about a draft holding only a blank row", async () => {
-		await tick_is_return(open_credit_note(US_FILE, { items: [{ idx: 1 }] }));
+	// The reason the dialog opened, so it opens the dialog. The two fields
+	// under it are what the reader does about it.
+	it("leads the dialog", async () => {
+		await tick_is_return(open_credit_note(US_FILE));
 
-		expect(dialogs[0].fields_dict.taxjar_return_draft_warning).toBeUndefined();
-		expect(dialogs[0].options.primary_action_label).toBe("Continue");
-		expect(dialogs[0].options.secondary_action_label).toBe("Cancel");
+		expect(dialogs[0].options.fields[0].fieldname).toBe("taxjar_return_requirements");
 	});
 
-	it("warns when the draft holds rows the user filled in", async () => {
-		await tick_is_return(
-			open_credit_note(US_FILE, {
-				items: [{ item_code: "WIDGET-1" }, { item_code: "WIDGET-2" }, { idx: 3 }],
-			})
-		);
+	it("names TaxJar as what requires the reference", async () => {
+		await tick_is_return(open_credit_note(US_FILE));
 
-		expect(dialog_html(dialogs[0], "taxjar_return_draft_warning")).toContain(
-			"It holds 2 item row(s)."
-		);
+		const html = dialog_html(dialogs[0], "taxjar_return_requirements");
+		expect(html).toContain("TaxJar Requirements");
+		expect(html).toContain("Original sales invoice must be referenced for credit note.");
 	});
 
-	// The buttons say what they do, because what they do is not what Continue
-	// and Cancel usually do: one of them throws away work.
-	it("renames both buttons when there is work to lose", async () => {
+	// It states a rule, not a state of this document, so every credit note gets
+	// it - an empty draft and a filled one alike.
+	it("shows whatever the draft holds", async () => {
 		await tick_is_return(open_credit_note(US_FILE, { items: [{ item_code: "WIDGET-1" }] }));
 
-		expect(dialogs[0].options.primary_action_label).toBe("Discard and Continue");
-		expect(dialogs[0].options.secondary_action_label).toBe("Keep This Draft");
+		expect(dialogs[0].fields_dict.taxjar_return_requirements).toBeDefined();
+	});
+});
+
+describe("the two buttons", () => {
+	beforeEach(() => {
+		answer_scope(frappe, US_FILE);
+		answer_invoice_reads();
+	});
+
+	// The same pair whatever the draft holds. They used to rename themselves
+	// over a warning that is gone, and a renamed button with nothing above it
+	// to explain the rename reads as a different action.
+	it.each([
+		["an empty draft", []],
+		["a draft holding rows", [{ item_code: "WIDGET-1" }, { item_code: "WIDGET-2" }]],
+	])("read Continue and Cancel on %s", async (_case, items) => {
+		await tick_is_return(open_credit_note(US_FILE, { items }));
+
+		expect(dialogs[0].options.primary_action_label).toBe("Continue");
+		expect(dialogs[0].options.secondary_action_label).toBe("Cancel");
 	});
 });
 
@@ -535,6 +560,75 @@ describe("continuing", () => {
 
 		expect(frappe.model.open_mapped_doc).not.toHaveBeenCalled();
 		expect(frappe.show_alert).toHaveBeenCalled();
+	});
+});
+
+describe("an invoice TaxJar never received", () => {
+	beforeEach(() => {
+		answer_scope(frappe, US_FILE);
+	});
+
+	async function continue_on(status) {
+		answer_invoice_reads(1, { taxjar_sync_status: status });
+
+		const frm = open_credit_note(US_FILE);
+		await tick_is_return(frm);
+		dialogs[0].set_value("return_against", "ACC-SINV-2026-00318");
+		await dialogs[0].options.primary_action();
+
+		return frm;
+	}
+
+	// TaxJar files the refund against a transaction it already holds. Queued
+	// and Failed leave it with nothing to file against, and so does Excluded,
+	// which was a decision never to send the invoice at all.
+	it.each(["Queued", "Failed", "Excluded", ""])(
+		"refuses to continue on a %s invoice",
+		async (status) => {
+			await continue_on(status);
+
+			expect(frappe.model.open_mapped_doc).not.toHaveBeenCalled();
+		}
+	);
+
+	it("says why, with a heading of its own", async () => {
+		await continue_on("Failed");
+
+		expect(frappe.msgprint).toHaveBeenCalledTimes(1);
+		const [options] = frappe.msgprint.mock.calls[0];
+		expect(options.title).toBe("Original Invoice Not Synced");
+		expect(options.message).toBe(
+			"Original sales invoice isn't synced to TaxJar, so credit note can't be created against it."
+		);
+	});
+
+	// The picker stays open behind the message, so the reader picks another
+	// invoice rather than starting the credit note again.
+	it("leaves the picker open", async () => {
+		await continue_on("Failed");
+
+		expect(dialogs[0].hide).not.toHaveBeenCalled();
+	});
+
+	// Nothing has been decided, so the box that opened the dialog stays as it
+	// is. Unticking it here would close the one route back.
+	it("leaves Is Return ticked", async () => {
+		const frm = await continue_on("Failed");
+
+		expect(frm.doc.is_return).toBe(1);
+	});
+
+	// The preview's own read can still be in flight, and the background sync
+	// job can move a status while the dialog sits open, so the check is made
+	// against the server at the moment of the click.
+	it("reads the status again on the click", async () => {
+		await continue_on("Synced");
+
+		const reads = frappe.db.get_value.mock.calls.filter(
+			(call) => call[2] === "taxjar_sync_status"
+		);
+		expect(reads).toHaveLength(1);
+		expect(frappe.model.open_mapped_doc).toHaveBeenCalledTimes(1);
 	});
 });
 

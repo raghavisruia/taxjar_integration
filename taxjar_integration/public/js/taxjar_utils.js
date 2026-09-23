@@ -1056,16 +1056,9 @@ taxjar_integration.return_reference_customer = function (frm, d) {
 	return d ? d.get_value("customer") : "";
 };
 
-// Rows the user has filled in. A new Sales Invoice starts with one blank row,
-// and a warning about losing that is a warning about nothing.
-taxjar_integration.return_draft_row_count = function (frm) {
-	return (frm.doc.items || []).filter((row) => row.item_code || row.item_name).length;
-};
-
 taxjar_integration.show_return_reference_dialog = function (frm) {
 	taxjar_integration._inject_return_reference_styles();
 
-	const draft_rows = taxjar_integration.return_draft_row_count(frm);
 	const customer_on_form = Boolean(frm.doc.customer);
 	let chosen = false;
 
@@ -1074,31 +1067,18 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 	// running, which is before the constructor has returned anything to assign.
 	let d = null;
 
+	// First, because it is the reason the dialog opened at all. The two fields
+	// below are what the reader does about it.
 	const fields = [
 		{
 			fieldtype: "HTML",
-			fieldname: "taxjar_return_intro",
-			options: `<p class="text-muted">${__(
-				"TaxJar files a credit note against the invoice it reverses. Choose that invoice."
-			)}</p>`,
+			fieldname: "taxjar_return_requirements",
+			options: `<div class="taxjar-return-banner">
+				<div class="taxjar-return-banner-title">${__("TaxJar Requirements")}</div>
+				<div>${__("Original sales invoice must be referenced for credit note.")}</div>
+			</div>`,
 		},
 	];
-
-	// Only when there is something to lose. The mapper builds its own document,
-	// so whatever is on this form does not travel with the user.
-	if (draft_rows) {
-		fields.push({
-			fieldtype: "HTML",
-			fieldname: "taxjar_return_draft_warning",
-			options: `<div class="taxjar-return-warning">
-				<div class="taxjar-return-warning-title">${__("This draft closes without a save.")}</div>
-				<div>${__(
-					"It holds {0} item row(s). ERPNext builds the credit note from the invoice you choose, in a new form.",
-					[draft_rows]
-				)}</div>
-			</div>`,
-		});
-	}
 
 	// A label, not a link, where the form has already decided the customer:
 	// changing it here would pick an invoice for a customer the credit note is
@@ -1111,14 +1091,12 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 					label: __("Customer"),
 					default: taxjar_integration.customer_label(frm),
 					read_only: 1,
-					description: __("Taken from the form. It filters the list below."),
 			  }
 			: {
 					fieldtype: "Link",
 					fieldname: "customer",
 					label: __("Customer"),
 					options: "Customer",
-					description: __("The form names no customer yet. Choose one to shorten the list."),
 					onchange() {
 						if (!d) return;
 						// The invoice belonged to the previous customer, so it
@@ -1149,7 +1127,13 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 	d = new frappe.ui.Dialog({
 		title: __("Credit Note Against Invoice"),
 		fields,
-		primary_action_label: draft_rows ? __("Discard and Continue") : __("Continue"),
+		// A dialog focuses its first input as it opens (FieldGroup's
+		// focus_on_first_input), and a focused Link control drops its whole
+		// list open. The dialog then arrived with a list of every customer
+		// over it, hiding its own title. frappe's assign-to dialog turns the
+		// focus off the same way, for the same reason.
+		no_focus: true,
+		primary_action_label: __("Continue"),
 		primary_action() {
 			const invoice_name = d.get_value("return_against");
 			if (!invoice_name) {
@@ -1160,11 +1144,25 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 				return;
 			}
 
-			chosen = true;
-			d.hide();
-			taxjar_integration.open_return_credit_note(frm, invoice_name);
+			// Read live rather than off the preview above. The preview's own
+			// read can still be in flight when this is clicked, and its answer
+			// is a moment old either way - the sync runs in a background job,
+			// so a Queued invoice can become Synced while the dialog is open.
+			//
+			// Returning the promise lets the dialog disable its button while
+			// the read runs, the same way the address picker does.
+			return taxjar_integration.invoice_is_synced(invoice_name).then((synced) => {
+				if (!synced) {
+					taxjar_integration.show_invoice_not_synced_message();
+					return;
+				}
+
+				chosen = true;
+				d.hide();
+				return taxjar_integration.open_return_credit_note(frm, invoice_name);
+			});
 		},
-		secondary_action_label: draft_rows ? __("Keep This Draft") : __("Cancel"),
+		secondary_action_label: __("Cancel"),
 		secondary_action() {
 			d.hide();
 		},
@@ -1287,6 +1285,31 @@ taxjar_integration.render_return_invoice_preview = function (d) {
 		});
 };
 
+// Synced, and nothing else. TaxJar files the refund against a transaction it
+// already holds, so it has nothing to file against an invoice it never
+// received - Queued, Failed and Excluded all leave it with nothing.
+taxjar_integration.invoice_is_synced = function (invoice_name) {
+	return frappe.db
+		.get_value("Sales Invoice", invoice_name, "taxjar_sync_status")
+		.then((result) => {
+			const row = (result && result.message) || {};
+			return row.taxjar_sync_status === "Synced";
+		});
+};
+
+// The picker stays open behind this, so the reader picks another invoice
+// rather than starting the credit note again. Is Return stays ticked for the
+// same reason: nothing has been decided yet.
+taxjar_integration.show_invoice_not_synced_message = function () {
+	frappe.msgprint({
+		title: __("Original Invoice Not Synced"),
+		message: __(
+			"Original sales invoice isn't synced to TaxJar, so credit note can't be created against it."
+		),
+		indicator: "red",
+	});
+};
+
 // The box is what opened the dialog, so dismissing the dialog puts it back.
 // Leaving it ticked would leave a draft that validate_return_against refuses to
 // save, with no way to reach this dialog again.
@@ -1314,14 +1337,15 @@ taxjar_integration._inject_return_reference_styles = function () {
 	const style = document.createElement("style");
 	style.id = "taxjar-return-reference-styles";
 	style.textContent = `
-		.taxjar-return-warning {
+		/* What TaxJar requires, above the fields that satisfy it. */
+		.taxjar-return-banner {
 			background-color: var(--bg-yellow);
 			border-radius: var(--radius);
 			padding: 12px 14px;
 			margin-bottom: 10px;
 			font-size: var(--text-md);
 		}
-		.taxjar-return-warning-title {
+		.taxjar-return-banner-title {
 			font-weight: 600;
 			margin-bottom: 2px;
 		}
