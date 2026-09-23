@@ -375,6 +375,26 @@ TRANSACTION_EXCLUSION_REASONS = (
 	EXCLUSION_OUTSIDE_COVERAGE,
 )
 
+# What the region code reads when nobody knows it. TaxJar accepts any non-blank
+# state, verified against the live API: it stored "Singapore" as "SINGAPORE" and
+# took "XX" unchanged. It refuses only a blank one - "State can't be blank" - and
+# an export refused that way is filed nowhere. So an unknown region is written
+# down as unknown rather than left empty.
+UNKNOWN_REGION_CODE = "XX"
+
+# The destination fields TaxJar will not take a transaction without. Both were
+# confirmed against the live API: a blank state answers "State can't be blank"
+# and a blank postcode answers "Zipcode can't be blank". Street and city are
+# optional there - TaxJar accepted a transaction with neither.
+REQUIRED_DESTINATION_FIELDS = ("country", "state", "pincode")
+
+# What the Address itself will not save without. Not TaxJar's list and not ours:
+# these are mandatory on the standard doctype. The save-time dialog has to ask
+# for any of them that is blank as well, because it saves the Address - and a
+# dialog that collects only TaxJar's three fails on Continue with "Value missing
+# for Address: City/Town", which the reader cannot act on from there.
+ADDRESS_MANDATORY_FIELDS = ("address_line1", "city", "country")
+
 # What kind of sale this is, stored on the invoice as taxjar_transaction_nature.
 # An export is delivered outside the United States; everything else is domestic.
 # Words rather than a flag, so the Transaction Sync page and its spreadsheet
@@ -2524,6 +2544,84 @@ def check_nexus(shipping_address_name: str, company: str):
 
 
 @frappe.whitelist()
+def get_destination_address(address: str):
+	"""The ship-to address as the form should show it, and what it still needs.
+
+	TaxJar refuses a transaction with a blank state or a blank postcode, so an
+	invoice carrying either is filed nowhere - and nothing says so until the
+	submit has already happened. This is what the save-time dialog reads to ask
+	for them first.
+
+	``region_code`` is the ISO 3166-2 code the payload would carry today, and
+	``region_resolved`` says whether it was worked out or is the stand-in. The
+	dialog shows the stand-in rather than an empty box, because the reader can
+	accept it and move on - see UNKNOWN_REGION_CODE for why an unknown region
+	beats a blank one.
+	"""
+	if not isinstance(address, str) or not address.strip():
+		return {}
+
+	address = address.strip()
+	if not frappe.db.exists("Address", address):
+		return {}
+	frappe.has_permission("Address", "read", doc=address, throw=True)
+
+	row = frappe.db.get_value(
+		"Address", address,
+		["name", "address_title", "address_line1", "address_line2", "city",
+		 "state", "pincode", "country", "taxjar_state_code", "taxjar_region_code"],
+		as_dict=True,
+	) or {}
+
+	region_code = get_iso_3166_2_state_code(row)
+	row["region_code"] = region_code or UNKNOWN_REGION_CODE
+	# Whether a code exists at all. It decides whether the dialog opens, so a
+	# stand-in already accepted on this Address counts as resolved - the reader
+	# is asked once, not on every save.
+	row["region_resolved"] = bool(region_code)
+	# Whether that code is the stand-in. It decides what the dialog says, which
+	# is a different question: a stored "XX" was accepted, not worked out, and
+	# telling the reader it was worked out from the state is untrue.
+	row["region_placeholder"] = row["region_code"] == UNKNOWN_REGION_CODE
+
+	wanted = set(REQUIRED_DESTINATION_FIELDS) | set(ADDRESS_MANDATORY_FIELDS)
+	# Ordered, so the dialog highlights them top to bottom rather than at random.
+	order = ("address_line1", "city", "state", "pincode", "country")
+	row["missing"] = [f for f in order if f in wanted and not (row.get(f) or "").strip()]
+	return row
+
+
+@frappe.whitelist(methods=["POST"])
+def update_destination_address(address: str, values: str | dict | None = None):
+	"""Write back the fields the save-time dialog collected.
+
+	An allowlist, not whatever the caller sends. This is reached from a dialog
+	that exists to fill three boxes, and an Address carries fields that have
+	nothing to do with where a sale is delivered.
+	"""
+	if not isinstance(address, str) or not address.strip():
+		frappe.throw(
+			_("No address was given to update."),
+			title=_("No Address"),
+		)
+
+	address = address.strip()
+	frappe.has_permission("Address", "write", doc=address, throw=True)
+
+	if isinstance(values, str):
+		values = json.loads(values or "{}")
+	values = values or {}
+
+	doc = frappe.get_doc("Address", address)
+	for field in ("address_line1", "city", "state", "pincode", "country", "taxjar_region_code"):
+		if field in values:
+			doc.set(field, (values.get(field) or "").strip())
+
+	doc.save()
+	return {"name": doc.name}
+
+
+@frappe.whitelist()
 def check_export_destination(address: str, company: str | None = None):
 	"""Whether this address is an export, and whether this company files one.
 
@@ -2612,6 +2710,19 @@ def get_iso_3166_2_state_code(address):
 
 	state = address.get("state")
 	country_code = frappe.db.get_value("Country", address.get("country"), "code", cache=True)
+
+	# Outside the United States the stored code is taken as given, whatever it
+	# says. A United States sale is priced against a state TaxJar knows, so only
+	# the fifty codes above will do there. An export is not priced at all - the
+	# code is a label on a return - and the reader who typed it knows the region
+	# better than a name match does. UNKNOWN_REGION_CODE arrives this way too.
+	#
+	# Its own field, because taxjar_state_code is a Select of the fifty states
+	# and can hold nothing else.
+	region_code = (address.get("taxjar_region_code") or "").upper().strip()
+	if region_code and country_code and country_code.upper() != "US":
+		return region_code
+
 	if not state or not country_code:
 		return None
 

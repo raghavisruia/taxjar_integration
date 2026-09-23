@@ -781,7 +781,28 @@ def get_custom_fields():
 				description="2-letter US state code for TaxJar. Auto-populated when State is entered.",
 				depends_on='eval: doc.country === "United States"',
 				options=_US_STATE_CODE_OPTIONS,
-			)
+			),
+			dict(
+				# The same answer for everywhere else, and a separate field
+				# because the one above is a Select of the fifty states - it can
+				# hold nothing else, which is right for a domestic sale and
+				# leaves an export with nowhere to put its region.
+				#
+				# Data, not Select: ISO 3166-2 lists thousands of regions across
+				# 250 countries, and the code is usually worked out from the
+				# state name rather than picked. This is where the answer goes
+				# when it cannot be - see UNKNOWN_REGION_CODE.
+				fieldname="taxjar_region_code",
+				fieldtype="Data",
+				insert_after="taxjar_state_code",
+				label="Region Code (ISO 3166-2)",
+				description=(
+					"Region code sent to TaxJar for a sale delivered outside the "
+					"United States. Worked out from State where it can be."
+				),
+				depends_on='eval: doc.country && doc.country !== "United States"',
+				length=10,
+			),
 		],
 		"Sales Invoice": [
 			*[{**f, "allow_on_submit": 1} if f["fieldname"] in ("taxjar_breakdown_json", "taxjar_freight_taxable") else f

@@ -38,7 +38,11 @@ frappe.ui.form.on("Sales Invoice", {
 	validate(frm) {
 		return taxjar_integration
 			.confirm_foreign_tax_rows(frm)
-			.then(() => taxjar_integration.check_shipping_address(frm));
+			.then(() => taxjar_integration.check_shipping_address(frm))
+			// After the picker, not before it: this reads the fields of the
+			// address the document ends up with, and that one may have just
+			// been chosen.
+			.then(() => taxjar_integration.check_destination_address(frm));
 	},
 
 	// A filing company's credit note has to name the invoice it reverses, and

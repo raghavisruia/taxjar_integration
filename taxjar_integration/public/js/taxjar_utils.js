@@ -250,6 +250,11 @@ taxjar_integration.when_scoped = function (frm, predicate, fn) {
 // one Address.
 taxjar_integration._export_cache = {};
 
+// The same stand-in the server writes - see UNKNOWN_REGION_CODE in
+// taxjar_integration.py. Named here so the dialog's sentence and the stored
+// value cannot drift apart.
+taxjar_integration.UNKNOWN_REGION_CODE = "XX";
+
 taxjar_integration.export_destination = function (address, company) {
 	if (!address) return Promise.resolve(null);
 
@@ -542,6 +547,129 @@ taxjar_integration._prompt_for_shipping_address = function (frm, party_name) {
 			},
 		});
 	});
+};
+
+// TaxJar refuses a transaction with a blank state or a blank postcode. It
+// answers "State can't be blank" or "Zipcode can't be blank", the invoice is
+// filed nowhere, and nothing says so until after the submit. Both were
+// confirmed against the live API.
+//
+// So the gap is closed at save, while the reader is still on the document,
+// rather than reported afterwards from the Transaction Sync page.
+taxjar_integration.check_destination_address = function (frm) {
+	const address = frm.doc.shipping_address_name || frm.doc.customer_address;
+	if (!address) return;
+
+	// Only where TaxJar will read the answer. check_shipping_address gates on
+	// the same question, for the same reason.
+	return taxjar_integration.when_scoped(
+		frm,
+		(scope) => scope.uses_taxjar,
+		() => taxjar_integration._check_destination_address(frm, address)
+	);
+};
+
+taxjar_integration._check_destination_address = function (frm, address) {
+	return frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.get_destination_address", {
+			address,
+		})
+		.then((row) => {
+			if (!row || !row.name) return;
+
+			const missing = row.missing || [];
+			// An unresolved region is asked about once. The dialog writes the
+			// answer to the Address, so the next save reads it back and this
+			// stops firing - which is what makes a country with no matching
+			// region, like Singapore, saveable at all.
+			if (!missing.length && row.region_resolved) return;
+
+			frappe.validated = false;
+			taxjar_integration._show_destination_address_dialog(frm, row, missing);
+		});
+};
+
+taxjar_integration._show_destination_address_dialog = function (frm, row, missing) {
+	// Every one of the five carries the star, whether it is filled or not,
+	// because every one of them is genuinely required. Three are mandatory on
+	// the Address doctype and Continue saves the Address; the other two are
+	// what TaxJar refuses a transaction without. A star only on the empty ones
+	// would say the filled ones are optional, and clearing one would then be a
+	// save the dialog appeared to allow.
+	//
+	// ``missing`` still says which are empty right now. That drives the red
+	// outline and the focus - see _mark_missing_fields.
+	const d = new frappe.ui.Dialog({
+		title: __("Complete the Shipping Address"),
+		fields: [
+			{
+				fieldtype: "HTML",
+				fieldname: "why",
+				options: `<p class="text-muted">${__(
+					"TaxJar will not file this sale without a state and a postcode. Fill in what is missing, then continue."
+				)}</p>`,
+			},
+			{ fieldtype: "Data", fieldname: "address_line1", label: __("Address Line 1"), reqd: 1, default: row.address_line1 || "" },
+			{ fieldtype: "Data", fieldname: "city", label: __("City"), reqd: 1, default: row.city || "" },
+			{ fieldtype: "Column Break" },
+			{ fieldtype: "Data", fieldname: "state", label: __("State / Province"), reqd: 1, default: row.state || "" },
+			{ fieldtype: "Data", fieldname: "pincode", label: __("Postal Code"), reqd: 1, default: row.pincode || "" },
+			{ fieldtype: "Link", fieldname: "country", label: __("Country"), options: "Country", reqd: 1, default: row.country || "" },
+			{ fieldtype: "Section Break" },
+			{
+				fieldtype: "Data",
+				fieldname: "taxjar_region_code",
+				label: __("Region Code (ISO 3166-2)"),
+				default: row.region_code || "",
+				// Off the stand-in, not off region_resolved. A stored "XX"
+				// resolves - that is what stops the dialog reopening - but it
+				// was accepted rather than worked out, and saying otherwise
+				// tells the reader the state produced it.
+				description: row.region_placeholder
+					? __(
+							"We could not work this out from the state above, so it reads {0}. Change it if you know the code, or continue - TaxJar accepts it either way.",
+							[taxjar_integration.UNKNOWN_REGION_CODE]
+					  )
+					: __("Worked out from the state above."),
+			},
+		],
+		primary_action_label: __("Continue"),
+		primary_action(values) {
+			return frappe
+				.xcall(
+					"taxjar_integration.taxjar_integration.taxjar_integration.update_destination_address",
+					{ address: row.name, values: JSON.stringify(values) }
+				)
+				.then(() => {
+					d.hide();
+					// The picker dialog ends the same way: fix the thing that
+					// blocked the save, then make the save again.
+					frm.save();
+				});
+		},
+	});
+
+	d.show();
+	taxjar_integration._mark_missing_fields(d, missing, row);
+};
+
+// Red on the boxes that are empty, so the eye lands on them rather than reading
+// six filled fields to find the two that are not. frappe paints .has-error on a
+// mandatory field only once a save has been refused, which has not happened to
+// this dialog yet.
+taxjar_integration._mark_missing_fields = function (d, missing, row) {
+	const wanted = missing.slice();
+	if (row.region_placeholder) wanted.push("taxjar_region_code");
+
+	wanted.forEach((fieldname) => {
+		const field = d.fields_dict[fieldname];
+		if (!field || !field.$wrapper) return;
+		field.$wrapper.addClass("has-error");
+		field.$input && field.$input.one("input", () => field.$wrapper.removeClass("has-error"));
+	});
+
+	const first = d.fields_dict[wanted[0]];
+	first && first.$input && first.$input.focus();
 };
 
 // A foreign Sales Taxes and Charges row (a handling fee, a manual

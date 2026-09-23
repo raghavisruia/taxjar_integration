@@ -19048,6 +19048,224 @@ class TestTheExportSwitchReachesTheBrowser(TaxJarTestCase):
 			self.assertFalse(module.company_scope(US_OFF.name).files_exports)
 
 
+class TestTheDestinationAddressGuard(UnitTestCase):
+	"""TaxJar refuses a blank state and a blank postcode, so the save asks first.
+
+	Both refusals were seen against the live API: "State can't be blank" and
+	"Zipcode can't be blank". An invoice sent either way is filed nowhere, and
+	nothing says so until after the submit.
+	"""
+
+	def _js(self):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def test_the_required_fields_are_the_ones_taxjar_refuses_without(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		self.assertEqual(ti.REQUIRED_DESTINATION_FIELDS, ("country", "state", "pincode"))
+		# Street and city are not in there: TaxJar took a transaction with
+		# neither, which was checked rather than assumed.
+		self.assertNotIn("address_line1", ti.REQUIRED_DESTINATION_FIELDS)
+		self.assertNotIn("city", ti.REQUIRED_DESTINATION_FIELDS)
+
+	def _ask(self, row, region=None):
+		"""Ask the endpoint about one address row.
+
+		``region`` stands in for the region lookup. It reads the Country table
+		through the same frappe.db.get_value this has to fake, so leaving it
+		real hands a country code lookup the address row instead.
+		"""
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		with patch.object(ti.frappe.db, "exists", return_value=True), patch.object(
+			ti.frappe, "has_permission", return_value=True
+		), patch.object(ti.frappe.db, "get_value", return_value=frappe._dict(row)), patch.object(
+			ti, "get_iso_3166_2_state_code", return_value=region
+		):
+			return ti.get_destination_address("ADDR-1")
+
+	def test_an_address_reports_what_it_is_missing(self):
+		answer = self._ask({
+			"name": "ADDR-1", "address_line1": "1 Test Street", "city": "Surat",
+			"state": "", "pincode": "", "country": "India", "taxjar_region_code": "",
+		})
+		self.assertEqual(answer["missing"], ["state", "pincode"])
+
+	def test_it_also_asks_for_what_the_address_itself_will_not_save_without(self):
+		"""Continue saves the Address, and the standard doctype makes
+		address_line1, city and country mandatory. A dialog collecting only
+		TaxJar's three fails there with "Value missing for Address: City/Town",
+		which the reader cannot act on from a dialog that never asked."""
+		answer = self._ask({
+			"name": "ADDR-1", "address_line1": "", "city": "",
+			"state": "", "pincode": "", "country": "India", "taxjar_region_code": "",
+		})
+		self.assertEqual(
+			answer["missing"], ["address_line1", "city", "state", "pincode"]
+		)
+
+	def test_every_required_box_carries_the_mark(self):
+		"""All five, filled or not. Three are mandatory on the Address doctype
+		and Continue saves the Address; the other two are what TaxJar refuses a
+		transaction without. A star only on the empty ones would say the filled
+		ones are optional, and clearing one would then be a save the dialog
+		appeared to allow."""
+		js = self._js()
+		block = js.split("title: __(\"Complete the Shipping Address\")")[1].split("primary_action_label")[0]
+
+		for fieldname in ("address_line1", "city", "state", "pincode", "country"):
+			with self.subTest(fieldname=fieldname):
+				line = next(
+					l for l in block.splitlines() if f'fieldname: "{fieldname}"' in l
+				)
+				self.assertIn("reqd: 1", line)
+
+		# The region code is not one of them. It always carries a value, the
+		# stand-in included, so there is nothing for a star to ask for.
+		region = next(
+			l for l in block.splitlines() if 'fieldname: "taxjar_region_code"' in l
+		)
+		self.assertNotIn("reqd", region)
+
+	def test_the_empty_boxes_are_still_the_ones_reported(self):
+		"""The star says a box is required. ``missing`` says it is empty right
+		now, which is what the red outline and the focus follow."""
+		answer = self._ask({
+			"name": "ADDR-1", "address_line1": "1 Test Street", "city": "Surat",
+			"state": "Gujarat", "pincode": "395007", "country": "India",
+			"taxjar_region_code": "",
+		}, region="GJ")
+		self.assertEqual(answer["missing"], [])
+
+	def test_an_unresolved_region_reads_as_unknown_rather_than_blank(self):
+		"""TaxJar accepts any non-blank state - it stored "Singapore" as
+		"SINGAPORE" and took "XX" unchanged - and refuses only an empty one. So
+		the dialog offers the stand-in instead of an empty box."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		row = {
+			"name": "ADDR-SG", "address_line1": "1 Test Road", "city": "Singapore",
+			"state": "Singapore", "pincode": "118556", "country": "Singapore",
+			"taxjar_region_code": "",
+		}
+		answer = self._ask(row)
+
+		self.assertEqual(answer["region_code"], ti.UNKNOWN_REGION_CODE)
+		self.assertFalse(answer["region_resolved"])
+		# Nothing is missing - the three fields are filled. The dialog opens for
+		# the region alone.
+		self.assertEqual(answer["missing"], [])
+
+	def test_a_stored_code_is_taken_as_given_outside_the_united_states(self):
+		"""That is how the stand-in survives. The dialog writes it to the
+		Address, the next save reads it back, and the dialog stops asking - which
+		is what makes a country with no matching region saveable at all."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		with patch.object(ti.frappe.db, "get_value", return_value="SG"):
+			code = ti.get_iso_3166_2_state_code(
+				{"taxjar_region_code": "XX", "state": "Singapore", "country": "Singapore"}
+			)
+		self.assertEqual(code, "XX")
+
+	def test_a_united_states_address_still_needs_a_state_taxjar_knows(self):
+		"""A domestic sale is priced against the state, and nexus can match
+		nothing else, so only the fifty codes will do there."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		with patch.object(ti.frappe.db, "get_value", return_value="US"):
+			code = ti.get_iso_3166_2_state_code(
+				{"taxjar_region_code": "XX", "state": "Nowhere", "country": "United States"}
+			)
+		self.assertIsNone(code)
+
+	def test_the_write_back_takes_only_the_fields_the_dialog_collects(self):
+		"""An allowlist. The dialog exists to fill three boxes, and an Address
+		carries fields that have nothing to do with where a sale is delivered."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		source = inspect.getsource(ti.update_destination_address)
+		self.assertIn(
+			'for field in ("address_line1", "city", "state", "pincode", "country", "taxjar_region_code"):',
+			source,
+		)
+		self.assertIn('frappe.has_permission("Address", "write"', source)
+
+	def test_the_guard_runs_on_save_after_the_address_picker(self):
+		"""It reads the fields of the address the document ends up with, and
+		that one may have just been chosen by the picker."""
+		import os
+
+		for form in ("sales_invoice.js", "sales_order.js", "quotation.js"):
+			path = os.path.join(
+				os.path.dirname(__file__), "..", "..", "..", "public", "js", form
+			)
+			with open(os.path.normpath(path)) as f:
+				js = f.read()
+			with self.subTest(form=form):
+				picker = js.index("check_shipping_address(frm)")
+				guard = js.index("check_destination_address(frm)")
+				self.assertLess(picker, guard)
+
+	def test_the_dialog_blocks_the_save_and_makes_it_again(self):
+		js = self._js()
+		block = js.split("taxjar_integration._check_destination_address = function")[1]
+		self.assertIn("frappe.validated = false;", block)
+		# Same ending as the address picker: fix what blocked the save, then
+		# make the save again.
+		self.assertIn("frm.save();", js.split("primary_action_label: __(\"Continue\")")[1])
+
+	def test_the_dialog_marks_the_empty_boxes(self):
+		"""frappe paints .has-error on a mandatory field only once a save has
+		been refused, which has not happened to this dialog yet."""
+		js = self._js()
+		block = js.split("taxjar_integration._mark_missing_fields = function")[1]
+		self.assertIn('$wrapper.addClass("has-error")', block)
+		self.assertIn("focus()", block)
+
+	def test_a_stored_stand_in_is_not_called_worked_out(self):
+		"""Two different questions. A stored "XX" resolves, which is what stops
+		the dialog reopening on every save - but it was accepted rather than
+		worked out, and the sentence under the box has to say so."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		answer = self._ask({
+			"name": "ADDR-SG", "address_line1": "1 Test Road", "city": "Singapore",
+			"state": "Singapore", "pincode": "118556", "country": "Singapore",
+			"taxjar_region_code": ti.UNKNOWN_REGION_CODE,
+		}, region=ti.UNKNOWN_REGION_CODE)
+
+		self.assertTrue(answer["region_resolved"])
+		self.assertTrue(answer["region_placeholder"])
+
+		answer = self._ask({
+			"name": "ADDR-IN", "address_line1": "1 Test Road", "city": "Surat",
+			"state": "Gujarat", "pincode": "395007", "country": "India",
+			"taxjar_region_code": "",
+		}, region="GJ")
+		self.assertFalse(answer["region_placeholder"])
+
+	def test_the_dialog_reads_the_sentence_off_the_stand_in(self):
+		js = self._js()
+		block = js.split('label: __("Region Code (ISO 3166-2)")')[1].split("},")[0]
+		self.assertIn("row.region_placeholder", block)
+		self.assertNotIn("row.region_resolved", block)
+
+	def test_the_stand_in_is_named_once_on_each_side(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		self.assertIn(
+			f'taxjar_integration.UNKNOWN_REGION_CODE = "{ti.UNKNOWN_REGION_CODE}";', self._js()
+		)
+
+
 class TestTheNatureColumn(UnitTestCase):
 	"""Export or Domestic, on every row of the Transaction Sync page.
 
