@@ -284,11 +284,11 @@ describe("the sidebar pill on a draft", () => {
 		expect(sidebar_section().text()).toContain("Excluded");
 	});
 
-	it("reads the address of a submitted document too", async () => {
-		// It used to skip the lookup here, because the status was already
-		// recorded. The status no longer says everything: a filed export reads
-		// "Synced" exactly like a domestic sale, and only the country tells the
-		// detail line which of the two this is.
+	it("does not read the address of a submitted document", async () => {
+		// A submitted document has its status recorded, and its detail line
+		// says the same thing for an export as for a domestic sale - so the
+		// lookup would buy nothing and cost a round trip on every submitted
+		// invoice anyone opens.
 		answer_xcall(frappe, {
 			[SCOPE_METHOD]: US_FILE,
 			[EXPORT_METHOD]: { country: "India", files_exports: true },
@@ -304,8 +304,10 @@ describe("the sidebar pill on a draft", () => {
 		await flush();
 
 		const calls = frappe.xcall.mock.calls.filter(([method]) => method === EXPORT_METHOD);
-		expect(calls).toHaveLength(1);
+		expect(calls).toHaveLength(0);
+		// One sync message, whatever the destination was.
 		expect(sidebar_section().text()).toContain("Synced");
+		expect(sidebar_section().text()).not.toContain("Export transaction synced");
 	});
 
 	it("says a filed export will sync, rather than that it is excluded", async () => {

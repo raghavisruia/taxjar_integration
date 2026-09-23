@@ -1974,14 +1974,18 @@ taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
 		// Every state but one is read off the document itself. An export is the
 		// exception: the destination country decides it, the document carries a
 		// destination from its first draft, and the answer is one column of one
-		// Address rather than anything the sync path writes.
+		// Address rather than anything the sync path writes. So a draft asks,
+		// and the pill is told.
 		//
-		// A submitted document asks as well. It used to skip the lookup, on the
-		// grounds that its status was already recorded - but the status alone no
-		// longer says everything the pill says. A filed export reads "Synced"
-		// like any other sale, and only the country makes its detail line name
-		// it as an export.
-		//
+		// Nothing else asks. A submitted document has its status recorded, and
+		// its detail line says the same thing for an export as for a domestic
+		// sale - so the lookup would buy nothing and cost a round trip on every
+		// submitted invoice anyone opens.
+		if (frm.doc.docstatus !== 0) {
+			taxjar_integration._render_taxjar_sync_status_pill(frm);
+			return;
+		}
+
 		// Ship-to decides the destination. The billing address stands in for a
 		// sale with no separate shipping address, the same way it does for nexus.
 		const address = frm.doc.shipping_address_name || frm.doc.customer_address;
@@ -2091,10 +2095,10 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 	// what turns those two into the cancel-flow wording below.
 	const cancelled = frm.doc.docstatus === 2;
 	const status = frm.doc.taxjar_sync_status || "Excluded";
-	const is_export = Boolean(export_to);
-	// An export this company does not file. The country alone no longer decides
+	// An export this company does not file. The country alone does not decide
 	// it: the same sale is filed for one company and kept out for the next.
-	const export_excluded = is_export && !export_to.files_exports;
+	// Only a draft is given one - see render_sync_status_sidebar_pill.
+	const export_excluded = Boolean(export_to) && !export_to.files_exports;
 	let label, color, info_text;
 
 	if (frm.doc.docstatus === 0 && export_excluded) {
@@ -2125,7 +2129,7 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 		// on_cancel delete path (see _set_sync_status), so both read the same
 		// way: when TaxJar last heard about this document.
 		info_text = frm.doc.taxjar_last_synced
-			? taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced, is_export)
+			? taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced)
 			: __("Synced with TaxJar");
 	} else if (status === "Failed") {
 		label = cancelled ? __("Failed to Cancel") : __("Failed");
@@ -2197,18 +2201,8 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 // a site whose System Settings timezone runs ahead of the browser's own
 // produces for a sync that has only just happened, so fall back to the
 // absolute user-tz time rather than to a bare "Synced".
-taxjar_integration._synced_ago_text = function (timestamp, is_export) {
+taxjar_integration._synced_ago_text = function (timestamp) {
 	const ago = frappe.datetime.prettyDate(timestamp);
-
-	// An export that reached TaxJar says so. The status beside it reads "Synced"
-	// exactly like a domestic sale, and this line is the only place the document
-	// names which of the two it is.
-	if (is_export) {
-		return ago
-			? __("Export transaction synced {0}", [ago])
-			: __("Export transaction synced on {0}", [frappe.datetime.str_to_user(timestamp)]);
-	}
-
 	return ago ? __("Synced {0}", [ago]) : __("Synced on {0}", [frappe.datetime.str_to_user(timestamp)]);
 };
 

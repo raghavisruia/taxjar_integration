@@ -12776,19 +12776,20 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		keeps out is called Excluded before submit; one it files will really
 		sync, so the draft is told to submit."""
 		fn = self._render_fn()
-		self.assertIn("const export_excluded = is_export && !export_to.files_exports;", fn)
+		self.assertIn(
+			"const export_excluded = Boolean(export_to) && !export_to.files_exports;", fn
+		)
 
-	def test_every_document_pays_for_the_export_lookup(self):
-		"""A submitted document used to skip the address read, because its status
-		was already recorded. The status no longer says everything the pill says:
-		a filed export reads "Synced" like a domestic sale, and only the country
-		makes its detail line name it as an export.
+	def test_only_a_draft_pays_for_the_export_lookup(self):
+		"""A submitted document has its status recorded, and its detail line says
+		the same thing for an export as for a domestic sale - so the lookup buys
+		nothing there and would cost a round trip on every submitted invoice
+		anyone opens.
 
-		The whole answer is handed over, not a boolean - the pill needs the
-		country to know this is an export and files_exports to know what the
-		submit will do about it."""
+		A draft gets the whole answer, not a boolean: it needs files_exports to
+		know what the submit will do about it."""
 		dispatcher = self._dispatcher_fn()
-		self.assertNotIn("if (frm.doc.docstatus !== 0) {", dispatcher)
+		self.assertIn("if (frm.doc.docstatus !== 0) {", dispatcher)
 		self.assertIn(
 			"const address = frm.doc.shipping_address_name || frm.doc.customer_address;",
 			dispatcher,
@@ -12833,7 +12834,7 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		fn = self._render_fn()
 		synced_branch = fn.split('status === "Synced"')[1].split('} else if (status === "Failed")')[0]
 		self.assertIn(
-			"taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced, is_export)", synced_branch
+			"taxjar_integration._synced_ago_text(frm.doc.taxjar_last_synced)", synced_branch
 		)
 		self.assertIn("taxjar_last_synced", synced_branch)
 		self.assertNotIn("Last synced:", synced_branch)
@@ -12845,17 +12846,14 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		a sync that has only just happened. Falling through to str_to_user
 		keeps that case saying something rather than a bare "Synced"."""
 		js = self._read_js("taxjar_utils.js")
-		fn = js.split("taxjar_integration._synced_ago_text = function (timestamp, is_export) {")[1].split("\n};")[0]
+		fn = js.split("taxjar_integration._synced_ago_text = function (timestamp) {")[1].split("\n};")[0]
 		self.assertIn("frappe.datetime.prettyDate(timestamp)", fn)
 		self.assertIn('__("Synced {0}", [ago])', fn)
 		self.assertIn("frappe.datetime.str_to_user(timestamp)", fn)
 
-		# An export that reached TaxJar says so. The status beside it reads
-		# "Synced" exactly like a domestic sale, and this line is the only place
-		# the document names which of the two it is. Both halves of the fallback
-		# get the wording, not just the pretty one.
-		self.assertIn('__("Export transaction synced {0}", [ago])', fn)
-		self.assertIn('__("Export transaction synced on {0}"', fn)
+		# One sync message, whatever the destination was. An export that reached
+		# TaxJar reads exactly like a domestic sale that did.
+		self.assertNotIn("Export transaction synced", fn)
 
 	def test_cancelled_hover_also_says_when_it_synced(self):
 		"""Cancelled is the same "Synced" status value written by the
