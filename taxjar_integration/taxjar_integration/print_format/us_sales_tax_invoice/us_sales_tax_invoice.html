@@ -10,6 +10,18 @@
 	{% include "taxjar_integration/taxjar_integration/print_format/us_sales_tax_invoice/us_sales_tax_invoice.css" %}
 </style>
 
+{#
+	address_display/shipping_address/company_address_display are Text
+	Editor fields built by erpnext's own address template - a blank field
+	(city, state, whatever) still gets its own line there, so the field
+	shows an empty line instead of just skipping it. This drops any line
+	that is blank after trimming, joining what is left back with <br>.
+#}
+{% macro clean_address(html) %}
+	{%- set lines = (html or "").split("<br>") | map("trim") | select | list -%}
+	{{- lines | join("<br>") -}}
+{% endmacro %}
+
 {% set company_config = get_company_config(doc.company) %}
 {% set shipping_head = company_config.shipping_account_head if company_config else None %}
 {% set tax_head = company_config.tax_account_head if company_config else None %}
@@ -68,7 +80,7 @@
 				<td style="width: 55%">
 					<div class="title">{{ _("Ship From") }}</div>
 					<div class="info-text text-bold">{{ doc.company }}</div>
-					{% if doc.company_address_display %}<div class="info-text">{{ doc.company_address_display }}</div>{% endif %}
+					{% if doc.company_address_display %}<div class="info-text">{{ clean_address(doc.company_address_display) }}</div>{% endif %}
 				</td>
 				<td style="width: 45%">
 					<table style="width: 100%">
@@ -105,12 +117,12 @@
 				<td style="width: 55%">
 					<div class="title mt-15">{{ _("Bill To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
-					{% if doc.address_display %}<div class="info-text">{{ doc.address_display }}</div>{% endif %}
+					{% if doc.address_display %}<div class="info-text">{{ clean_address(doc.address_display) }}</div>{% endif %}
 				</td>
 				<td style="width: 45%">
 					<div class="title mt-15">{{ _("Ship To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
-					<div class="info-text">{{ doc.shipping_address or doc.address_display or "" }}</div>
+					<div class="info-text">{{ clean_address(doc.shipping_address or doc.address_display or "") }}</div>
 				</td>
 			</tr>
 		</table>
@@ -239,7 +251,20 @@
 
 				{% if has_tax_data %}
 				{% set state_label = doc.taxjar_ship_to or _("destination") %}
-				{% if not doc.taxjar_has_nexus %}
+				{#
+					Same ship-to-else-bill-to fallback _destination_address()
+					uses in taxjar_integration.py, so this checks the same
+					address the tax engine itself would have. TaxJar only
+					covers the United States - a destination outside it is
+					not "nexus not configured", it is a country the product
+					never had US sales tax exposure to begin with.
+				#}
+				{% set destination_address_name = doc.shipping_address_name or doc.customer_address %}
+				{% set destination_country = frappe.db.get_value("Address", destination_address_name, "country") if destination_address_name else None %}
+				{% set is_export = destination_country and destination_country != "United States" %}
+				{% if not doc.taxjar_has_nexus and is_export %}
+					{% set tj_source_line = _("Sales tax not applicable for exports") %}
+				{% elif not doc.taxjar_has_nexus %}
 					{% set tj_source_line = _("Nexus not configured for {0}").format(state_label) %}
 				{% elif doc.taxjar_tax_source == "origin" %}
 					{% set tj_source_line = _("Origin-based tax for {0}").format(state_label) %}
@@ -248,8 +273,17 @@
 				{% else %}
 					{% set tj_source_line = _("Nexus present in {0}").format(state_label) %}
 				{% endif %}
-				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if show_breakdown_table else '' }}">
-					<div class="taxjar-status-line">{{ tj_source_line }}</div>
+				{#
+					A short line on its own reads as an off-centre scrap when
+					left-aligned in a box this wide - centred instead, up to
+					the point it would wrap. Once it wraps, or once there is
+					an exemption line below it, left-aligned is what actually
+					lines up cleanly, so this only centres a single short
+					line, never a long or multi-line one.
+				#}
+				{% set is_short_line = (tj_source_line | length <= 45) and not is_exempt %}
+				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if show_breakdown_table else '' }} {{ 'taxjar-status-panel-compact' if is_short_line else '' }}">
+					<div class="taxjar-status-line {{ 'text-center' if is_short_line else '' }}">{{ tj_source_line }}</div>
 					{% if is_exempt %}
 					{% set customer_exemption_type = frappe.db.get_value("Customer", doc.customer, "taxjar_exemption_type") %}
 					<div>
@@ -336,23 +370,22 @@
 				</tr>
 				{% endif %}
 			</table>
-		</div>
 
-		{% if doc.in_words %}
-		{#
-			clear: both puts this box's top edge right at the bottom of the
-			taller floated column above it - a box's own margin-top has no
-			effect there ("clearance" absorbs it, a standard CSS quirk), so
-			the gap above the divider line is padding-top on the outer box,
-			and the line itself is a separate inner div's border-top.
-		#}
-		<div class="taxjar-in-words-box" style="clear: both;">
-			<div class="taxjar-in-words-divider">
-				<div class="taxjar-in-words-label">{{ _("In Words") }}</div>
-				<div class="in-words">{{ doc.in_words }}</div>
+			{#
+				Inside .taxjar-totals-column, not a full-width block below
+				both columns - it belongs to the totals/Grand Total half,
+				not the Tax Analysis half beside it, so it takes only that
+				column's width and sits directly under Grand Total.
+			#}
+			{% if doc.in_words %}
+			<div class="taxjar-in-words-box">
+				<div class="taxjar-in-words-divider">
+					<div class="taxjar-in-words-label">{{ _("In Words") }}</div>
+					<div class="in-words">{{ doc.in_words }}</div>
+				</div>
 			</div>
+			{% endif %}
 		</div>
-		{% endif %}
 
 		{% if doc.terms %}
 		<div class="info-card">

@@ -7,6 +7,22 @@
 	tag, breakdown section) is new, styled to match.
 */
 
+/*
+	Page margin for the PDF button, at the top level (not nested in any
+	selector or media query) - a hand-built ("classic") print format like
+	this one only gets a page margin on the Chrome/CDP PDF path from a
+	top-level .print-format rule; the Print Format record's own margin_top
+	field is never read for this kind of format, so it silently produced
+	margin-top: 0 in the PDF despite that field saying 15mm. This value
+	matches the record's own margin fields so both stay in agreement.
+*/
+.print-format {
+	margin-top: 15mm;
+	margin-bottom: 15mm;
+	margin-left: 15mm;
+	margin-right: 15mm;
+}
+
 .invoice-page {
 	font-family: Inter, sans-serif;
 	color: #171717;
@@ -14,6 +30,18 @@
 
 .print-format-body {
 	padding: 30px 12px 12px 12px !important;
+}
+
+/*
+	Clearfix: without it, .print-format-body's own height ignores its two
+	floated columns whenever there is no Terms and Conditions text - the one
+	remaining thing below them that happens to clear - and collapses around
+	them, so the footer/next page would sit on top of the totals column.
+*/
+.print-format-body::after {
+	content: "";
+	display: table;
+	clear: both;
 }
 
 .letter-head {
@@ -63,7 +91,14 @@
 }
 
 .taxjar-doc-title {
-	margin-top: 12px;
+	/*
+		0, not a positive value - most of the gap under the letterhead is
+		the letterhead's OWN layout (its invoice-title/invoice-number cell
+		has a fixed height:90px, taller than its actual text), which this
+		format does not own or style. Adding our own margin on top of that
+		only made the gap worse.
+	*/
+	margin-top: 0;
 }
 
 .taxjar-doc-title h2 {
@@ -180,7 +215,15 @@
 }
 
 .info-card {
-	margin-top: 40px;
+	/*
+		clear: both, now that In Words moved inside .taxjar-totals-column -
+		this is the first thing below both floated columns, so it needs the
+		clearing itself. padding-top, not margin-top - a margin-top has no
+		visible effect on a box that clears floats (the "clearance" quirk
+		documented elsewhere in this file).
+	*/
+	clear: both;
+	padding-top: 40px;
 	color: #7c7c7c;
 }
 
@@ -229,6 +272,12 @@
 	padding: 6px 16px 12px 16px;
 	margin-top: 12px;
 	font-size: 12px;
+}
+
+/* A single short line, nothing below it - equal padding top/bottom so it sits centred in the box, not closer to the bottom. */
+.taxjar-status-panel-compact {
+	padding-top: 12px;
+	padding-bottom: 12px;
 }
 
 /* Joined onto the table above it - no gap, no rounding of its own (the card wrapper handles that), just a thin divider where the table ends. */
