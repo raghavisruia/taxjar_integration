@@ -1758,8 +1758,8 @@ class TaxJarSetup {
 		// value of 0 selects its pill rather than falling back to the label.
 		const exports = new frappe.ui.TabButtons({
 			options: [
-				{ label: __("Domestic only"), value: 0 },
 				{ label: __("Domestic + Export"), value: 1 },
+				{ label: __("Domestic only"), value: 0 },
 			],
 			value: c.include_exports ? 1 : 0,
 			size: "md",
@@ -2163,8 +2163,8 @@ class TaxJarSetup {
 				<div class="ts-acc-detail">${__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head || "—")}</div>
 				<div class="ts-acc-detail">${__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
 				<div class="ts-flags">
-					${this._feature_chip(__("Sales tax"), __("Sales tax off"), c.calculate)}
-					${this._feature_chip(__("Transaction sync"), __("Transaction sync off"), c.file)}
+					${this._feature_chip(__("Sales Tax"), __("Sales Tax off"), c.calculate)}
+					${this._feature_chip(__("Transaction Sync"), __("Transaction Sync off"), c.file)}
 				</div>
 			</div>
 		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;

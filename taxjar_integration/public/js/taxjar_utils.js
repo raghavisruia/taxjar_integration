@@ -134,6 +134,26 @@ taxjar_integration.us_state_code_options = function () {
 	);
 };
 
+// A US state code from whatever the reader typed into the State box: the code
+// itself, or the state's full name. Null where the text names neither.
+//
+// The map it reads is US_STATE_NAMES above, the one map every state picker in
+// this app reads, so the Address form and the transaction's own Create Address
+// dialog resolve a name the same way.
+const TAXJAR_US_STATE_CODE_BY_NAME = Object.fromEntries(
+	Object.entries(taxjar_integration.US_STATE_NAMES).map(([code, name]) => [
+		name.toUpperCase(),
+		code,
+	])
+);
+
+taxjar_integration.us_state_code_from_name = function (state) {
+	if (!state) return null;
+	const upper = String(state).toUpperCase().trim();
+	if (taxjar_integration.US_STATE_NAMES[upper]) return upper;
+	return TAXJAR_US_STATE_CODE_BY_NAME[upper] || null;
+};
+
 // ── Region hover card ──
 // The card behind a region count, on the Customer Configuration page and on the
 // guided setup's Nexus card. A count says how many, not which; this card names
@@ -223,8 +243,17 @@ taxjar_integration.scope = function (company) {
 // guided setup page - call this when they write, so the next form load asks
 // again instead of painting an answer from before the change. Without it the
 // sidebar reported the old configuration until a hard refresh.
+//
+// The export memo goes with it. check_export_destination answers two questions
+// in one call, and the second one - files_exports - is read off the same company
+// configuration this clears (see the server method). So the two memos hold parts
+// of one answer and have to be forgotten together: clearing only the first left
+// a draft's pill saying "Submit to Sync" for an export the company had just
+// stopped filing, until a hard refresh. One function, because a caller that has
+// to remember two cannot be relied on to.
 taxjar_integration.clear_scope_cache = function () {
 	taxjar_integration._scope_cache = {};
+	taxjar_integration._export_cache = {};
 };
 
 // Sugar for the common shape: run `fn` only when the company is in TaxJar's
@@ -236,6 +265,24 @@ taxjar_integration.when_scoped = function (frm, predicate, fn) {
 		if (predicate && !predicate(scope)) return;
 		return fn(scope);
 	});
+};
+
+// erpnext writes a party's defaults in one go: customer_address,
+// shipping_address_name and a dozen other fields, one after another, with
+// frm.updating_party_details set for the whole run (party.js).
+//
+// The fields land one at a time, so anything that reads the destination between
+// two of them reads a half-written document - a billing address in one country
+// beside a ship-to field that is not set yet. That is how a yellow "no tax on
+// an export" strip appeared for a moment on picking a customer, and went again
+// as soon as the ship-to field landed.
+//
+// erpnext's own address helpers refuse to run on this same flag, and party.js
+// clears it and calls frm.refresh() once the write is done - which runs every
+// gated entry point again, on the settled document. So nothing is skipped, only
+// deferred to the one moment the document is whole.
+taxjar_integration.party_details_are_updating = function (frm) {
+	return !!(frm && frm.updating_party_details);
 };
 
 // ── Export destinations ──
@@ -541,7 +588,9 @@ taxjar_integration._prompt_for_shipping_address = function (frm, party_name) {
 			primary_action: {
 				label: __("Add New Address"),
 				action() {
-					taxjar_integration._open_new_address(frm);
+					// The save this message blocked is made again once the
+					// address is on the document.
+					taxjar_integration._open_new_address(frm, { save_after: true });
 					frappe.msg_dialog.hide();
 				},
 			},
@@ -589,7 +638,157 @@ taxjar_integration._check_destination_address = function (frm, address) {
 		});
 };
 
+// The sentence under the Region Code box, and nothing where there is nothing
+// to say: a code the state produced needs no sentence to explain it.
+//
+// Off the stand-in, not off region_resolved. A stored "XX" resolves - that is
+// what stops the dialog reopening - but it was accepted rather than worked out,
+// and the box has to say which of the two it holds.
+taxjar_integration._region_code_hint = function (is_placeholder) {
+	return is_placeholder ? __("Cannot find region code, using fallback code.") : "";
+};
+
+// The country decides which code box the reader is filling, so a change to the
+// state or to the country settles both: the state code for a United States
+// sale, the region code for every other one.
+taxjar_integration._refresh_dialog_codes = function (d) {
+	if (!d) return;
+
+	if (d.get_value("country") === "United States") {
+		return taxjar_integration._fill_dialog_state_code(d);
+	}
+
+	// A state code left behind by an earlier country names a state this sale is
+	// not delivered to, and the box that holds it is hidden now.
+	if (d.fields_dict["taxjar_state_code"] && d.get_value("taxjar_state_code")) {
+		d.set_value("taxjar_state_code", "");
+	}
+
+	return taxjar_integration._refresh_dialog_region(d);
+};
+
+// The state code, from whatever the reader typed into the State box. The two
+// boxes hold one answer in two forms - "Arizona" and "AZ" - and the Address
+// form fills each from the other in exactly this way.
+//
+// Only on a change, so the write below cannot answer itself: setting the code
+// fills the State box, which asks for the code again.
+taxjar_integration._fill_dialog_state_code = function (d) {
+	if (!d.fields_dict["taxjar_state_code"]) return;
+
+	const code = taxjar_integration.us_state_code_from_name(d.get_value("state"));
+	if (code && code !== d.get_value("taxjar_state_code")) {
+		return d.set_value("taxjar_state_code", code);
+	}
+};
+
+// The other direction: the reader picks a code, and the State box takes the
+// name it stands for. The same guard, for the same reason.
+taxjar_integration._fill_dialog_state_from_code = function (d) {
+	const code = d.get_value("taxjar_state_code");
+	if (!code) return;
+
+	const name = taxjar_integration.US_STATE_NAMES[code];
+	if (name && name !== d.get_value("state")) {
+		return d.set_value("state", name);
+	}
+};
+
+// The region code, worked out again from the two boxes it comes from. A dialog
+// that opened because no region could be worked out answers itself as the
+// reader fills in the state, rather than sending the stand-in for a state that
+// now names a region TaxJar can file.
+taxjar_integration._refresh_dialog_region = function (d) {
+	if (!d) return;
+	const field = d.fields_dict["taxjar_region_code"];
+	if (!field) return;
+
+	// The United States answer is taxjar_state_code on the Address, and the box
+	// is hidden here.
+	if (d.get_value("country") === "United States") return;
+
+	// Only what this dialog wrote is replaced. A code the reader typed is their
+	// answer, and an edit to the state does not make it ours to overwrite. The
+	// stand-in is ours: the dialog put it there, and a real region beats it.
+	const current = (d.get_value("taxjar_region_code") || "").trim();
+	if (current !== (d.__taxjar_region_code || "")) return;
+
+	const apply = (code) => {
+		const is_placeholder = code === taxjar_integration.UNKNOWN_REGION_CODE;
+
+		d.__taxjar_region_code = code;
+		d.set_value("taxjar_region_code", code);
+		d.set_df_property(
+			"taxjar_region_code",
+			"description",
+			taxjar_integration._region_code_hint(is_placeholder)
+		);
+		// The red outline asks for an answer. This is one, so it goes -
+		// _mark_missing_fields clears it on a keystroke for the same reason,
+		// and the stand-in is not an answer.
+		if (!is_placeholder && field.$wrapper) field.$wrapper.removeClass("has-error");
+	};
+
+	// Nothing to work out without a region name. The stand-in is what the
+	// server would answer, so the trip is skipped rather than made.
+	if (!(d.get_value("state") || "").trim()) {
+		return apply(taxjar_integration.UNKNOWN_REGION_CODE);
+	}
+
+	return frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.resolve_region_code", {
+			country: d.get_value("country"),
+			state: d.get_value("state"),
+		})
+		.then((answer) =>
+			apply((answer && answer.region_code) || taxjar_integration.UNKNOWN_REGION_CODE)
+		);
+};
+
+// The fields of an address dialog: one banner, then each group of boxes in a
+// section of its own.
+//
+// No Column Break. A Column Break draws a fixed grid, and a box the country
+// hides leaves its cell empty - the boxes after it stay where they are, so a
+// hole opens where the hidden box was. Every box in a group goes into one
+// column instead, and _inject_destination_address_styles lays that column out
+// as a two-column grid. A grid packs only the boxes that are shown, so the next
+// box moves up into the space a hidden one leaves.
+//
+// A group is a run of boxes that belongs together. The last group starts a new
+// row whatever the group above it ended on, which is how the two
+// preferred-address checkboxes stay side by side under the address itself.
+//
+// Two dialogs build their boxes this way: the one that completes an address the
+// document already names, and the one that creates the customer's first.
+taxjar_integration._address_dialog_fields = function (banner, groups) {
+	const fields = [
+		{
+			fieldtype: "HTML",
+			fieldname: "why",
+			options: taxjar_integration.requirements_banner(banner),
+		},
+	];
+
+	groups.forEach((boxes) => {
+		if (!boxes.length) return;
+		// hide_border keeps the groups apart without drawing a line between
+		// them.
+		fields.push({
+			fieldtype: "Section Break",
+			hide_border: 1,
+			css_class: TAXJAR_ADDRESS_GRID_CLASS,
+		});
+		fields.push(...boxes);
+	});
+
+	return fields;
+};
+
 taxjar_integration._show_destination_address_dialog = function (frm, row, missing) {
+	taxjar_integration._inject_requirements_banner_styles();
+	taxjar_integration._inject_destination_address_styles();
+
 	// Every one of the five carries the star, whether it is filled or not,
 	// because every one of them is genuinely required. Three are mandatory on
 	// the Address doctype and Continue saves the Address; the other two are
@@ -599,40 +798,49 @@ taxjar_integration._show_destination_address_dialog = function (frm, row, missin
 	//
 	// ``missing`` still says which are empty right now. That drives the red
 	// outline and the focus - see _mark_missing_fields.
-	const d = new frappe.ui.Dialog({
+	// Declared ahead of the boxes, because two of them hand it to the region
+	// recompute. A `const` on the line where the dialog is built is not readable
+	// from anything that runs before that line.
+	let d;
+
+	const boxes = [
+		{ fieldtype: "Data", fieldname: "address_line1", label: __("Address Line 1"), reqd: 1, default: row.address_line1 || "" },
+		// An empty second line is one more box to read past in a dialog that
+		// asks for what is missing. It is shown only where the Address already
+		// carries one, so the reader can correct it.
+		...(row.address_line2
+			? [{ fieldtype: "Data", fieldname: "address_line2", label: __("Address Line 2"), default: row.address_line2 }]
+			: []),
+		{ fieldtype: "Data", fieldname: "city", label: __("City"), reqd: 1, default: row.city || "" },
+		{ fieldtype: "Data", fieldname: "state", label: __("State / Province"), reqd: 1, default: row.state || "",
+			onchange: () => taxjar_integration._refresh_dialog_region(d) },
+		{ fieldtype: "Data", fieldname: "pincode", label: __("Postal Code"), reqd: 1, default: row.pincode || "" },
+		// Not starred. It always carries a value, the stand-in included, so
+		// there is nothing for a star to ask for - but the reader can still
+		// correct it here.
+		{
+			fieldtype: "Data",
+			fieldname: "taxjar_region_code",
+			label: __("Region Code (ISO 3166-2)"),
+			default: row.region_code || "",
+			// A United States sale is filed under taxjar_state_code on the
+			// Address, which this dialog does not collect. Asking for a region
+			// code there offers a box nothing reads.
+			depends_on: 'eval:doc.country !== "United States"',
+			description: taxjar_integration._region_code_hint(row.region_placeholder),
+		},
+		{ fieldtype: "Link", fieldname: "country", label: __("Country"), options: "Country", reqd: 1, default: row.country || "",
+			onchange: () => taxjar_integration._refresh_dialog_region(d) },
+	];
+
+	const fields = taxjar_integration._address_dialog_fields(
+		__("Please fill the missing address details."),
+		[boxes]
+	);
+
+	d = new frappe.ui.Dialog({
 		title: __("Complete the Shipping Address"),
-		fields: [
-			{
-				fieldtype: "HTML",
-				fieldname: "why",
-				options: `<p class="text-muted">${__(
-					"TaxJar will not file this sale without a state and a postcode. Fill in what is missing, then continue."
-				)}</p>`,
-			},
-			{ fieldtype: "Data", fieldname: "address_line1", label: __("Address Line 1"), reqd: 1, default: row.address_line1 || "" },
-			{ fieldtype: "Data", fieldname: "city", label: __("City"), reqd: 1, default: row.city || "" },
-			{ fieldtype: "Column Break" },
-			{ fieldtype: "Data", fieldname: "state", label: __("State / Province"), reqd: 1, default: row.state || "" },
-			{ fieldtype: "Data", fieldname: "pincode", label: __("Postal Code"), reqd: 1, default: row.pincode || "" },
-			{ fieldtype: "Link", fieldname: "country", label: __("Country"), options: "Country", reqd: 1, default: row.country || "" },
-			{ fieldtype: "Section Break" },
-			{
-				fieldtype: "Data",
-				fieldname: "taxjar_region_code",
-				label: __("Region Code (ISO 3166-2)"),
-				default: row.region_code || "",
-				// Off the stand-in, not off region_resolved. A stored "XX"
-				// resolves - that is what stops the dialog reopening - but it
-				// was accepted rather than worked out, and saying otherwise
-				// tells the reader the state produced it.
-				description: row.region_placeholder
-					? __(
-							"We could not work this out from the state above, so it reads {0}. Change it if you know the code, or continue - TaxJar accepts it either way.",
-							[taxjar_integration.UNKNOWN_REGION_CODE]
-					  )
-					: __("Worked out from the state above."),
-			},
-		],
+		fields,
 		primary_action_label: __("Continue"),
 		primary_action(values) {
 			return frappe
@@ -649,8 +857,69 @@ taxjar_integration._show_destination_address_dialog = function (frm, row, missin
 		},
 	});
 
+	// What this dialog put in the region box. _refresh_dialog_region replaces
+	// its own answer and leaves the reader's alone, and this is the first one.
+	d.__taxjar_region_code = row.region_code || "";
+
+	d.$wrapper.addClass(TAXJAR_ADDRESS_DIALOG_CLASS);
 	d.show();
 	taxjar_integration._mark_missing_fields(d, missing, row);
+};
+
+const TAXJAR_ADDRESS_DIALOG_CLASS = "taxjar-address-dialog";
+const TAXJAR_ADDRESS_GRID_CLASS = "taxjar-address-grid";
+
+// The two-column layout of an address dialog, drawn as a CSS grid rather than
+// with Column Breaks - see _address_dialog_fields for why.
+//
+// A section break also carries its own spacing: --padding-sm above and below
+// the section, and a 1rem top margin on a section body that starts the section
+// (form.scss). Between the banner and the boxes that reads as a gap about twice
+// the standard one, so it is zeroed here and each control's own bottom margin
+// spaces the rows, the way it does for two boxes in one column.
+taxjar_integration._inject_destination_address_styles = function () {
+	if (document.getElementById("taxjar-address-dialog-styles")) return;
+	const style = document.createElement("style");
+	style.id = "taxjar-address-dialog-styles";
+	style.textContent = `
+		/* frappe gives the column the full width, and the boxes inside it are
+		   laid out two to a row here. A box the country hides is display:none,
+		   so it takes no cell and the next box moves up into its place. */
+		.${TAXJAR_ADDRESS_GRID_CLASS} .form-column > form {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			/* Two col-sm-6 columns carry 15px of padding each, so 30px is the
+			   gap the reader sees between two boxes on a standard form. */
+			column-gap: 30px;
+			/* A box with a sentence under it is taller than the box beside it.
+			   Top alignment keeps the pair on one line rather than centring the
+			   shorter one against the taller. */
+			align-items: start;
+		}
+		.${TAXJAR_ADDRESS_DIALOG_CLASS} .form-section {
+			padding-top: 0;
+			padding-bottom: 0;
+		}
+		.${TAXJAR_ADDRESS_DIALOG_CLASS} .form-section > .section-body {
+			margin-top: 0;
+			padding-top: 0;
+		}
+		/* frappe gives the last box in a column 0.5rem where every box above it
+		   gets 1rem. The last box of a group is not the last box of the dialog,
+		   so it keeps the standard gap. */
+		.${TAXJAR_ADDRESS_DIALOG_CLASS} .form-section .frappe-control:last-child {
+			margin-bottom: 1rem;
+		}
+		.${TAXJAR_ADDRESS_DIALOG_CLASS} .form-section:last-child .frappe-control:last-child {
+			margin-bottom: 0.5rem;
+		}
+		/* The banner sits in a section of its own, so that same 1rem is the gap
+		   below it. Its own margin would add to it. */
+		.${TAXJAR_ADDRESS_DIALOG_CLASS} .taxjar-requirements-banner {
+			margin-bottom: 0;
+		}
+	`;
+	document.head.appendChild(style);
 };
 
 // Red on the boxes that are empty, so the eye lands on them rather than reading
@@ -916,7 +1185,9 @@ taxjar_integration.show_address_picker_dialog = function (frm, addresses) {
 		secondary_action_label: __("Add New Address"),
 		secondary_action() {
 			d.hide();
-			taxjar_integration._open_new_address(frm);
+			// Same ending as Use Selected above: the new address goes on the
+			// document, and the save the picker blocked is made again.
+			taxjar_integration._open_new_address(frm, { save_after: true });
 		},
 	});
 
@@ -1057,6 +1328,7 @@ taxjar_integration.return_reference_customer = function (frm, d) {
 };
 
 taxjar_integration.show_return_reference_dialog = function (frm) {
+	taxjar_integration._inject_requirements_banner_styles();
 	taxjar_integration._inject_return_reference_styles();
 
 	const customer_on_form = Boolean(frm.doc.customer);
@@ -1073,10 +1345,9 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 		{
 			fieldtype: "HTML",
 			fieldname: "taxjar_return_requirements",
-			options: `<div class="taxjar-return-banner">
-				<div class="taxjar-return-banner-title">${__("TaxJar Requirements")}</div>
-				<div>${__("Original sales invoice must be referenced for credit note.")}</div>
-			</div>`,
+			options: taxjar_integration.requirements_banner(
+				__("Original sales invoice must be referenced for credit note.")
+			),
 		},
 	];
 
@@ -1266,10 +1537,10 @@ taxjar_integration.render_return_invoice_preview = function (d) {
 				frappe.utils.escape_html(value === undefined || value === null ? "" : value);
 
 			const rows = [
-				[__("Posting date"), text(frappe.datetime.str_to_user(row.posting_date))],
-				[__("Grand total"), text(format_currency(row.grand_total, row.currency))],
-				[__("Sales tax"), text(format_currency(row.total_taxes_and_charges, row.currency))],
-				[__("TaxJar Status"), taxjar_integration.sync_status_badge_html(row.taxjar_sync_status)],
+				[__("Posting Date"), text(frappe.datetime.str_to_user(row.posting_date))],
+				[__("Grand Total"), text(format_currency(row.grand_total, row.currency))],
+				[__("Sales Tax"), text(format_currency(row.total_taxes_and_charges, row.currency))],
+				[__("Sync Status"), taxjar_integration.sync_status_badge_html(row.taxjar_sync_status)],
 			];
 
 			$wrapper.html(`<div class="taxjar-return-preview">
@@ -1329,26 +1600,45 @@ taxjar_integration.open_return_credit_note = function (frm, invoice_name) {
 	);
 };
 
-// Injected on first use, the same way the address picker's styles are: two
-// blocks that exist only inside this dialog do not earn a place in the bundle
-// every desk page loads.
-taxjar_integration._inject_return_reference_styles = function () {
-	if (document.getElementById("taxjar-return-reference-styles")) return;
+// Two dialogs open because TaxJar wants something the document does not carry
+// yet. Both say so the same way, in the same yellow block, so the reader learns
+// the shape once.
+taxjar_integration.requirements_banner = function (message) {
+	return `<div class="taxjar-requirements-banner">
+		<div class="taxjar-requirements-banner-title">${__("TaxJar Requirements")}</div>
+		<div>${message}</div>
+	</div>`;
+};
+
+taxjar_integration._inject_requirements_banner_styles = function () {
+	if (document.getElementById("taxjar-requirements-banner-styles")) return;
 	const style = document.createElement("style");
-	style.id = "taxjar-return-reference-styles";
+	style.id = "taxjar-requirements-banner-styles";
 	style.textContent = `
 		/* What TaxJar requires, above the fields that satisfy it. */
-		.taxjar-return-banner {
+		.taxjar-requirements-banner {
 			background-color: var(--bg-yellow);
 			border-radius: var(--radius);
 			padding: 12px 14px;
 			margin-bottom: 10px;
 			font-size: var(--text-md);
 		}
-		.taxjar-return-banner-title {
+		.taxjar-requirements-banner-title {
 			font-weight: 600;
 			margin-bottom: 2px;
 		}
+	`;
+	document.head.appendChild(style);
+};
+
+// Injected on first use, the same way the address picker's styles are: a block
+// that exists only inside this dialog does not earn a place in the bundle every
+// desk page loads.
+taxjar_integration._inject_return_reference_styles = function () {
+	if (document.getElementById("taxjar-return-reference-styles")) return;
+	const style = document.createElement("style");
+	style.id = "taxjar-return-reference-styles";
+	style.textContent = `
 		/* The card the rest of this app already draws (.taxjar-exemption-card in
 		   the bundle's scss): the page's own card fill, one hairline, and the
 		   8px corner --radius carries. --subtle-fg was the same grey the gray
@@ -1400,6 +1690,9 @@ taxjar_integration._set_tax_message = function (frm, text, color) {
 };
 
 taxjar_integration.show_no_address_tax_message = function (frm) {
+	// Not on a half-written document - see party_details_are_updating.
+	if (taxjar_integration.party_details_are_updating(frm)) return;
+
 	// Nothing here is true of a document TaxJar will not price: no address is
 	// missing "hence taxes are not calculated", and no destination lacks nexus.
 	return taxjar_integration.when_scoped(
@@ -1556,13 +1849,186 @@ taxjar_integration._check_nexus_for_selected_address = function (frm) {
 		});
 };
 
-taxjar_integration._open_new_address = function (frm) {
-	let party_name = frm.doc.party_name || frm.doc.customer;
-	frappe.new_doc("Address", {
-		address_title: party_name,
-		address_type: "Shipping",
-		links: [{ link_doctype: "Customer", link_name: party_name }],
+// The customer has no address, and the reader has to make one.
+//
+// This used to open the Address form, which is a page away from the
+// transaction: the reader left the document, saved an address, came back, and
+// linked it by hand - three steps to answer a strip that asked for one.
+//
+// A dialog on the document instead. It asks for what a sale is priced on: the
+// three fields the Address doctype makes mandatory, the two more TaxJar refuses
+// a transaction without, and the two flags that decide which address later
+// transactions pick up on their own. The new address lands on the document
+// itself, so the reader never leaves it.
+//
+// ``options.save_after`` re-makes a save this blocked. Two of the three callers
+// are save-time prompts, and the picker beside them ends the same way.
+taxjar_integration._open_new_address = function (frm, options) {
+	const save_after = !!(options && options.save_after);
+	const customer = frm.doc.party_name || frm.doc.customer;
+	if (!customer) return;
+
+	taxjar_integration._inject_requirements_banner_styles();
+	taxjar_integration._inject_destination_address_styles();
+
+	// Declared ahead of the boxes, because two of them hand it to the region
+	// recompute. A `const` on the line where the dialog is built is not
+	// readable from anything that runs before that line.
+	let d;
+
+	// Seven boxes carry the star, and a United States address carries an
+	// eighth. Five are what the Address itself will not save without - the
+	// title it is named after, the type, the street, the city and the country.
+	// Two more are the state and the postcode, which TaxJar refuses a
+	// transaction without: left blank here, _show_destination_address_dialog
+	// asks for them again at the next save. The eighth is the state code, which
+	// is what a United States sale is actually filed under.
+	const boxes = [
+		{
+			fieldtype: "Data",
+			fieldname: "address_title",
+			label: __("Address Title"),
+			reqd: 1,
+			default: customer,
+		},
+		// Billing and Shipping, and no more. The Address doctype offers twelve
+		// types, but a sales transaction reads these two, and the pair below
+		// says which one later transactions pick up. A reader who wants one of
+		// the other ten has the Address form.
+		{
+			fieldtype: "Select",
+			fieldname: "address_type",
+			label: __("Address Type"),
+			reqd: 1,
+			options: ["Billing", "Shipping"].join("\n"),
+			default: "Shipping",
+		},
+		{ fieldtype: "Data", fieldname: "address_line1", label: __("Address Line 1"), reqd: 1 },
+		{ fieldtype: "Data", fieldname: "address_line2", label: __("Address Line 2") },
+		{ fieldtype: "Data", fieldname: "city", label: __("City"), reqd: 1 },
+		{ fieldtype: "Data", fieldname: "state", label: __("State / Province"), reqd: 1,
+			onchange: () => taxjar_integration._refresh_dialog_codes(d) },
+		// One of the next two holds the region this sale is filed under, and
+		// the country says which. A United States sale is filed under the state
+		// code, and everywhere else under the ISO 3166-2 region code, so each
+		// box shows only where it is read - the same pair, under the same rule,
+		// as the Address form itself. Exactly one of them is on the screen at a
+		// time, and the boxes below it move up to meet it.
+		{
+			fieldtype: "Select",
+			fieldname: "taxjar_state_code",
+			label: __("State Code (US)"),
+			options: taxjar_integration.us_state_code_options(),
+			depends_on: 'eval:doc.country === "United States"',
+			mandatory_depends_on: 'eval:doc.country === "United States"',
+			onchange: () => taxjar_integration._fill_dialog_state_from_code(d),
+		},
+		// Not starred, and worked out rather than typed - the same box
+		// _show_destination_address_dialog offers, filled by the same helper as
+		// the state and the country change.
+		{
+			fieldtype: "Data",
+			fieldname: "taxjar_region_code",
+			label: __("Region Code (ISO 3166-2)"),
+			depends_on: 'eval:doc.country && doc.country !== "United States"',
+		},
+		{ fieldtype: "Data", fieldname: "pincode", label: __("Postal Code"), reqd: 1 },
+		// The United States, because this app prices a United States sale -
+		// every company it serves is registered there. A reader delivering
+		// somewhere else changes one box; a reader delivering at home changes
+		// none.
+		{ fieldtype: "Link", fieldname: "country", label: __("Country"), options: "Country", reqd: 1,
+			default: "United States",
+			onchange: () => taxjar_integration._refresh_dialog_codes(d) },
+	];
+
+	// The two flags the Address form carries and its quick entry leaves out.
+	// They decide which address a later transaction picks up on its own, and
+	// the only other place to say so is the page this dialog exists to avoid.
+	//
+	// Their own group, so they sit side by side under the address whatever the
+	// row above them ended on.
+	//
+	// Both start clear. This dialog is also reached from the picker, where the
+	// customer already has addresses, and a ticked box there would demote one
+	// of them without the reader deciding - the picker's own "use this for
+	// future transactions" box starts clear for the same reason.
+	const flags = [
+		{
+			fieldtype: "Check",
+			fieldname: "is_primary_address",
+			label: __("Preferred Billing Address"),
+		},
+		{
+			fieldtype: "Check",
+			fieldname: "is_shipping_address",
+			label: __("Preferred Shipping Address"),
+		},
+	];
+
+	d = new frappe.ui.Dialog({
+		title: __("Create Address"),
+		fields: taxjar_integration._address_dialog_fields(
+			__("Please fill the address details as required for sales tax computation."),
+			[boxes, flags]
+		),
+		primary_action_label: __("Create"),
+		primary_action(values) {
+			return frappe
+				.xcall(
+					"taxjar_integration.taxjar_integration.taxjar_integration.create_customer_address",
+					{ customer, values: JSON.stringify(values) }
+				)
+				.then((answer) => {
+					const address_name = answer && answer.name;
+					if (!address_name) return;
+
+					d.hide();
+					return taxjar_integration._use_new_address(frm, address_name, save_after);
+				});
+		},
 	});
+
+	d.$wrapper.addClass(TAXJAR_ADDRESS_DIALOG_CLASS);
+	d.show();
+
+	// The country again, as a write this time. frappe judges every depends_on
+	// while it builds the dialog, which is before a default reaches the box it
+	// depends on - so the two code boxes above are judged against an empty
+	// country and both start hidden. A write settles them, because set_value
+	// judges them again once the value is in.
+	d.set_value("country", "United States");
+};
+
+// The address the reader just built is the one this sale is delivered to, so
+// the ship-to field takes it.
+//
+// The bill-to field takes it only while it is empty. A document that already
+// names a billing address reached this dialog for a delivery address, and
+// overwriting the billing address would answer a question nobody asked.
+//
+// One write at a time. Both fields run their own handlers - the exemption, the
+// nexus strip and the sync pill all re-read the destination - and the ship-to
+// write goes last so the last handler to run reads the field TaxJar prices on.
+taxjar_integration._use_new_address = function (frm, address_name, save_after) {
+	let chain = Promise.resolve();
+
+	if (!frm.doc.customer_address) {
+		chain = chain.then(() => frm.set_value("customer_address", address_name));
+	}
+
+	return chain
+		.then(() => frm.set_value("shipping_address_name", address_name))
+		.then(() => {
+			frappe.show_alert(
+				{ message: __("Address {0} created", [address_name]), indicator: "green" },
+				5
+			);
+
+			// The picker ends the same way: fix what blocked the save, then
+			// make the save again.
+			if (save_after) frm.save();
+		});
 };
 
 // ── TaxJar Tab: Status Cards & Addresses ──
@@ -1576,6 +2042,11 @@ taxjar_integration._open_new_address = function (frm) {
 // Destination follows the same ship-to-then-bill-to fallback the server uses,
 // so this re-runs whenever either address changes.
 taxjar_integration.apply_region_exemption = function (frm) {
+	// Not on a half-written document - see party_details_are_updating. This one
+	// writes to the document as well as reading it, so running it mid-write
+	// would put a set_value of its own between erpnext's.
+	if (taxjar_integration.party_details_are_updating(frm)) return;
+
 	// Locking a transaction's exemption fields is a statement that TaxJar has
 	// decided the matter. For a company it does not serve it has decided nothing,
 	// and the fields should stay the user's own.
@@ -2089,6 +2560,10 @@ taxjar_integration._mount_sidebar_section = function ($section) {
 };
 
 taxjar_integration.render_sync_status_sidebar_pill = function (frm) {
+	// Not on a half-written document - see party_details_are_updating. The pill
+	// reads the destination too, so it would flicker with the strip.
+	if (taxjar_integration.party_details_are_updating(frm)) return;
+
 	// Still cleared up front, so a doc that renders nothing at all (no sync
 	// field, no company, or TaxJar disabled for it) leaves no stale row behind.
 	$(document).find(".form-sidebar .taxjar-sync-sidebar-pill-section").remove();
@@ -2234,11 +2709,62 @@ taxjar_integration.exclusion_reason_text = function (reason, is_current) {
 		// Present tense, and it names the setting rather than the country: an
 		// export is kept out by a choice someone made and can unmake, not by
 		// where the sale went. See Include Export Transactions on TaxJar
-		// Company Config.
-		return __("As per your setting export transactions aren't synced to TaxJar");
+		// Company Config. The link that unmakes it is exclusion_reason_action,
+		// kept out of the sentence for the reason given there.
+		return __("Export transactions sync is disabled.");
 	}
 
 	return "";
+};
+
+// The link a reason leaves the reader wanting. Held apart from the sentence
+// because both screens that show the sentence render it as text on purpose -
+// taxjar_sync_error is whatever TaxJar's API said, and must not be able to put
+// markup on a form - so the link is built as an element instead.
+//
+// Only a reason someone can act on gets one. "Removed from TaxJar" is a record
+// of what happened and has nothing to open.
+taxjar_integration.exclusion_reason_action = function (reason) {
+	if (reason === "Export Transaction") {
+		// Features is the step that owns Include Export Transactions, the same
+		// card the other remedial links open.
+		return { label: __("Configure"), href: TAXJAR_SETUP_FEATURES_URL };
+	}
+
+	return null;
+};
+
+// The body of a hover card or a popover: the sentence, then the link that acts
+// on it. An element, and the sentence goes in through .text(), so no part of it
+// is ever read as markup.
+//
+// Underlined, and with an arrow after the words. The link follows a sentence of
+// the same size, weight and color, and a card of this size carries nothing else
+// for the eye to tell it apart from - so the underline says it can be pressed
+// and the arrow says where pressing it goes.
+//
+// The rule runs under the word and stops there. An arrow is a shape, and a line
+// under it reads as part of the shape rather than as the same line the word
+// carries - so the word owns the underline and the anchor draws none of its
+// own. nowrap keeps the two on one line. The style is inline because the two
+// screens that show this body keep their own stylesheets, and the link would
+// otherwise be written twice.
+taxjar_integration.sync_info_body = function (text, action) {
+	const $body = $("<div>").text(text);
+	if (action) {
+		$body.append(
+			" ",
+			$("<a>")
+				.attr("href", action.href)
+				.css({ color: "inherit", "text-decoration": "none", "white-space": "nowrap" })
+				.append(
+					$("<span>").text(action.label).css("text-decoration", "underline"),
+					" \u2192"
+				)
+		);
+	}
+
+	return $body;
 };
 
 taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
@@ -2252,6 +2778,9 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 	// Only a draft is given one - see render_sync_status_sidebar_pill.
 	const export_excluded = Boolean(export_to) && !export_to.files_exports;
 	let label, color, info_text;
+	// Only an exclusion reason carries an action. Every other detail below is a
+	// report on what happened, not a setting the reader can go and change.
+	let info_action = null;
 
 	if (frm.doc.docstatus === 0 && export_excluded) {
 		// A draft is told what to do rather than given a status, because nothing
@@ -2263,6 +2792,7 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 		label = __("Excluded");
 		color = taxjar_integration.SYNC_STATUS_COLORS.Excluded;
 		info_text = taxjar_integration.exclusion_reason_text("Export Transaction");
+		info_action = taxjar_integration.exclusion_reason_action("Export Transaction");
 	} else if (frm.doc.docstatus === 0) {
 		label = __("Submit to Sync");
 		color = "amber";
@@ -2298,6 +2828,7 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 		label = __(status);
 		color = taxjar_integration.SYNC_STATUS_COLORS[status];
 		info_text = taxjar_integration.exclusion_reason_text(frm.doc.taxjar_exclusion_reason);
+		info_action = taxjar_integration.exclusion_reason_action(frm.doc.taxjar_exclusion_reason);
 	}
 
 	const $badge = frappe.ui.badge({ label, theme: color });
@@ -2333,12 +2864,16 @@ taxjar_integration._render_taxjar_sync_status_pill = function (frm, export_to) {
 	// exactly one trigger in this sidebar. Aligned to the badge's own right
 	// edge, which is the edge it sits against in the column.
 	//
-	// A string content (never an element) so the card renders it as text -
-	// taxjar_sync_error is whatever TaxJar's API said, and must not be able
-	// to smuggle markup into the sidebar.
+	// A string content wherever the detail is a report, so the card renders it
+	// as text - taxjar_sync_error is whatever TaxJar's API said, and must not be
+	// able to smuggle markup into the sidebar. A reason with an action gets an
+	// element instead, built by sync_info_body out of words this app wrote. The
+	// card keeps itself open while the pointer is on it, so the link is
+	// reachable.
 	if (info_text) {
 		frappe.ui.hover_card($badge, {
-			content: () => info_text,
+			content: () =>
+				info_action ? taxjar_integration.sync_info_body(info_text, info_action) : info_text,
 			side: "bottom",
 			align: "end",
 			open_delay: 200,

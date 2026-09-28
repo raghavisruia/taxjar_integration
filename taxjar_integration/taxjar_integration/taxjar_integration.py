@@ -2596,8 +2596,8 @@ def update_destination_address(address: str, values: str | dict | None = None):
 	"""Write back the fields the save-time dialog collected.
 
 	An allowlist, not whatever the caller sends. This is reached from a dialog
-	that exists to fill three boxes, and an Address carries fields that have
-	nothing to do with where a sale is delivered.
+	that exists to fill the delivery address, and an Address carries fields that
+	have nothing to do with where a sale is delivered.
 	"""
 	if not isinstance(address, str) or not address.strip():
 		frappe.throw(
@@ -2613,11 +2613,73 @@ def update_destination_address(address: str, values: str | dict | None = None):
 	values = values or {}
 
 	doc = frappe.get_doc("Address", address)
-	for field in ("address_line1", "city", "state", "pincode", "country", "taxjar_region_code"):
+	for field in (
+		"address_line1", "address_line2", "city", "state", "pincode", "country",
+		"taxjar_region_code",
+	):
 		if field in values:
 			doc.set(field, (values.get(field) or "").strip())
 
 	doc.save()
+	return {"name": doc.name}
+
+
+@frappe.whitelist(methods=["POST"])
+def create_customer_address(customer: str, values: str | dict | None = None):
+	"""Insert an Address for this customer, linked and ready for the sale.
+
+	The transaction offers this when the customer has no address at all. The
+	reader answers one dialog and stays on the document, so this writes the
+	same fields update_destination_address writes, plus the three only a new
+	Address needs: a title, a type, and the two preferred-address flags.
+
+	An allowlist, for the same reason the write-back uses one: an Address
+	carries fields that have nothing to do with where a sale is delivered.
+	"""
+	if not isinstance(customer, str) or not customer.strip():
+		frappe.throw(
+			_("No customer was given to create an address for."),
+			title=_("No Customer"),
+		)
+
+	customer = customer.strip()
+	if not frappe.db.exists("Customer", customer):
+		frappe.throw(
+			_("Customer {0} does not exist.").format(customer),
+			title=_("No Customer"),
+		)
+
+	# Read on the Customer, create on the Address. The link row names the
+	# customer, so a user who cannot see that customer cannot name it here.
+	frappe.has_permission("Customer", "read", doc=customer, throw=True)
+	frappe.has_permission("Address", "create", throw=True)
+
+	if isinstance(values, str):
+		values = json.loads(values or "{}")
+	values = values or {}
+
+	doc = frappe.new_doc("Address")
+	for field in (
+		"address_title", "address_type", "address_line1", "address_line2",
+		"city", "state", "pincode", "country", "taxjar_state_code",
+		"taxjar_region_code",
+	):
+		if field in values:
+			doc.set(field, (values.get(field) or "").strip())
+
+	# The Address is named after its title, so a blank one names it after the
+	# customer rather than failing the insert.
+	if not (doc.address_title or "").strip():
+		doc.address_title = customer
+	if not (doc.address_type or "").strip():
+		doc.address_type = "Shipping"
+
+	# Checkboxes. They are read as numbers rather than stripped as text.
+	for field in ("is_primary_address", "is_shipping_address"):
+		doc.set(field, cint(values.get(field)))
+
+	doc.append("links", {"link_doctype": "Customer", "link_name": customer})
+	doc.insert()
 	return {"name": doc.name}
 
 
@@ -2701,8 +2763,6 @@ def get_shipping_address_details(doc):
 
 
 def get_iso_3166_2_state_code(address):
-	import pycountry
-
 	# Prefer the explicit TaxJar state code field when present (avoids pycountry guessing).
 	taxjar_code = address.get("taxjar_state_code")
 	if taxjar_code and taxjar_code in SUPPORTED_STATE_CODES:
@@ -2723,10 +2783,21 @@ def get_iso_3166_2_state_code(address):
 	if region_code and country_code and country_code.upper() != "US":
 		return region_code
 
+	return _region_code_from_state(country_code, state)
+
+
+def _region_code_from_state(country_code, state):
+	"""The ISO 3166-2 region code a country and a region name work out to.
+
+	The part of get_iso_3166_2_state_code() that reads nothing but those two.
+	No stored code, no Address - which is what lets resolve_region_code() answer
+	for an address the reader is still typing.
+	"""
+	import pycountry
+
+	state = (state or "").upper().strip()
 	if not state or not country_code:
 		return None
-
-	state = state.upper().strip()
 
 	# The max length for ISO state codes is 3, excluding the country code
 	if len(state) <= 3:
@@ -2736,6 +2807,26 @@ def get_iso_3166_2_state_code(address):
 		return state if address_state in states else None
 
 	return _region_code_by_name(country_code, state)
+
+
+@frappe.whitelist()
+def resolve_region_code(country: str | None = None, state: str | None = None):
+	"""The region code an address would carry, worked out from two boxes.
+
+	The Address form and the save-time dialog call it whenever the country or
+	the state changes, so the code the payload will carry is on the screen
+	before the save rather than after it.
+
+	It answers "" for a United States address, where taxjar_state_code carries
+	the answer instead, and "" when no region matches the name.
+	"""
+	country_code = (
+		frappe.db.get_value("Country", (country or "").strip(), "code", cache=True) or ""
+	).upper()
+	if not country_code or country_code == "US":
+		return {"region_code": ""}
+
+	return {"region_code": _region_code_from_state(country_code, state) or ""}
 
 
 def _plain_name(value):
@@ -2836,6 +2927,38 @@ def validate_address(doc, method):
 			_("Postal Code is required for United States addresses, and decides the tax rate."),
 			title=_("Postal Code Required"),
 		)
+
+
+def set_address_region_code(doc, method=None):
+	"""Fill in the region code an address outside the United States works out to.
+
+	Every payload carries a region code, and an export used to get one only when
+	a reader answered the save-time dialog on the transaction. Working it out
+	here puts the answer on the Address itself, so the dialog asks only for what
+	really cannot be worked out - see UNKNOWN_REGION_CODE.
+
+	Into an empty box only. A code that is already stored was typed or accepted
+	by a reader, the stand-in included, and this hook cannot tell that code from
+	one it wrote itself. The form recomputes on a country or a state change,
+	where the reader is present and the edit says what they meant.
+	"""
+	if not doc.country or not taxjar_serves_any_company():
+		return
+
+	country_code = (frappe.db.get_value("Country", doc.country, "code", cache=True) or "").upper()
+	if country_code == "US":
+		# taxjar_state_code carries the United States answer, and the box is
+		# hidden there. A code left behind by an earlier country is read by
+		# nothing, and it contradicts the state code beside it.
+		doc.taxjar_region_code = ""
+		return
+
+	if (doc.get("taxjar_region_code") or "").strip():
+		return
+
+	code = _region_code_from_state(country_code, doc.state)
+	if code:
+		doc.taxjar_region_code = code
 
 
 def _companies_stranded_without(doc):

@@ -339,8 +339,80 @@ describe("the sidebar pill on a draft", () => {
 
 		expect(sidebar_section().text()).toContain("Excluded");
 		expect(taxjar.exclusion_reason_text("Export Transaction")).toBe(
-			"As per your setting export transactions aren't synced to TaxJar"
+			"Export transactions sync is disabled."
 		);
+	});
+
+	// files_exports is a company setting, and this endpoint's answer is memoised
+	// per address for the life of the page. Desk routing never reloads the page,
+	// so somebody who switches export sync off and opens a new invoice was shown
+	// "Submit to Sync" for an export the submit then excluded - the form and the
+	// server disagreed until a hard refresh.
+	it("asks again once the configuration changes", async () => {
+		let files_exports = true;
+		answer_xcall(frappe, {
+			[SCOPE_METHOD]: US_FILE,
+			[EXPORT_METHOD]: () => ({ country: "India", files_exports }),
+		});
+
+		const before = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(before);
+		await flush();
+		expect(sidebar_section().text()).toContain("Submit to Sync");
+
+		// What the setup page and the settings form call when they write.
+		files_exports = false;
+		taxjar.clear_scope_cache();
+
+		const after = open_draft({ customer_address: "ADDR-IN" });
+		taxjar.render_sync_status_sidebar_pill(after);
+		await flush();
+
+		const text = sidebar_section().text();
+		expect(text).toContain("Excluded");
+		expect(text).not.toContain("Submit to Sync");
+	});
+
+	it("offers the card that owns the switch, beside the sentence", () => {
+		// The sentence names a setting, so the reader is given the way to it.
+		const action = taxjar.exclusion_reason_action("Export Transaction");
+		expect(action).toEqual({ label: "Configure", href: "/app/taxjar-setup?focus=features" });
+	});
+
+	it("gives a recorded fact no link, because it has nothing to open", () => {
+		expect(taxjar.exclusion_reason_action("Removed from TaxJar")).toBe(null);
+		expect(taxjar.exclusion_reason_action("TaxJar Disabled")).toBe(null);
+	});
+
+	it("puts the sentence in as text and the link in as an element", () => {
+		// taxjar_sync_error is whatever TaxJar's API said, and this body is the
+		// one place both screens build. Markup in the sentence stays words.
+		const $body = taxjar.sync_info_body("<b>boom</b>", {
+			label: "Configure",
+			href: "/app/taxjar-setup?focus=features",
+		});
+
+		expect($body.find("b").length).toBe(0);
+		expect($body.text()).toContain("<b>boom</b>");
+
+		const $link = $body.find("a");
+		expect($link.attr("href")).toBe("/app/taxjar-setup?focus=features");
+		// The arrow is part of the link, and the rule under the word is what
+		// says it can be pressed - see sync_info_body.
+		expect($link.text()).toBe("Configure \u2192");
+		expect($link.css("white-space")).toBe("nowrap");
+
+		// The rule stops at the word. The anchor draws none of its own, so the
+		// arrow is not underlined with it.
+		expect($link.css("text-decoration")).toBe("none");
+		expect($link.find("span").css("text-decoration")).toBe("underline");
+		expect($link.find("span").text()).toBe("Configure");
+	});
+
+	it("leaves the body a plain sentence when there is nothing to act on", () => {
+		const $body = taxjar.sync_info_body("Unknown error", null);
+		expect($body.find("a").length).toBe(0);
+		expect($body.text()).toBe("Unknown error");
 	});
 
 	// The answer lands after the user has moved on. Writing it then would put

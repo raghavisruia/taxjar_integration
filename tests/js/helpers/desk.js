@@ -21,6 +21,7 @@ const SETTINGS_PATH = path.join(
 	"taxjar_integration/taxjar_integration/doctype/taxjar_settings/taxjar_settings.js"
 );
 const CUSTOMER_PATH = path.join(JS_ROOT, "customer.js");
+const ADDRESS_PATH = path.join(JS_ROOT, "address.js");
 
 // The transaction forms, by the doctype each one registers. Read from disk, not
 // transcribed: a test that copies the handlers out of these files cannot notice
@@ -37,6 +38,7 @@ const UTILS_SOURCE = fs.readFileSync(UTILS_PATH, "utf8");
 const DESK_SIDEBAR_SOURCE = fs.readFileSync(DESK_SIDEBAR_PATH, "utf8");
 const SETTINGS_SOURCE = fs.readFileSync(SETTINGS_PATH, "utf8");
 const CUSTOMER_SOURCE = fs.readFileSync(CUSTOMER_PATH, "utf8");
+const ADDRESS_SOURCE = fs.readFileSync(ADDRESS_PATH, "utf8");
 const FORM_SOURCES = Object.fromEntries(
 	Object.entries(FORM_SCRIPTS).map(([doctype, file]) => [doctype, fs.readFileSync(file, "utf8")])
 );
@@ -377,6 +379,28 @@ export function load_customer_form() {
 }
 
 /**
+ * Evaluate address.js, and return its handlers.
+ *
+ * Loaded the same way as the form scripts above, and for the same reason: it is
+ * a browser script whose only effect on load is to register handlers through
+ * `frappe.ui.form.on`. taxjar_utils.js has to be loaded first - the state code
+ * map and the stand-in both live there.
+ */
+export function load_address_form() {
+	// eslint-disable-next-line no-new-func
+	new Function(ADDRESS_SOURCE)();
+
+	const handlers = {};
+	for (const [doctype, events] of frappe.ui.form.on.mock.calls) {
+		handlers[doctype] = { ...(handlers[doctype] || {}), ...events };
+	}
+	if (!handlers.Address) {
+		throw new Error("Address registered no handlers - has its form script moved?");
+	}
+	return handlers.Address;
+}
+
+/**
  * Replace `frappe.ui.Dialog` with one that keeps a value per field.
  *
  * The inert stub in `install_desk` answers every read the same way, so a dialog
@@ -410,11 +434,22 @@ export function record_dialogs() {
 		this.fields_dict = fields_dict;
 		this.$wrapper = $("<div class='modal'></div>");
 		this.get_value = (fieldname) => values[fieldname];
+		// frappe hands the primary action whatever get_values() returns, and
+		// leaves out a box that is empty - so a test that drives the action
+		// reads the same shape the server is sent.
+		this.get_values = () =>
+			Object.fromEntries(
+				Object.entries(values).filter(([, value]) => value !== "" && value != null)
+			);
 		this.set_value = vi.fn((fieldname, value) => {
 			values[fieldname] = value;
 			const field = fields_dict[fieldname];
 			if (field && field.df.onchange) field.df.onchange();
 			return Promise.resolve();
+		});
+		this.set_df_property = vi.fn((fieldname, property, value) => {
+			const field = fields_dict[fieldname];
+			if (field) field.df[property] = value;
 		});
 		this.show = vi.fn();
 		this.hide = vi.fn(() => {

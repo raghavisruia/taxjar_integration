@@ -166,6 +166,10 @@ doc_events = {
 	"Address": {
 		"validate": [
 			"taxjar_integration.taxjar_integration.taxjar_integration.validate_address",
+			# Before the transaction ever asks. An overseas address that works
+			# out its own region code leaves the save-time dialog nothing to ask
+			# about.
+			"taxjar_integration.taxjar_integration.taxjar_integration.set_address_region_code",
 			# Disabling a company's last address strands it exactly as deleting
 			# it would, so the same rule has to cover both.
 			"taxjar_integration.taxjar_integration.taxjar_integration.prevent_company_address_disable",

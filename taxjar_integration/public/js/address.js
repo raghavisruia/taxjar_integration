@@ -1,29 +1,90 @@
 // TaxJar — Address form client script
 // Auto-syncs taxjar_state_code ↔ state when country is "United States".
+// Works out taxjar_region_code from the state everywhere else.
 // Enforces mandatory fields: state (US/CA), taxjar_state_code (US), pincode (US).
 // Labels the State Code options with the state name.
 
 // State code → full name map is defined once in taxjar_utils.js (loaded globally
-// via the app bundle) so the Address and Customer forms stay in lockstep.
+// via the app bundle) so the Address and Customer forms stay in lockstep. The
+// reverse lookup lives there too: the transaction's own Create Address dialog
+// reads the State box the same way, and two copies would drift apart.
 const TAXJAR_US_STATES = taxjar_integration.US_STATE_NAMES;
-
-// Build reverse map: "CALIFORNIA" → "CA"
-const TAXJAR_US_STATE_BY_NAME = Object.fromEntries(
-	Object.entries(TAXJAR_US_STATES).map(([code, name]) => [name.toUpperCase(), code])
-);
-
-function _resolve_state_code(state_value) {
-	if (!state_value) return null;
-	const upper = state_value.toUpperCase().trim();
-	// Direct 2-letter code match
-	if (TAXJAR_US_STATES[upper]) return upper;
-	// Full name match
-	if (TAXJAR_US_STATE_BY_NAME[upper]) return TAXJAR_US_STATE_BY_NAME[upper];
-	return null;
-}
 
 function _has_state_code_field(frm) {
 	return !!frm.fields_dict["taxjar_state_code"];
+}
+
+function _has_region_code_field(frm) {
+	return !!frm.fields_dict["taxjar_region_code"];
+}
+
+// The sentence under the Region Code box, and nothing where there is nothing to
+// say: a code the state produced needs no sentence to explain it.
+//
+// The field's own description is kept either way. It says what the box is for,
+// which is a different question from whether this state answered it.
+//
+// The sentence here does not name the stand-in, the way the save-time dialog's
+// does. The dialog writes "XX" into the box and this form leaves it empty, and
+// a form that promised a default it does not write would be wrong.
+function _describe_region_code(frm, code) {
+	const field = frm.fields_dict["taxjar_region_code"];
+	if (!field) return;
+	if (frm.__taxjar_region_description === undefined) {
+		frm.__taxjar_region_description = field.df.description || "";
+	}
+	const origin = code ? "" : __("Cannot find region code.");
+	frm.set_df_property(
+		"taxjar_region_code",
+		"description",
+		`${frm.__taxjar_region_description} ${origin}`.trim()
+	);
+}
+
+// The region code a sale outside the United States is filed under. It comes
+// from the country and the state, so the form works it out again whenever
+// either one changes - the same answer set_address_region_code() writes at
+// save, on the screen before the save rather than after it.
+//
+// The server is asked rather than a map in this file: ISO 3166-2 lists
+// thousands of regions across 250 countries, and pycountry already holds them.
+function _refresh_region_code(frm) {
+	if (!_has_region_code_field(frm)) return;
+
+	// taxjar_state_code carries the United States answer, and the box is hidden
+	// there. A code from the country before it is read by nothing.
+	if (frm.doc.country === "United States") {
+		if (frm.doc.taxjar_region_code) frm.set_value("taxjar_region_code", "");
+		return;
+	}
+
+	// Only what this script wrote is replaced. A code already in the box is the
+	// reader's own answer - the "XX" stand-in they accepted in the save-time
+	// dialog included - and an edit to the state does not make it ours to
+	// overwrite.
+	const stored = (frm.doc.taxjar_region_code || "").trim();
+	if (stored && stored !== frm.__taxjar_region_code) return;
+
+	// Nothing to work out without a region name, and nothing to say about it
+	// either. A reader picks the country first and types the state after it,
+	// and the server would answer "" to every one of those picks.
+	if (!(frm.doc.state || "").trim()) {
+		if (stored) frm.set_value("taxjar_region_code", "");
+		frm.__taxjar_region_code = "";
+		return;
+	}
+
+	return frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.resolve_region_code", {
+			country: frm.doc.country,
+			state: frm.doc.state,
+		})
+		.then((answer) => {
+			const code = (answer && answer.region_code) || "";
+			frm.__taxjar_region_code = code;
+			if (code !== stored) frm.set_value("taxjar_region_code", code);
+			_describe_region_code(frm, code);
+		});
 }
 
 // The field stores a 2-letter code, and the custom field's own options are
@@ -64,16 +125,21 @@ frappe.ui.form.on("Address", {
 	country(frm) {
 		_set_taxjar_mandatory_fields(frm);
 
-		if (!_has_state_code_field(frm)) return;
-		if (frm.doc.country !== "United States" && frm.doc.taxjar_state_code) {
-			frm.set_value("taxjar_state_code", "");
+		if (_has_state_code_field(frm)) {
+			if (frm.doc.country !== "United States" && frm.doc.taxjar_state_code) {
+				frm.set_value("taxjar_state_code", "");
+			}
 		}
+
+		// The country decides which of the two boxes holds the answer, so both
+		// are settled on a change - the state code above, the region code here.
+		return _refresh_region_code(frm);
 	},
 
 	state(frm) {
+		if (frm.doc.country !== "United States") return _refresh_region_code(frm);
 		if (!_has_state_code_field(frm)) return;
-		if (frm.doc.country !== "United States") return;
-		const code = _resolve_state_code(frm.doc.state);
+		const code = taxjar_integration.us_state_code_from_name(frm.doc.state);
 		if (code && code !== frm.doc.taxjar_state_code) {
 			frm.set_value("taxjar_state_code", code);
 		}

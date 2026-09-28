@@ -9326,13 +9326,33 @@ class TestTaxJarTransactionSyncPage(UnitTestCase):
 			self.assertIn('$wrapper.on("%s", ".taxjar-sync-trigger"' % event, bind_fn)
 		self.assertIn("_show_sync_popover", bind_fn)
 
-	def test_sync_popover_shows_and_hides_without_delay(self):
+	def test_sync_popover_shows_without_delay(self):
+		"""Nothing is waited out before the popover appears. The only timer in
+		the show path defers the close after a click, so the browser can act on
+		a link before the anchor leaves the document."""
 		js = self._transactions_js()
 		show_fn = js.split("_show_sync_popover($trigger) {")[1].split("\n\t}\n")[0]
 		self.assertIn("taxjar-sync-pop", show_fn)
-		self.assertNotIn("setTimeout", show_fn)
-		hide_fn = js.split("_hide_sync_popover() {")[1].split("\n\t}\n")[0]
-		self.assertNotIn("setTimeout", hide_fn)
+		self.assertNotIn("setTimeout(() => this._show_sync_popover", show_fn)
+
+	def test_the_popover_waits_before_it_hides(self):
+		"""The popover can hold a link, and the pointer has to cross the gap
+		from the icon to reach it. Only the leave path asks for the wait; every
+		other caller wants the popover gone now."""
+		js = self._transactions_js()
+		bind_fn = js.split("bind_sync_popover($wrapper) {")[1].split("\n\t}\n")[0]
+		self.assertIn("this._hide_sync_popover(POPOVER_GRACE_MS)", bind_fn)
+		self.assertIn("const POPOVER_GRACE_MS = ", js)
+
+		hide_fn = js.split("_hide_sync_popover(delay) {")[1].split("\n\t}\n")[0]
+		self.assertIn("clearTimeout(this._pop_timer);", hide_fn)
+		self.assertIn("if (delay) {", hide_fn)
+
+		show_fn = js.split("_show_sync_popover($trigger) {")[1].split("\n\t}\n")[0]
+		# The pointer arriving on the popover cancels the wait, which is the
+		# whole point of the wait.
+		self.assertIn('$pop.on("mouseenter", () => clearTimeout(this._pop_timer));', show_fn)
+		self.assertIn('$pop.on("mouseleave", () => this._hide_sync_popover());', show_fn)
 
 	def test_sync_icon_css_uses_pointer_cursor_not_help(self):
 		"""cursor: help renders the browser's own question-mark cursor glyph
@@ -12559,6 +12579,16 @@ class TestScopeCacheIsCleared(UnitTestCase):
 		fn = js.split("taxjar_integration.clear_scope_cache = function () {")[1].split("\n};")[0]
 		self.assertIn("taxjar_integration._scope_cache = {}", fn)
 
+	def test_it_clears_the_export_memo_too(self):
+		"""One answer, two memos. check_export_destination returns files_exports,
+		which is read off the same company configuration - so an export answer
+		held over a configuration change told a draft its submit would sync an
+		export the submit then excluded. Clearing both here, rather than at each
+		caller, because a caller that has to remember two will forget one."""
+		js = self._app_js("..", "..", "..", "public", "js", "taxjar_utils.js")
+		fn = js.split("taxjar_integration.clear_scope_cache = function () {")[1].split("\n};")[0]
+		self.assertIn("taxjar_integration._export_cache = {}", fn)
+
 	def test_the_settings_form_clears_it_on_save(self):
 		js = self._app_js("taxjar_settings.js")
 		events = js.split("frappe.ui.form.on('TaxJar Settings', {")[1]
@@ -13017,12 +13047,16 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 		self.assertIn("open_delay: 200", card)
 		self.assertIn("close_delay: 150", card)
 
-	def test_hover_card_content_is_a_string_so_it_renders_as_text(self):
-		"""taxjar_sync_error is whatever TaxJar's API said. HoverCard renders
-		a string as a text node and an element as markup, so the reason must
-		go through as the former."""
+	def test_hover_card_content_is_a_string_unless_this_app_wrote_it(self):
+		"""taxjar_sync_error is whatever TaxJar's API said. HoverCard renders a
+		string as a text node and an element as markup, so a detail that only
+		reports goes through as a string. A reason that carries a link becomes an
+		element, and sync_info_body still puts the sentence in through .text()."""
 		card = self._render_fn().split("frappe.ui.hover_card($badge, {")[1].split("});")[0]
-		self.assertIn("content: () => info_text", card)
+		self.assertIn(
+			"info_action ? taxjar_integration.sync_info_body(info_text, info_action) : info_text",
+			card,
+		)
 		self.assertNotIn("$(", card)
 
 	def test_every_state_has_a_hover_detail(self):
@@ -13091,6 +13125,141 @@ class TestSyncStatusSidebarPill(UnitTestCase):
 			"taxjar_integration.exclusion_reason_text = function (reason, is_current) {"
 		)[1].split("\n};")[0]
 		self.assertIn('return "";', fn)
+
+	def test_the_export_reason_offers_the_card_that_owns_the_switch(self):
+		"""The sentence names a setting, so it is followed by the way to reach
+		it. Features is the step that owns Include Export Transactions, and the
+		other remedial links in this file open the same card."""
+		utils = self._read_js("taxjar_utils.js")
+		fn = utils.split("taxjar_integration.exclusion_reason_action = function (reason) {")[1].split(
+			"\n};"
+		)[0]
+		self.assertIn('label: __("Configure"), href: TAXJAR_SETUP_FEATURES_URL', fn)
+		self.assertIn("return null;", fn)
+
+	def test_only_a_reason_someone_can_act_on_carries_a_link(self):
+		"""A recorded fact has nothing to open. Offering a link beside one asks
+		the reader to go and look for a setting that will not explain the row."""
+		utils = self._read_js("taxjar_utils.js")
+		fn = utils.split("taxjar_integration.exclusion_reason_action = function (reason) {")[1].split(
+			"\n};"
+		)[0]
+		self.assertIn('reason === "Export Transaction"', fn)
+		for reason in ("Removed from TaxJar", "TaxJar Disabled"):
+			self.assertNotIn(reason, fn)
+
+	def test_the_link_is_built_apart_from_the_sentence(self):
+		"""Both screens render the sentence as text on purpose, so markup inside
+		it would reach the reader as angle brackets. The link is an element
+		instead, and the sentence still goes in through .text()."""
+		utils = self._read_js("taxjar_utils.js")
+		text_fn = utils.split(
+			"taxjar_integration.exclusion_reason_text = function (reason, is_current) {"
+		)[1].split("\n};")[0]
+		self.assertNotIn("<a", text_fn)
+
+		body_fn = utils.split("taxjar_integration.sync_info_body = function (text, action) {")[1].split(
+			"\n};"
+		)[0]
+		self.assertIn('$("<div>").text(text)', body_fn)
+		self.assertIn('.attr("href", action.href)', body_fn)
+		self.assertIn('$("<span>").text(action.label)', body_fn)
+
+	def test_the_link_says_it_can_be_pressed(self):
+		"""It follows a sentence of the same size, weight and color, and the card
+		holds nothing else to tell it apart from. The rule says it can be
+		pressed, and the arrow says it goes somewhere. nowrap keeps the two on
+		one line."""
+		utils = self._read_js("taxjar_utils.js")
+		body_fn = utils.split("taxjar_integration.sync_info_body = function (text, action) {")[1].split(
+			"\n};"
+		)[0]
+		self.assertIn('.css("text-decoration", "underline")', body_fn)
+		self.assertIn('"white-space": "nowrap"', body_fn)
+		self.assertIn("\\u2192", body_fn)
+
+	def test_the_rule_runs_under_the_word_and_stops_there(self):
+		"""An arrow is a shape, and a line under it reads as part of the shape
+		rather than as the same line the word carries. So the word owns the
+		underline and the anchor draws none of its own."""
+		utils = self._read_js("taxjar_utils.js")
+		body_fn = utils.split("taxjar_integration.sync_info_body = function (text, action) {")[1].split(
+			"\n};"
+		)[0]
+		self.assertIn('"text-decoration": "none"', body_fn)
+		self.assertIn('$("<span>").text(action.label).css("text-decoration", "underline")', body_fn)
+
+	def test_the_link_is_styled_once_for_both_screens(self):
+		"""The two screens that show this body keep their own stylesheets, so a
+		rule in either one would have to be written twice and would then drift.
+		The style sits on the element the shared helper builds."""
+		import os
+		css_path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_transactions",
+			"taxjar_transactions.css",
+		)
+		with open(os.path.normpath(css_path)) as f:
+			css = f.read()
+
+		self.assertNotIn(".taxjar-sync-pop a", css)
+
+	def test_both_screens_build_the_popover_body_the_same_way(self):
+		"""One helper, so a link that works on the invoice form is not a plain
+		sentence on the Transaction Sync page."""
+		utils = self._read_js("taxjar_utils.js")
+		self.assertIn("taxjar_integration.sync_info_body = function (text, action)", utils)
+
+		import os
+		page_path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_transactions",
+			"taxjar_transactions.js",
+		)
+		with open(os.path.normpath(page_path)) as f:
+			page_js = f.read()
+
+		self.assertIn(".sync_info_body(text, action)", page_js)
+		self.assertIn("taxjar_integration.sync_info_body(info_text, info_action)", utils)
+
+	def test_the_transaction_row_carries_the_link_on_the_icon(self):
+		"""data-info holds the sentence and is escaped into a text node, so the
+		link cannot travel inside it. It rides on its own two attributes."""
+		import os
+		page_path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_transactions",
+			"taxjar_transactions.js",
+		)
+		with open(os.path.normpath(page_path)) as f:
+			page_js = f.read()
+
+		cell_fn = page_js.split("render_sync_status_cell(row) {")[1].split("\n\t}\n")[0]
+		self.assertIn(
+			"info_action = taxjar_integration.exclusion_reason_action(row.taxjar_exclusion_reason)",
+			cell_fn,
+		)
+		self.assertIn("data-info-href=", cell_fn)
+		self.assertIn("data-info-link=", cell_fn)
+
+		show_fn = page_js.split("_show_sync_popover($trigger) {")[1].split("\n\t}\n")[0]
+		self.assertIn('$trigger.attr("data-info-href")', show_fn)
+		self.assertIn('$trigger.attr("data-info-link")', show_fn)
+
+	def test_a_click_in_the_popover_reaches_the_link(self):
+		"""The document handler that closes the popover would pull the anchor
+		out of the document while the click is still running, and a browser
+		acts on a link only after that. So the click stops there and the hide
+		waits for the next tick."""
+		import os
+		page_path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_transactions",
+			"taxjar_transactions.js",
+		)
+		with open(os.path.normpath(page_path)) as f:
+			page_js = f.read()
+
+		show_fn = page_js.split("_show_sync_popover($trigger) {")[1].split("\n\t}\n")[0]
+		click = show_fn.split('$pop.on("click", (e) => {')[1].split("});")[0]
+		self.assertIn("e.stopPropagation();", click)
+		self.assertIn("setTimeout(() => this._hide_sync_popover());", click)
 
 	def test_wired_into_sales_invoice_refresh(self):
 		js = self._read_js("sales_invoice.js")
@@ -15180,8 +15349,8 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		"""The same words under a grey dot read as "this one matters less",
 		which is a different claim from "this one is switched off"."""
 		body = self._fn("_card_body_ledgers(s) {")
-		self.assertIn('__("Sales tax"), __("Sales tax off")', body)
-		self.assertIn('__("Transaction sync"), __("Transaction sync off")', body)
+		self.assertIn('__("Sales Tax"), __("Sales Tax off")', body)
+		self.assertIn('__("Transaction Sync"), __("Transaction Sync off")', body)
 		chip = self._fn("_feature_chip(on_label, off_label, on) {")
 		# Green for on, gray for off, outlined in both states. Gray is the desk's
 		# inactive colour, so a gray badge reading "Sales tax" says the opposite
@@ -15279,7 +15448,7 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"))
 		utils = open(path).read()
 		self.assertIn('"/app/taxjar-setup?focus=features"', utils)
-		self.assertEqual(utils.count("TAXJAR_SETUP_FEATURES_URL"), 3)
+		self.assertEqual(utils.count("TAXJAR_SETUP_FEATURES_URL"), 4)
 
 	def test_settings_form_intro_follows_the_flag(self):
 		import os
@@ -17188,6 +17357,7 @@ class TestWhitelistedEndpointContract(UnitTestCase):
 			bulk_retry,
 		)
 		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			create_customer_address,
 			delete_transaction_manual,
 			mark_address_as_shipping,
 		)
@@ -17197,6 +17367,7 @@ class TestWhitelistedEndpointContract(UnitTestCase):
 			remove_company, fetch_nexus, finish_setup,
 			configure_exemption, bulk_clear_exemption, bulk_sync_to_taxjar,
 			bulk_retry, delete_transaction_manual, mark_address_as_shipping,
+			create_customer_address,
 		)
 		for fn in writers:
 			self.assertEqual(self._methods_for(fn), ("POST",), f"{fn.__name__} must be POST-only")
@@ -19116,7 +19287,9 @@ class TestTheDestinationAddressGuard(UnitTestCase):
 		ones are optional, and clearing one would then be a save the dialog
 		appeared to allow."""
 		js = self._js()
-		block = js.split("title: __(\"Complete the Shipping Address\")")[1].split("primary_action_label")[0]
+		block = js.split(
+			"taxjar_integration._show_destination_address_dialog = function"
+		)[1].split("primary_action_label")[0]
 
 		for fieldname in ("address_line1", "city", "state", "pincode", "country"):
 			with self.subTest(fieldname=fieldname):
@@ -19185,16 +19358,25 @@ class TestTheDestinationAddressGuard(UnitTestCase):
 		self.assertIsNone(code)
 
 	def test_the_write_back_takes_only_the_fields_the_dialog_collects(self):
-		"""An allowlist. The dialog exists to fill three boxes, and an Address
-		carries fields that have nothing to do with where a sale is delivered."""
+		"""An allowlist. The dialog exists to fill the delivery address, and an
+		Address carries fields that have nothing to do with where a sale is
+		delivered. Read as a tuple rather than as a line of text, so the order
+		of the boxes in the dialog can change without breaking this."""
+		import ast
 		import inspect
 
 		from taxjar_integration.taxjar_integration import taxjar_integration as ti
 
 		source = inspect.getsource(ti.update_destination_address)
-		self.assertIn(
-			'for field in ("address_line1", "city", "state", "pincode", "country", "taxjar_region_code"):',
-			source,
+		loop = next(
+			node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.For)
+		)
+		self.assertEqual(
+			sorted(element.value for element in loop.iter.elts),
+			sorted([
+				"address_line1", "address_line2", "city", "state", "pincode",
+				"country", "taxjar_region_code",
+			]),
 		)
 		self.assertIn('frappe.has_permission("Address", "write"', source)
 
@@ -19263,6 +19445,336 @@ class TestTheDestinationAddressGuard(UnitTestCase):
 
 		self.assertIn(
 			f'taxjar_integration.UNKNOWN_REGION_CODE = "{ti.UNKNOWN_REGION_CODE}";', self._js()
+		)
+
+
+class TestCreatingTheCustomersFirstAddress(UnitTestCase):
+	"""The customer has no address, and the reader has to make one.
+
+	The strip on the transaction used to send them to the Address form: they
+	left the document, saved an address, came back, and linked it by hand. The
+	address never reached the transaction on its own.
+
+	So a dialog on the document instead, and one endpoint behind it. It writes
+	the fields the dialog collects and nothing else, links the new Address to
+	the customer, and hands the name back for the transaction to take.
+	"""
+
+	def _js(self):
+		import os
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "taxjar_utils.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			return f.read()
+
+	def _create(self, values, customer="Acme Inc"):
+		"""Run the endpoint against a stand-in Address, and hand it back."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		doc = _FakeAddress()
+
+		with patch.object(ti.frappe.db, "exists", return_value=True), patch.object(
+			ti.frappe, "has_permission", return_value=True
+		), patch.object(ti.frappe, "new_doc", return_value=doc):
+			answer = ti.create_customer_address(customer, values)
+
+		return doc, answer
+
+	def test_the_insert_takes_only_the_fields_the_dialog_collects(self):
+		"""An allowlist, the same one the write-back uses and for the same
+		reason: an Address carries fields that have nothing to do with where a
+		sale is delivered. Read as a tuple rather than as a line of text, so the
+		order of the boxes in the dialog can change without breaking this."""
+		import ast
+		import inspect
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		source = inspect.getsource(ti.create_customer_address)
+		loop = next(
+			node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.For)
+		)
+		self.assertEqual(
+			sorted(element.value for element in loop.iter.elts),
+			sorted([
+				"address_title", "address_type", "address_line1", "address_line2",
+				"city", "state", "pincode", "country", "taxjar_state_code",
+				"taxjar_region_code",
+			]),
+		)
+
+	def test_it_links_the_new_address_to_the_customer(self):
+		"""The link row is what makes the address the customer's. Without it
+		the picker never offers it again, and the reader answers the same
+		dialog on the next transaction."""
+		doc, answer = self._create({"address_line1": "1 Test Road", "city": "Austin"})
+
+		self.assertEqual(
+			doc.links, [{"link_doctype": "Customer", "link_name": "Acme Inc"}]
+		)
+		self.assertTrue(doc.inserted)
+		self.assertEqual(answer["name"], doc.name)
+
+	def test_the_two_preferred_flags_arrive_as_numbers(self):
+		"""The dialog sends checkboxes. Stripping them as text would store the
+		string "1", and a later query on is_shipping_address reads a number."""
+		doc, _ = self._create({"is_primary_address": 1, "is_shipping_address": "0"})
+
+		self.assertEqual(doc.is_primary_address, 1)
+		self.assertEqual(doc.is_shipping_address, 0)
+
+	def test_a_blank_title_is_named_after_the_customer(self):
+		"""The Address is named after its title, so a blank one fails the
+		insert with an error the dialog cannot explain."""
+		doc, _ = self._create({"address_line1": "1 Test Road"})
+
+		self.assertEqual(doc.address_title, "Acme Inc")
+		self.assertEqual(doc.address_type, "Shipping")
+
+	def test_it_reads_the_values_the_browser_sends_as_text(self):
+		"""frappe.call sends the dialog's values as one JSON string."""
+		import json
+
+		doc, _ = self._create(json.dumps({"city": "Austin", "state": "Texas"}))
+
+		self.assertEqual(doc.city, "Austin")
+		self.assertEqual(doc.state, "Texas")
+
+	def test_it_refuses_a_request_that_names_no_customer(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		# A blank string only. frappe's own type guard refuses a customer that
+		# is not a string before the function runs at all.
+		for customer in ("", "   "):
+			with self.subTest(customer=customer):
+				with self.assertRaises(frappe.ValidationError):
+					ti.create_customer_address(customer, {})
+
+	def test_it_asks_about_the_customer_and_the_address_separately(self):
+		"""Read on the Customer, create on the Address. The link row names the
+		customer, so a user who cannot see that customer cannot name it here."""
+		import inspect
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		source = inspect.getsource(ti.create_customer_address)
+		self.assertIn('frappe.has_permission("Customer", "read"', source)
+		self.assertIn('frappe.has_permission("Address", "create"', source)
+
+	def test_it_stores_the_state_code_a_united_states_sale_is_filed_under(self):
+		"""The dialog asks for it the way the Address form does, and the sale is
+		filed under the code rather than the state name."""
+		doc, _ = self._create({
+			"country": "United States", "state": "Arizona", "taxjar_state_code": "AZ",
+		})
+
+		self.assertEqual(doc.taxjar_state_code, "AZ")
+
+	def test_the_dialog_asks_for_the_state_code_only_inside_the_united_states(self):
+		"""Two boxes hold one answer, and the country says which. A sale
+		delivered elsewhere is filed under the ISO 3166-2 region code."""
+		js = self._js()
+		block = js.split("taxjar_integration._open_new_address = function")[1]
+		state_code = block.split('fieldname: "taxjar_state_code"')[1].split("},")[0]
+
+		self.assertIn('depends_on: \'eval:doc.country === "United States"\'', state_code)
+		self.assertIn(
+			'mandatory_depends_on: \'eval:doc.country === "United States"\'', state_code
+		)
+
+	def test_the_dialog_starts_in_the_united_states(self):
+		"""Every company this app serves is registered there, so a reader
+		delivering at home changes no box at all."""
+		js = self._js()
+		block = js.split("taxjar_integration._open_new_address = function")[1]
+		country = block.split('fieldname: "country"')[1].split("},")[0]
+
+		self.assertIn('default: "United States"', country)
+
+	def test_the_state_name_resolver_is_shared_with_the_address_form(self):
+		"""One map, one reverse lookup. Two copies would drift apart, and the
+		Address form and this dialog would read the same State box differently."""
+		import os
+
+		path = os.path.join(
+			os.path.dirname(__file__), "..", "..", "..", "public", "js", "address.js"
+		)
+		with open(os.path.normpath(path)) as f:
+			address_js = f.read()
+
+		self.assertIn("taxjar_integration.us_state_code_from_name", address_js)
+		self.assertIn("taxjar_integration.us_state_code_from_name = function", self._js())
+
+	def test_the_strip_opens_the_dialog_rather_than_the_address_form(self):
+		"""The page the dialog exists to avoid. A frappe.new_doc here routes the
+		reader off the transaction, which is the bug this replaced."""
+		js = self._js()
+		block = js.split("taxjar_integration._open_new_address = function")[1]
+
+		self.assertNotIn("frappe.new_doc", block)
+		self.assertIn("create_customer_address", block)
+
+	def test_the_new_address_lands_on_the_transaction(self):
+		"""The whole point. The reader answers one dialog and the document
+		names the address, with nothing left to link by hand."""
+		js = self._js()
+		block = js.split("taxjar_integration._use_new_address = function")[1]
+
+		self.assertIn('frm.set_value("shipping_address_name", address_name)', block)
+		self.assertIn('frm.set_value("customer_address", address_name)', block)
+		# Only while it is empty. A document that already names a billing
+		# address reached this dialog for a delivery address.
+		self.assertIn("if (!frm.doc.customer_address)", block)
+
+
+class _FakeAddress(frappe._dict):
+	"""A stand-in for a new Address, recording what the endpoint writes to it."""
+
+	def set(self, field, value):
+		self[field] = value
+
+	def append(self, table, row):
+		self.setdefault(table, []).append(row)
+
+	def insert(self):
+		self["inserted"] = True
+		self["name"] = "Acme Inc-Shipping"
+
+
+class TestTheRegionCodeOnAnAddress(UnitTestCase):
+	"""The region code a sale outside the United States is filed under.
+
+	It is worked out from the country and the region name, not typed. The
+	Address itself carries the answer, so the save-time dialog on a transaction
+	asks only for what really cannot be worked out - see UNKNOWN_REGION_CODE.
+
+	Two callers, one resolver: the hook that fills the box at save, and the
+	endpoint the Address form and the dialog ask on every change to either box.
+	"""
+
+	def _ti(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as ti
+
+		return ti
+
+	def test_a_region_name_becomes_its_iso_code(self):
+		"""And a name with a macron over it matches the plain spelling: ISO
+		writes Gujarat as "Gujarāt", and an address does not."""
+		ti = self._ti()
+
+		self.assertEqual(ti._region_code_from_state("IN", "Gujarat"), "GJ")
+		self.assertEqual(ti._region_code_from_state("DE", "Bayern"), "BY")
+
+	def test_a_code_in_the_state_box_is_taken_as_it_is(self):
+		"""A reader who typed the code already answered the question."""
+		ti = self._ti()
+
+		self.assertEqual(ti._region_code_from_state("IN", "GJ"), "GJ")
+		# But only a code that country knows. "ON" is Ontario, not an Indian
+		# region, and a real code for the wrong country is worse than none.
+		self.assertIsNone(ti._region_code_from_state("IN", "ON"))
+
+	def test_no_region_name_means_no_code(self):
+		ti = self._ti()
+
+		self.assertIsNone(ti._region_code_from_state("SG", "Singapore"))
+		self.assertIsNone(ti._region_code_from_state("IN", ""))
+		self.assertIsNone(ti._region_code_from_state("", "Gujarat"))
+
+	def _resolve(self, country_code, country="India", state="Gujarat"):
+		ti = self._ti()
+
+		with patch.object(ti.frappe.db, "get_value", return_value=country_code):
+			return ti.resolve_region_code(country=country, state=state)
+
+	def test_the_endpoint_answers_the_two_boxes_on_the_screen(self):
+		"""No Address is read. An address the reader is still typing has no
+		name to look up, and the two boxes are the whole question."""
+		self.assertEqual(self._resolve("IN")["region_code"], "GJ")
+
+	def test_the_endpoint_answers_nothing_for_a_united_states_address(self):
+		"""taxjar_state_code carries the answer there, and the box is hidden."""
+		self.assertEqual(
+			self._resolve("US", country="United States", state="Florida")["region_code"], ""
+		)
+
+	def test_the_endpoint_answers_nothing_when_no_region_matches(self):
+		self.assertEqual(
+			self._resolve("SG", country="Singapore", state="Singapore")["region_code"], ""
+		)
+
+	def test_the_endpoint_takes_no_argument_name_the_framework_strips(self):
+		"""frappe.call() deletes a kwarg named flags or ignore_permissions
+		before the method sees it, whatever the method declares. A parameter
+		named either one arrives as None from every real call, and nothing
+		reports it."""
+		import inspect
+
+		params = set(inspect.signature(self._ti().resolve_region_code).parameters)
+		self.assertNotIn("flags", params)
+		self.assertNotIn("ignore_permissions", params)
+
+	def _save(self, row, serves=True):
+		"""Run the save-time hook over one address, and hand it back."""
+		ti = self._ti()
+		doc = frappe._dict(row)
+
+		with patch.object(ti, "taxjar_serves_any_company", return_value=serves), patch.object(
+			ti.frappe.db, "get_value", return_value=row.get("_country_code")
+		):
+			ti.set_address_region_code(doc, "validate")
+		return doc
+
+	def test_an_overseas_address_works_out_its_own_code_at_save(self):
+		doc = self._save({
+			"country": "India", "state": "Gujarat", "taxjar_region_code": "",
+			"_country_code": "IN",
+		})
+		self.assertEqual(doc.taxjar_region_code, "GJ")
+
+	def test_a_stored_code_survives_the_save(self):
+		"""It was typed or accepted by a reader - the stand-in included - and
+		this hook cannot tell that code from one it wrote itself."""
+		doc = self._save({
+			"country": "India", "state": "Gujarat", "taxjar_region_code": "XX",
+			"_country_code": "IN",
+		})
+		self.assertEqual(doc.taxjar_region_code, "XX")
+
+	def test_an_address_whose_state_names_no_region_keeps_an_empty_box(self):
+		"""The save-time dialog on the transaction asks for it, which is the
+		one place a reader can accept the stand-in."""
+		doc = self._save({
+			"country": "Singapore", "state": "Singapore", "taxjar_region_code": "",
+			"_country_code": "SG",
+		})
+		self.assertEqual(doc.taxjar_region_code, "")
+
+	def test_a_united_states_address_carries_no_region_code(self):
+		"""A code left behind by an earlier country is read by nothing, and it
+		contradicts the state code beside it."""
+		doc = self._save({
+			"country": "United States", "state": "Florida", "taxjar_region_code": "GJ",
+			"_country_code": "US",
+		})
+		self.assertEqual(doc.taxjar_region_code, "")
+
+	def test_nothing_is_written_where_taxjar_serves_nobody(self):
+		"""The same rule validate_address() was cut back to: an Address on a
+		site TaxJar is switched off for is none of this app's business."""
+		doc = self._save({
+			"country": "India", "state": "Gujarat", "taxjar_region_code": "",
+			"_country_code": "IN",
+		}, serves=False)
+		self.assertEqual(doc.taxjar_region_code, "")
+
+	def test_the_hook_runs_on_every_address_save(self):
+		from taxjar_integration import hooks
+
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.set_address_region_code",
+			hooks.doc_events["Address"]["validate"],
 		)
 
 
@@ -19526,6 +20038,16 @@ class TestTheWizardCarriesTheExportSwitch(UnitTestCase):
 		block = self._exports_block()
 		self.assertIn('label: __("Domestic only"), value: 0', block)
 		self.assertIn('label: __("Domestic + Export"), value: 1', block)
+
+	def test_the_wider_answer_is_the_first_pill(self):
+		"""The wider answer reads first, and "Domestic only" reads as the
+		narrowing of it. The other order asks the reader to hold the smaller
+		answer in mind while the larger one arrives."""
+		block = self._exports_block()
+		self.assertLess(
+			block.index('label: __("Domestic + Export")'),
+			block.index('label: __("Domestic only")'),
+		)
 
 	def test_the_pills_carry_the_values_the_field_stores(self):
 		"""0 and 1, not two labels mapped back afterwards. find_by_value()

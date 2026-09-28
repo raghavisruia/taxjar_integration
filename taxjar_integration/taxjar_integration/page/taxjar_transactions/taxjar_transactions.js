@@ -34,6 +34,12 @@ const DOC_STATUS_COLORS = { Draft: "gray", Submitted: "blue", Cancelled: "red" }
 
 const SYNC_UPDATE_EVENT = "taxjar_transactions_update";
 
+// How long the sync popover waits after the pointer leaves the info icon. It is
+// the travel time from the icon to the popover, for a reader going after the
+// link inside it - frappe.ui.HoverCard's own close_delay, halved, because this
+// popover sits 6px from its trigger rather than across a gap.
+const POPOVER_GRACE_MS = 150;
+
 // All Transactions first - the page opens on everything in range, so the
 // reader sees the whole population before being sorted into one part of it.
 // After it, the same five states the summary strip counts, in the same order
@@ -621,6 +627,10 @@ class TaxJarTransactionSync {
 		// explains it - and an icon promising a detail that does not exist is
 		// worse than no icon, so the pill goes out on its own.
 		let info_text = "";
+		// The link the reason leaves the reader wanting, where the reason has
+		// one. It travels on the button rather than inside data-info, because
+		// the popover writes the sentence as text.
+		let info_action = null;
 		if (status === "Failed") {
 			info_text = row.taxjar_sync_error || __("Unknown error");
 		} else if (status === "Excluded") {
@@ -628,12 +638,18 @@ class TaxJarTransactionSync {
 				row.taxjar_exclusion_reason,
 				row.taxjar_exclusion_reason_is_current
 			);
+			info_action = taxjar_integration.exclusion_reason_action(row.taxjar_exclusion_reason);
 		}
 		if (!info_text) return pill;
 
+		const action_attrs = info_action
+			? ` data-info-href="${frappe.utils.escape_html(
+					info_action.href
+			  )}" data-info-link="${frappe.utils.escape_html(info_action.label)}"`
+			: "";
 		const icon = `<button type="button" class="taxjar-sync-icon taxjar-sync-trigger" data-info="${frappe.utils.escape_html(
 			info_text
-		)}">${frappe.utils.icon("info", "sm")}</button>`;
+		)}"${action_attrs}>${frappe.utils.icon("info", "sm")}</button>`;
 		return `${pill}${icon}`;
 	}
 
@@ -645,7 +661,12 @@ class TaxJarTransactionSync {
 		$wrapper.on("mouseenter", ".taxjar-sync-trigger", (e) =>
 			this._show_sync_popover($(e.currentTarget))
 		);
-		$wrapper.on("mouseleave", ".taxjar-sync-trigger", () => this._hide_sync_popover());
+		// A grace period rather than an immediate hide: the popover can hold a
+		// link, and the pointer has to cross the gap from the icon to reach it.
+		// The popover cancels the timer once the pointer arrives on it.
+		$wrapper.on("mouseleave", ".taxjar-sync-trigger", () =>
+			this._hide_sync_popover(POPOVER_GRACE_MS)
+		);
 		$wrapper.on("click", ".taxjar-sync-trigger", (e) => {
 			e.stopPropagation();
 			this._show_sync_popover($(e.currentTarget));
@@ -655,7 +676,22 @@ class TaxJarTransactionSync {
 	_show_sync_popover($trigger) {
 		this._hide_sync_popover();
 		const text = $trigger.attr("data-info") || "";
-		const $pop = $(`<div class="taxjar-sync-pop">${frappe.utils.escape_html(text)}</div>`).appendTo("body");
+		const href = $trigger.attr("data-info-href");
+		const action = href ? { href, label: $trigger.attr("data-info-link") } : null;
+		const $pop = taxjar_integration
+			.sync_info_body(text, action)
+			.addClass("taxjar-sync-pop")
+			.appendTo("body");
+		$pop.on("mouseenter", () => clearTimeout(this._pop_timer));
+		$pop.on("mouseleave", () => this._hide_sync_popover());
+		// A click inside goes to the link, not to the document handler below
+		// that closes the popover. The hide waits for the next tick, because a
+		// browser acts on a link after the click event finishes and an anchor
+		// pulled out of the document during it may never be followed.
+		$pop.on("click", (e) => {
+			e.stopPropagation();
+			setTimeout(() => this._hide_sync_popover());
+		});
 		// position: fixed + getBoundingClientRect() are both viewport-relative,
 		// so no scroll-offset math is needed here. Sync Status is the table's
 		// last column, right up against the viewport edge, so the popover's
@@ -668,7 +704,15 @@ class TaxJarTransactionSync {
 		$(document).on("click.taxjarSyncPop", () => this._hide_sync_popover());
 	}
 
-	_hide_sync_popover() {
+	// A delay only ever postpones the hide. Every other caller wants the
+	// popover gone now, and _show_sync_popover leads with one, so a pending
+	// timer never outlives the popover it was started for.
+	_hide_sync_popover(delay) {
+		clearTimeout(this._pop_timer);
+		if (delay) {
+			this._pop_timer = setTimeout(() => this._hide_sync_popover(), delay);
+			return;
+		}
 		if (this._active_pop) {
 			this._active_pop.remove();
 			this._active_pop = null;

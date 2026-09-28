@@ -431,7 +431,7 @@ describe("what the preview reads off the invoice", () => {
 		expect(text).toContain("2026-08-14");
 		expect(text).toContain("USD 4820.00");
 		expect(text).toContain("USD 312.30");
-		expect(text).toContain("TaxJar Status");
+		expect(text).toContain("Sync Status");
 		expect(text).toContain("Synced");
 	});
 
