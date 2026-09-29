@@ -17598,6 +17598,102 @@ class TestUninstall(UnitTestCase):
 		self.assertEqual(deleter.call_args[0][:2], ("Custom HTML Block", GUIDED_SETUP_ALERT_BLOCK))
 
 
+# ── Disable / Enable ─────────────────────────────────────────────────────────
+
+
+class TestAppToggle(UnitTestCase):
+	"""Disabling the app has to take its marks off the doctypes it does not own.
+
+	A disabled app keeps its schema and its data, so nothing removes the taxjar_*
+	fields from Sales Invoice, or un-hides ERPNext's own exempt_from_sales_tax
+	checkbox, unless this module does it.
+	"""
+
+	MOD = "taxjar_integration.app_toggle"
+
+	def test_hooks_are_wired(self):
+		from taxjar_integration import hooks
+
+		self.assertEqual(hooks.before_disable, "taxjar_integration.app_toggle.before_disable")
+		self.assertEqual(hooks.after_enable, "taxjar_integration.app_toggle.after_enable")
+
+	def test_the_other_two_hooks_stay_undeclared(self):
+		"""Frappe offers four. This app has work for two, and an empty hook is a
+		function a later reader has to prove does nothing."""
+		from taxjar_integration import hooks
+
+		self.assertFalse(hasattr(hooks, "after_disable"))
+		self.assertFalse(hasattr(hooks, "before_enable"))
+
+	def test_disable_hides_and_enable_shows_the_same_rows(self):
+		from taxjar_integration import app_toggle
+
+		payload = {"Custom Field": [{"dt": "Item", "fieldname": "x"}]}
+
+		with patch(f"{self.MOD}.get_customizations", return_value=payload), patch(
+			f"{self.MOD}.hide_customizations"
+		) as hide, patch(f"{self.MOD}.unhide_customizations") as unhide:
+			app_toggle.before_disable()
+			app_toggle.after_enable()
+
+		hide.assert_called_once_with(payload)
+		unhide.assert_called_once_with(payload)
+
+	def test_every_filter_names_a_doctype_and_a_field(self):
+		"""The rule frappe.custom enforces: a filter without a doctype name would
+		reach every other app's rows on the same table. Read from frappe, so a key
+		renamed there fails here rather than at disable time."""
+		from frappe.custom import CUSTOMIZATION_DOCTYPES
+
+		from taxjar_integration.app_toggle import get_customizations
+
+		customizations = get_customizations()
+		self.assertTrue(customizations)
+
+		for doctype, rows in customizations.items():
+			target_key = CUSTOMIZATION_DOCTYPES[doctype]
+			self.assertTrue(rows, f"{doctype} has no rows")
+			for filters in rows:
+				self.assertIsInstance(filters.get(target_key), str)
+				# and the field, so one filter cannot hide a whole doctype's fields
+				self.assertTrue(filters.get("fieldname") or filters.get("field_name"))
+
+	def test_the_lists_are_the_ones_install_writes_from(self):
+		"""One source of truth. A field added to get_custom_fields(), or a setter
+		added to _PROPERTY_SETTERS, is hidden on disable without a second edit."""
+		from taxjar_integration.app_toggle import get_customizations
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			get_custom_fields,
+		)
+		from taxjar_integration.uninstall import _PROPERTY_SETTERS
+
+		customizations = get_customizations()
+
+		self.assertEqual(
+			len(customizations["Custom Field"]),
+			sum(len(fields) for fields in get_custom_fields().values()),
+		)
+		self.assertEqual(len(customizations["Property Setter"]), len(_PROPERTY_SETTERS))
+		self.assertIn(
+			{"doc_type": "Sales Invoice", "field_name": "return_against", "property": "no_copy"},
+			customizations["Property Setter"],
+		)
+
+	def test_it_gives_the_same_result_on_every_run(self):
+		"""bench migrate runs before_disable again for every disabled app, so the
+		payload must not depend on what an earlier run did."""
+		from taxjar_integration.app_toggle import get_customizations
+
+		self.assertEqual(get_customizations(), get_customizations())
+
+	def test_product_tax_category_permissions_stay_out(self):
+		"""add_permissions() only touches this app's own doctype, which frappe
+		conceals whole while the app is off."""
+		from taxjar_integration.app_toggle import get_customizations
+
+		self.assertNotIn("Custom DocPerm", get_customizations())
+
+
 # ── Company deletion ─────────────────────────────────────────────────────────
 
 

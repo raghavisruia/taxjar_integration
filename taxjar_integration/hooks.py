@@ -106,6 +106,16 @@ after_migrate = ["taxjar_integration.install.after_migrate"]
 before_uninstall = "taxjar_integration.uninstall.before_uninstall"
 after_uninstall = "taxjar_integration.uninstall.after_uninstall"
 
+# Disable / Enable
+# ----------------
+
+# A disabled app keeps its schema and its data, so the custom fields and property
+# setters this app wrote onto core doctypes stay live unless something hides them.
+# Frappe offers four hooks here; these two are the pair its hooks.md names for that
+# job, and the other two have no work for this app. See app_toggle.py.
+before_disable = "taxjar_integration.app_toggle.before_disable"
+after_enable = "taxjar_integration.app_toggle.after_enable"
+
 # Desk Notifications
 # ------------------
 # See frappe.core.notifications.get_notification_config
