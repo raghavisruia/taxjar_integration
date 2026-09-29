@@ -1460,14 +1460,6 @@ def set_sales_tax(doc, method):
 
 	company_config = scope.config
 
-	is_exempt, exempt_reason = check_sales_tax_exemption(doc, company_config)
-	if is_exempt:
-		_set_tax_status_fields(doc,
-			customer_taxable=False, customer_reason=exempt_reason)
-		log_taxjar_call(action="tax_for_order", status="skipped",
-			error="Document or customer is exempt from sales tax", context=_ctx)
-		return
-
 	if not doc.shipping_address_name and not doc.customer_address:
 		# Degrade rather than block. Nothing has been calculated or filed at save
 		# time, so a half-built draft with no address yet is not wrong - it is
@@ -2222,44 +2214,6 @@ def check_for_nexus(doc, tax_dict):
 		return False
 
 	return True
-
-
-def check_sales_tax_exemption(doc, company_config):
-	"""Return (is_exempt, reason) tuple. Removes TaxJar rows if exempt.
-
-	State-specific exemptions (via TaxJar Customer API exempt_regions) are NOT
-	handled here — they flow through to TaxJar via customer_id in the API payload.
-	"""
-	doc_exempt = hasattr(doc, "exempt_from_sales_tax") and doc.exempt_from_sales_tax
-
-	customer_name = _get_customer_name(doc)
-	customer_exempt = False
-	exemption_type = None
-	if not doc_exempt and customer_name:
-		fields = [
-			f for f in ("exempt_from_sales_tax", "taxjar_exemption_type")
-			if frappe.db.has_column("Customer", f)
-		]
-		if fields:
-			values = frappe.db.get_value(
-				"Customer", customer_name, fields, as_dict=True, cache=True
-			) or {}
-			customer_exempt = values.get("exempt_from_sales_tax")
-			if customer_exempt:
-				exemption_type = values.get("taxjar_exemption_type")
-
-	if doc_exempt:
-		_remove_taxjar_rows(doc, company_config)
-		return True, "Document is marked exempt from sales tax"
-
-	if customer_exempt:
-		_remove_taxjar_rows(doc, company_config)
-		reason = "Customer is exempt"
-		if exemption_type:
-			reason = f"Customer is exempt ({exemption_type})"
-		return True, reason
-
-	return False, None
 
 
 def _get_customer_exemption_type(doc):

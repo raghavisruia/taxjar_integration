@@ -704,11 +704,11 @@ def _transaction_exemption_fields():
 	after Shipping Rule, the reason Select after Incoterm - which put a question
 	and its answer in different columns of an unrelated section.
 
-	Unlike ERPNext's own regional exempt_from_sales_tax checkbox this replaces
-	(see hide_legacy_exempt_from_sales_tax()), ticking this one does NOT skip
-	the TaxJar API call - exemption_type is sent in the tax_for_order/
-	create_order payload so TaxJar computes and records the exemption itself
-	(see _get_effective_exemption() in taxjar_integration.py).
+	This replaces ERPNext's own regional exempt_from_sales_tax checkbox (see
+	hide_legacy_exempt_from_sales_tax()). Ticking it does not skip the TaxJar
+	API call - exemption_type is sent in the tax_for_order/create_order payload
+	so TaxJar computes and records the exemption itself (see
+	_get_effective_exemption() in taxjar_integration.py).
 	"""
 	return [
 		dict(
@@ -1169,9 +1169,8 @@ def hide_legacy_exempt_from_sales_tax():
 	Customer exemption is now managed at the Customer master level
 	(taxjar_exemption_type) and, per-transaction, via taxjar_transaction_exempt
 	- both of which actually reach TaxJar's API, unlike this blunt local-only
-	checkbox. The field itself is still read by check_sales_tax_exemption() as
-	a safety net for any already-set old records; only hidden here so nobody
-	sets it fresh once TaxJar is installed.
+	checkbox. Nothing in this app reads it. It is hidden so nobody ticks a box
+	that no longer does anything.
 
 	Written unconditionally, without first checking that the column exists.
 	ERPNext only adds the field once a Company's country is United States, so on

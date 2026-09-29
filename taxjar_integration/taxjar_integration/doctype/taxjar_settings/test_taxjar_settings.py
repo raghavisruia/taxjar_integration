@@ -47,7 +47,6 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_validate_address_with_taxjar,
 	check_for_nexus,
 	classify_taxjar_error,
-	check_sales_tax_exemption,
 	delete_customer_from_taxjar,
 	delete_transaction_from_taxjar,
 	delete_transaction_manual,
@@ -165,7 +164,6 @@ class _FakeDoc:
 		self.transaction_date = "2025-06-01"
 		self.net_total = 1000.0
 		self.total = 1000.0
-		self.exempt_from_sales_tax = 0
 		self.customer = "_Test Customer"
 		self.shipping_address_name = "Test Address"
 		self.customer_address = None
@@ -1345,7 +1343,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -1370,7 +1367,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -1403,7 +1399,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value=tax_dict), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -1427,7 +1422,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -1439,10 +1433,34 @@ class TestSetSalesTax(UnitTestCase):
 		self.assertEqual(doc.taxjar_customer_taxable, 1)
 		self.assertEqual(doc.taxjar_customer_taxable_reason, "Taxable")
 
+	def test_legacy_exempt_from_sales_tax_does_not_skip_taxjar(self):
+		"""ERPNext's own exempt_from_sales_tax checkbox is hidden and ignored.
+		A document or customer that carries it is still priced by TaxJar."""
+		doc = _make_doc(taxes=[])
+		doc.exempt_from_sales_tax = 1
+
+		tax_data = MagicMock()
+		tax_data.amount_to_collect = 85.0
+		tax_data.breakdown.line_items = []
+		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data) as mock_request, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_customer_exemption_type", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("2026-01-01 00:00:00")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.cache", return_value=_no_cache()):
+			set_sales_tax(doc, None)
+
+		mock_request.assert_called_once()
+		self.assertEqual(doc.taxjar_customer_taxable, 1)
+
 	def test_customer_taxable_status_reflects_exemption_type_even_when_tax_is_computed(self):
 		"""Regression guard: a customer with a TaxJar exemption_type set
-		(Wholesale/Government/Other) but without the blunt exempt_from_sales_tax
-		checkbox still reaches the TaxJar API call - region-scoped exemption is
+		(Wholesale/Government/Other) still reaches the TaxJar API call - region-scoped exemption is
 		TaxJar's own job via customer_id, not replicated here. Previously the
 		status matrix hardcoded "Is the customer taxable? Yes" regardless of
 		this, even when the customer's own master data said otherwise. The tax
@@ -1458,7 +1476,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -1495,7 +1512,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch(f"{mod}.frappe.db.get_single_value", return_value=1), \
 		     patch(f"{mod}.get_region", return_value="United States"), \
 		     patch(f"{mod}.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch(f"{mod}.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch(f"{mod}.get_tax_data", return_value={"dummy": True}), \
 		     patch(f"{mod}.check_for_nexus", return_value=True), \
 		     patch(f"{mod}.validate_tax_request", return_value=tax_data), \
@@ -1519,7 +1535,6 @@ class TestSetSalesTax(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=company_config), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"to_state": "TX", "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)):
 			set_sales_tax(doc, None)
@@ -1570,7 +1585,6 @@ class TestSetSalesTaxCache(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", side_effect=_single_value), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data) as mock_validate, \
@@ -4345,65 +4359,6 @@ class TestGetTaxDataCustomerId(UnitTestCase):
 		self.assertEqual(result["exemption_type"], "government")
 
 
-# ── TaxJar Customer API — check_sales_tax_exemption ─────────────────────────
-
-
-class TestCheckSalesTaxExemptionUpdated(UnitTestCase):
-
-	def test_blanket_exempt_via_doc_flag(self):
-		"""Document-level exempt_from_sales_tax should return (True, reason) and zero tax."""
-		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Tax", 80.0)])
-		doc.exempt_from_sales_tax = 1
-		config = MagicMock(tax_account_head="Sales Tax - TC")
-		is_exempt, reason = check_sales_tax_exemption(doc, config)
-		self.assertTrue(is_exempt)
-		self.assertIn("exempt", reason.lower())
-		self.assertEqual(len([t for t in doc.taxes if t.account_head == "Sales Tax - TC"]), 0)
-
-	def test_blanket_exempt_via_customer(self):
-		"""Customer-level exempt_from_sales_tax should return (True, reason) and zero tax."""
-		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Tax", 80.0)])
-		doc.exempt_from_sales_tax = 0
-		config = MagicMock(tax_account_head="Sales Tax - TC")
-
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-		           side_effect=_scalar_get_value({"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"})):
-			is_exempt, reason = check_sales_tax_exemption(doc, config)
-
-		self.assertTrue(is_exempt)
-		self.assertIn("exempt", reason.lower())
-		self.assertEqual(len([t for t in doc.taxes if t.account_head == "Sales Tax - TC"]), 0)
-
-	def test_state_specific_exempt_returns_false(self):
-		"""Customer with exempt_regions but exempt_from_sales_tax=0 should NOT short-circuit."""
-		doc = _make_doc(taxes=[_make_tax_row("Sales Tax - TC", "Tax", 80.0)])
-		doc.exempt_from_sales_tax = 0
-		config = MagicMock(tax_account_head="Sales Tax - TC")
-
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-		           side_effect=_scalar_get_value({"exempt_from_sales_tax": 0, "taxjar_exemption_type": None})):
-			is_exempt, reason = check_sales_tax_exemption(doc, config)
-
-		self.assertFalse(is_exempt)
-		self.assertIsNone(reason)
-		self.assertEqual(len(doc.taxes), 1)
-
-	def test_quotation_for_lead_does_not_crash(self):
-		"""Quotation for Lead has no customer — exemption check should return (False, None) safely."""
-		doc = _make_doc()
-		doc.doctype = "Quotation"
-		doc.quotation_to = "Lead"
-		doc.party_name = "LEAD-001"
-		del doc.customer
-		doc.exempt_from_sales_tax = 0
-		config = MagicMock(tax_account_head="Sales Tax - TC")
-
-		is_exempt, reason = check_sales_tax_exemption(doc, config)
-		self.assertFalse(is_exempt)
-
-
 # ── TaxJar Customer API — _get_customer_exemption_type ──────────────────────
 
 
@@ -4424,10 +4379,8 @@ class _patch_all:
 
 class TestGetCustomerExemptionType(UnitTestCase):
 	"""_get_customer_exemption_type() feeds the "Is the customer taxable?" status
-	shown on the transaction (see set_sales_tax) - distinct from
-	check_sales_tax_exemption()'s hard-stop exempt_from_sales_tax check, this
-	fires for customers who only have taxjar_exemption_type set (the TaxJar-
-	native path). Region scoping lives in _customer_master_exemption(); these
+	shown on the transaction (see set_sales_tax), for customers with
+	taxjar_exemption_type set. Region scoping lives in _customer_master_exemption(); these
 	cases list no exempt regions, which means exempt everywhere - see
 	test_customer_exemption_is_region_scoped for the scoped cases."""
 
@@ -11826,7 +11779,6 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -11852,7 +11804,6 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 				with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -11880,7 +11831,6 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 				with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 				     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -11901,7 +11851,6 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
@@ -11926,7 +11875,6 @@ class TestSetSalesTaxBreakdown(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=company_config), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"to_state": "TX", "dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value(None)):
 			set_sales_tax(doc, None)
@@ -13654,28 +13602,6 @@ class TestCheckForNexusStatusFields(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value", side_effect=_scalar_get_value("NX-1")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock()):
 			self.assertTrue(check_for_nexus(doc, tax_dict))
-
-
-class TestExemptionReasonInTuple(UnitTestCase):
-
-	def test_customer_exempt_with_type(self):
-		doc = _make_doc()
-		doc.exempt_from_sales_tax = 0
-		config = MagicMock(tax_account_head="Sales Tax - TC")
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.has_column", return_value=True), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
-		           side_effect=_scalar_get_value({"exempt_from_sales_tax": 1, "taxjar_exemption_type": "Wholesale"})):
-			is_exempt, reason = check_sales_tax_exemption(doc, config)
-		self.assertTrue(is_exempt)
-		self.assertIn("Wholesale", reason)
-
-	def test_doc_exempt_reason(self):
-		doc = _make_doc()
-		doc.exempt_from_sales_tax = 1
-		config = MagicMock(tax_account_head="Sales Tax - TC")
-		is_exempt, reason = check_sales_tax_exemption(doc, config)
-		self.assertTrue(is_exempt)
-		self.assertIn("Document", reason)
 
 
 # ── Phase 1: Guided Setup page (get_setup_state / finish_setup) ───────────────
@@ -18183,7 +18109,6 @@ class TestScopeMatrixTaxCalculation(TaxJarTestCase):
 		tax_data.jurisdictions = MagicMock(state="CA", county="", city="")
 
 		with self.scope_patches(), \
-		     patch.object(module, "check_sales_tax_exemption", return_value=(False, None)), \
 		     patch.object(module, "get_tax_data", return_value={"to_country": "US", "to_state": "CA"}), \
 		     patch.object(module, "check_for_nexus", return_value=True), \
 		     patch.object(module, "validate_tax_request", return_value=tax_data), \
@@ -18866,7 +18791,6 @@ class TestDestinationRequirementMovedToSubmit(TaxJarTestCase):
 
 		doc = self._doc(US_CALC.name)
 		with self.scope_patches(), \
-		     patch.object(module, "check_sales_tax_exemption", return_value=(False, None)), \
 		     patch.object(module, "log_taxjar_call"):
 			module.set_sales_tax(doc, None)  # must not raise
 
@@ -18902,7 +18826,6 @@ class TestExportSalesAreRecordable(TaxJarTestCase):
 		doc.shipping_address_name = "ADDR-CA"
 
 		with self.scope_patches(), \
-		     patch.object(module, "check_sales_tax_exemption", return_value=(False, None)), \
 		     patch.object(module, "get_tax_data", return_value=None), \
 		     patch.object(module, "_destination_outside_coverage_reason",
 		                  return_value="Destination is in Canada, which TaxJar does not price"), \
@@ -20562,7 +20485,6 @@ class TestPerLineTaxWrite(UnitTestCase):
 		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_sales_tax_exemption", return_value=(False, None)), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_tax_data", return_value={"dummy": True}), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.check_for_nexus", return_value=True), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.validate_tax_request", return_value=tax_data), \
