@@ -260,7 +260,7 @@ class TaxJarNexusSummary {
 				frappe.ui.button({
 					icon: "refresh-cw",
 					variant: "outline",
-					title: opts.tooltip,
+					tooltip: opts.tooltip,
 					onclick: opts.onclick,
 				})
 			)
@@ -406,19 +406,27 @@ class TaxJarNexusSummary {
 	// Blank until a sync has actually happened - "Synced never" is noise next
 	// to a card that already says nothing has been fetched yet.
 	//
-	// comment_when() is prettyDate, which returns "" for any timestamp it works
-	// out to be in the future (pretty_date.js:21) - which is what a just-written
-	// row looks like whenever the site's System Settings timezone runs ahead of
-	// the browser's. The absolute date is the fallback rather than a blank.
+	// prettyDate returns "" for a timestamp on a later day than the browser's
+	// (pretty_date.js:21) - which is what a just-written row looks like once the
+	// site's System Settings timezone has passed midnight and the browser has
+	// not. The absolute date is the fallback rather than a blank.
+	//
+	// prettyDate is asked first, not comment_when(): comment_when() wraps the
+	// empty string in a <span>, so its result is never falsy.
 	//
 	// html(), not text(): comment_when() hands back a whole
 	// <span class="frappe-timestamp" title="<absolute date>"> element, not a
 	// bare string, so as text it renders as visible markup.
 	_render_synced($head, when) {
-		const relative = when
-			? frappe.datetime.comment_when(when) || taxjar_integration.format_last_synced(when)
-			: "";
-		$head.find(".taxjar-nexus-synced").html(relative ? __("Synced {0}", [relative]) : "");
+		let relative = "";
+		if (when) {
+			relative = frappe.datetime.prettyDate(when)
+				? frappe.datetime.comment_when(when)
+				: taxjar_integration.format_last_synced(when);
+		}
+		const $caption = $head.find(".taxjar-nexus-synced");
+		$caption.html(relative ? __("Synced {0}", [relative]) : "");
+		taxjar_integration.timestamp_tooltips($caption);
 	}
 
 	// ── syncs ──

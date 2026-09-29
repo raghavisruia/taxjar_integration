@@ -3518,14 +3518,20 @@ class TestNexusPage(UnitTestCase):
 		self.assertIn("refresh_product_tax_categories", js)
 
 	def test_synced_caption_falls_back_to_the_absolute_date(self):
-		"""comment_when() is prettyDate, which returns "" for anything it works
-		out to be in the future - which is what a just-written timestamp looks
-		like once System Settings' timezone runs ahead of the browser's. The
-		caption must not blank out there."""
+		"""prettyDate returns "" for a timestamp on a later day than the
+		browser's - which is what a just-written one looks like once System
+		Settings' timezone has passed midnight and the browser has not. The
+		caption must not blank out there.
+
+		The test is on prettyDate, not on comment_when(): comment_when() wraps
+		the "" in a <span>, so `comment_when(when) || fallback` never fell back
+		and left "Synced " with no time after it."""
 		js = self._read("taxjar_nexus.js")
 		fn = js.split("_render_synced($head, when) {")[1].split("\n\t}")[0]
-		self.assertIn("frappe.datetime.comment_when(when)", fn)
-		self.assertIn("|| taxjar_integration.format_last_synced(when)", fn)
+		self.assertIn("relative = frappe.datetime.prettyDate(when)", fn)
+		self.assertIn("? frappe.datetime.comment_when(when)", fn)
+		self.assertIn(": taxjar_integration.format_last_synced(when);", fn)
+		self.assertNotIn("comment_when(when) ||", fn)
 		self.assertIn('__("Synced {0}"', fn)
 
 	def test_synced_caption_is_set_as_html(self):
@@ -16053,9 +16059,11 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("var(--ink-green-7)", ok)
 		self.assertIn("var(--outline-green-3)", ok)
 		self.assertNotIn(".ts-cred-row .ts-card-remove { align-self", css)
-		# No hardcoded nudge: a margin tuned to the pill would be wrong for
-		# every other state the slot can hold.
-		self.assertNotIn("margin-bottom", css.split(".ts-card-remove {")[1].split("}")[0])
+		# The remove button is a ghost icon button from frappe.ui.button, so it
+		# takes its size, hover and disabled look from the component. A page
+		# rule of its own would bring back the hand-drawn circle.
+		self.assertIn('icon: "x", variant: "ghost"', tail)
+		self.assertNotIn(".ts-card-remove {", css)
 
 	def test_connect_token_field_has_no_per_field_description(self):
 		""""Leave blank to keep the saved token." was the extra description
@@ -21575,3 +21583,88 @@ class TestCustomerStatusWriteIsAlwaysRetried(UnitTestCase):
 
 		self.assertEqual([r[0] for r in recorded], ["Synced", "Failed"])
 		self.assertTrue(recorded[1][1]["retryable"])
+
+
+class TestNoNativeTitleTooltips(UnitTestCase):
+	"""Every hover hint in the app is the desk's own dark bubble, not the
+	browser's native title. The native one waits out a browser delay, never
+	opens on keyboard focus, and reads in the OS type, not the desk's."""
+
+	def _app_js(self):
+		import os
+		root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+		sources = {}
+		for base in (os.path.join(root, "page"), os.path.join(root, "..", "public", "js")):
+			for dirpath, _, filenames in os.walk(base):
+				if f"{os.sep}dist" in dirpath:
+					continue
+				for name in filenames:
+					if name.endswith(".js"):
+						with open(os.path.join(dirpath, name)) as f:
+							sources[name] = f.read()
+		return sources
+
+	def _page_js(self, page):
+		return self._app_js()[f"{page}.js"]
+
+	def test_no_title_attribute_in_markup_except_the_video_frame(self):
+		"""An iframe's title is the frame's name for a screen reader, and the
+		browser shows no bubble for it."""
+		for name, js in self._app_js().items():
+			for line in js.splitlines():
+				if 'title="' in line and not line.lstrip().startswith("//"):
+					self.assertIn('__("TaxJar walkthrough")', line, name)
+				self.assertNotIn('attr("title"', line, name)
+				self.assertNotIn('setAttribute("title"', line, name)
+
+	def test_setup_page_buttons_use_tooltip_not_title(self):
+		js = self._page_js("taxjar_setup")
+		for text in (
+			'__("Verified. Click to test again.")',
+			'__("Found by TaxJar. Click to check again.")',
+			'__("Fetch from TaxJar")',
+			'__("Remove")',
+		):
+			self.assertNotIn(f"title: {text}", js)
+			self.assertIn(f"tooltip: {text}", js)
+
+	def test_remove_button_binds_its_bubble_on_the_element(self):
+		"""The markup form of frappe.ui.button names the button from tooltip
+		but cannot bind the bubble - there is no element yet."""
+		js = self._page_js("taxjar_setup")
+		self.assertIn('frappe.ui.tooltip($remove, { text: __("Remove") })', js)
+
+	def test_status_badge_keeps_the_tooltip_out_of_the_badge(self):
+		"""frappe.ui.badge turns a title into a native tooltip and has no
+		tooltip option, so the helper must not hand the tooltip on to it."""
+		js = self._page_js("taxjar_setup")
+		fn = js.split("_build_status_badge(opts, onactivate) {")[1].split("\n\t}\n")[0]
+		self.assertIn("const { tooltip, ...badge_opts } = opts;", fn)
+		self.assertIn("frappe.ui.badge(badge_opts)", fn)
+		self.assertIn("frappe.ui.tooltip($badge, { text: tooltip })", fn)
+
+	def test_nexus_refresh_buttons_use_tooltip_not_title(self):
+		js = self._page_js("taxjar_nexus")
+		self.assertIn("tooltip: opts.tooltip,", js)
+		self.assertNotIn("title: opts.tooltip", js)
+
+	def test_synced_captions_move_the_timestamp_title_into_a_bubble(self):
+		"""comment_when() stamps a native title on its span. Both captions
+		hand the span to the shared helper after they render it."""
+		setup = self._page_js("taxjar_setup")
+		fn = setup.split("_render_last_sync(when) {")[1].split("\n\t}\n")[0]
+		self.assertIn("taxjar_integration.timestamp_tooltips($caption);", fn)
+		# Same fallback as the Nexus page: a blank prettyDate would otherwise
+		# leave "Synced " with no time after it.
+		self.assertIn("relative = frappe.datetime.prettyDate(when)", fn)
+		self.assertIn(": taxjar_integration.format_last_synced(when);", fn)
+
+		nexus = self._page_js("taxjar_nexus")
+		fn = nexus.split("_render_synced($head, when) {")[1].split("\n\t}\n")[0]
+		self.assertIn("taxjar_integration.timestamp_tooltips($caption);", fn)
+
+		utils = self._app_js()["taxjar_utils.js"]
+		helper = utils.split("taxjar_integration.timestamp_tooltips = function ($el) {")[1].split("\n};")[0]
+		self.assertIn('.frappe-timestamp[title]', helper)
+		self.assertIn('span.removeAttribute("title");', helper)
+		self.assertIn("frappe.ui.tooltip(span, { text })", helper)

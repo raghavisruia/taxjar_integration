@@ -116,16 +116,6 @@
 }
 .taxjar-setup .ts-card-h b { font-size: var(--text-md); }
 .taxjar-setup .ts-card-h-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.taxjar-setup .ts-card-remove {
-	border: 1px solid var(--border-color); background: var(--card-bg); color: var(--text-muted);
-	width: 22px; height: 22px; line-height: 1; border-radius: 50%; cursor: pointer;
-	font-size: 15px; display: inline-flex; align-items: center; justify-content: center; padding: 0;
-}
-.taxjar-setup .ts-card-remove:hover { color: var(--text-color); border-color: var(--text-color); }
-/* Disabled while it's the only credential row left (see _sync_remove_buttons) -
-   at least one company/token row must always remain in the wizard. */
-.taxjar-setup .ts-card-remove:disabled { opacity: 0.35; cursor: not-allowed; }
-.taxjar-setup .ts-card-remove:disabled:hover { color: var(--text-muted); border-color: var(--border-color); }
 .taxjar-setup .ts-card-b { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 /* Bootstrap's default .form-group margin-bottom (15px) would otherwise stack
    on top of the flex gap above, doubling the visual gap between stacked

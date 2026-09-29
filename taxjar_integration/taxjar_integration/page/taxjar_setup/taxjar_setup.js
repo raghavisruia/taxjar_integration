@@ -656,7 +656,9 @@ class TaxJarSetup {
 				<div class="ts-field-token"></div>
 				<div class="ts-cred-tail">
 					<div class="ts-cred-action"></div>
-					<button class="ts-card-remove" title="${__("Remove")}">&times;</button>
+					${frappe.ui.button.html({
+						icon: "x", variant: "ghost", tooltip: __("Remove"), css_class: "ts-card-remove",
+					})}
 				</div>
 				<div class="ts-cred-error"></div>
 			</div>
@@ -754,7 +756,11 @@ class TaxJarSetup {
 		});
 
 		this._render_cred_action(entry);
-		$card.find(".ts-card-remove").on("click", () => this._remove_credential_card(entry, cred));
+		// The markup form of frappe.ui.button only names the button from
+		// `tooltip`; the bubble itself is bound on the element, here.
+		const $remove = $card.find(".ts-card-remove");
+		if (frappe.ui.tooltip) frappe.ui.tooltip($remove, { text: __("Remove") });
+		$remove.on("click", () => this._remove_credential_card(entry, cred));
 		this._sync_remove_buttons();
 
 		// Re-verify a previously-saved token every time this step is opened,
@@ -810,7 +816,7 @@ class TaxJarSetup {
 			// different height and radius in a row of three buttons.
 			$action.append(frappe.ui.button({
 				label: __("Connected"), icon: "circle-check", variant: "outline",
-				css_class: "ts-cred-ok", title: __("Verified. Click to test again."),
+				css_class: "ts-cred-ok", tooltip: __("Verified. Click to test again."),
 				onclick: () => this._test_connection(entry),
 			}));
 		} else if (entry.lastError) {
@@ -834,7 +840,9 @@ class TaxJarSetup {
 	// deliberately non-interactive markup, so the click/keyboard wiring that
 	// makes it re-checkable lives here instead. Only the success state uses it:
 	// a failure is an actionable Retry button (see _render_cred_action), not a
-	// status. The title says clicking re-tests, which the word alone does not.
+	// status. The tooltip says clicking re-tests, which the word alone does not.
+	// frappe.ui.badge has no tooltip option, only a native title, so the
+	// tooltip is taken out of `opts` and bound here as the desk's own bubble.
 	//
 	// One caller left: the Address step's Valid badge (see
 	// _render_address_action). The Connect step used this too until its verified
@@ -842,8 +850,10 @@ class TaxJarSetup {
 	// `onactivate` stays a parameter rather than a hardcoded call so the helper
 	// does not name the one check it happens to serve.
 	_build_status_badge(opts, onactivate) {
-		const $badge = frappe.ui.badge(opts);
+		const { tooltip, ...badge_opts } = opts;
+		const $badge = frappe.ui.badge(badge_opts);
 		$badge.attr({ role: "button", tabindex: 0 }).css("cursor", "pointer");
+		if (tooltip && frappe.ui.tooltip) frappe.ui.tooltip($badge, { text: tooltip });
 		$badge.on("click", () => onactivate());
 		$badge.on("keydown", (e) => {
 			if (e.key === "Enter" || e.key === " ") {
@@ -1424,7 +1434,7 @@ class TaxJarSetup {
 			// working out which is a status and which is an action.
 			$action.append(this._build_status_badge({
 				label: __("Valid"), theme: "green", icon: "circle-check", size: "lg",
-				title: __("Found by TaxJar. Click to check again."),
+				tooltip: __("Found by TaxJar. Click to check again."),
 			}, () => this._verify_address(entry)));
 		} else if (entry.verifyError) {
 			$action.append(frappe.ui.button({
@@ -1825,7 +1835,7 @@ class TaxJarSetup {
 
 		this.$body.find(".ts-fetch-mount").append(frappe.ui.button({
 			icon: "refresh-cw", variant: "outline",
-			title: __("Fetch from TaxJar"),
+			tooltip: __("Fetch from TaxJar"),
 			onclick: () => this._fetch_nexus(),
 		}));
 		this._render_last_sync(s.nexus_last_synced);
@@ -1961,10 +1971,22 @@ class TaxJarSetup {
 	// Blank until a sync has actually happened - "Synced never" is noise on a
 	// first run, and the step fetches on open anyway, so the blank lasts as long
 	// as it takes _fetch_nexus() to write "Syncing…" over it.
+	//
+	// The absolute date stands in when prettyDate has nothing to say: it
+	// returns "" for a timestamp on a later day than the browser's, which a
+	// just-written one is once the site's timezone has passed midnight and the
+	// browser has not. comment_when() would wrap that "" in a span and leave
+	// "Synced " with no time after it.
 	_render_last_sync(when) {
-		this.$body.find(".ts-lastsync").html(
-			when ? __("Synced {0}", [frappe.datetime.comment_when(when)]) : ""
-		);
+		let relative = "";
+		if (when) {
+			relative = frappe.datetime.prettyDate(when)
+				? frappe.datetime.comment_when(when)
+				: taxjar_integration.format_last_synced(when);
+		}
+		const $caption = this.$body.find(".ts-lastsync");
+		$caption.html(relative ? __("Synced {0}", [relative]) : "");
+		taxjar_integration.timestamp_tooltips($caption);
 	}
 
 	_render_syncing() {

@@ -2937,6 +2937,18 @@ taxjar_integration.format_last_synced = function (value) {
 	return value ? frappe.datetime.str_to_user(value) : __("Never");
 };
 
+// comment_when() puts the absolute date in a native title on its span. This
+// moves it into the desk's own bubble, so the date on hover matches every
+// other tooltip in the app. refresh_when() rewrites only the span's text each
+// minute, so the title does not come back.
+taxjar_integration.timestamp_tooltips = function ($el) {
+	$el.find(".frappe-timestamp[title]").each((_, span) => {
+		const text = span.getAttribute("title");
+		span.removeAttribute("title");
+		if (frappe.ui.tooltip) frappe.ui.tooltip(span, { text });
+	});
+};
+
 // Espresso's own component CSS (.es-badge, and the shared radius/spacing
 // tokens the classes below key off) is already loaded on every desk page -
 // only the card/table layout specific to this grouped-by-company list needs
