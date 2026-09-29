@@ -15621,7 +15621,7 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn("_set_next_gated", js)
 		self.assertIn("this._nextGated", js)
 		self.assertIn(
-			'__("Test the connection for {0} (or remove it) before continuing.", [untested.company])', js
+			'__("Please validate API Key for {0}.", [untested.company])', js
 		)
 		# _on_next() must check the gate before anything else, so a click while
 		# gated always shows the message rather than silently trying to save.

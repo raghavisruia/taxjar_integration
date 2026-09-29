@@ -995,7 +995,7 @@ class TaxJarSetup {
 		const untested = withCompany.find((c) => !c.tested);
 		this._set_next_gated(
 			!!untested,
-			untested ? __("Test the connection for {0} (or remove it) before continuing.", [untested.company]) : ""
+			untested ? __("Please validate API Key for {0}.", [untested.company]) : ""
 		);
 	}
 
