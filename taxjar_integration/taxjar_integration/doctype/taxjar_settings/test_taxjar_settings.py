@@ -9735,12 +9735,12 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		self.assertIn('description: __("Set exemption to stop collecting sales tax")', summary_fn)
 
 	def test_the_empty_state_leads_with_manage_exemption(self):
-		"""Solid is the one primary action on the card - the docs link beside
-		it is the secondary, so it stays a link rather than a second button."""
+		"""Manage Exemption is a subtle button, not a solid one - the empty
+		state stays quiet. The docs link beside it stays a link."""
 		js = self._read_js()
 		summary_fn = js.split("function render_exemption_summary(frm) {")[1].split("\nfunction ")[0]
 		manage = summary_fn.split('label: __("Manage Exemption")')[1].split("},")[0]
-		self.assertIn('variant: "solid"', manage)
+		self.assertIn('variant: "subtle"', manage)
 		self.assertIn("taxjar-manage-exemption-btn", manage)
 
 	def test_the_empty_state_links_to_the_manual(self):

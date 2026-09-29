@@ -171,10 +171,10 @@ describe("no exemption configured yet", () => {
 		]);
 	});
 
-	it("makes Manage Exemption the primary one", () => {
+	it("keeps Manage Exemption a subtle button", () => {
 		render();
 		const [manage] = empty_state_opts.actions;
-		expect(manage.variant).toBe("solid");
+		expect(manage.variant).toBe("subtle");
 		// No href: it opens the dialog rather than navigating anywhere.
 		expect(manage.href).toBeUndefined();
 	});

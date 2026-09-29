@@ -198,7 +198,7 @@ function render_exemption_summary(frm) {
 				actions: [
 					{
 						label: __("Manage Exemption"),
-						variant: "solid",
+						variant: "subtle",
 						// The gear, not a plus: the button opens the dialog
 						// that sets the exemption type and its regions. A plus
 						// says a row is about to be added to a list.
