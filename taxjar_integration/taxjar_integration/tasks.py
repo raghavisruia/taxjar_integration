@@ -2,8 +2,10 @@ import frappe
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_MAX_SYNC_RETRIES,
+	_allowed_companies_by_customer,
 	_customer_sync_companies,
 	_is_taxjar_enabled,
+	_restrict_companies,
 	company_scope,
 	get_catalogue_client,
 	recover_stuck_customer_syncs,
@@ -134,9 +136,10 @@ def retry_failed_taxjar_customer_syncs():
 	# United-States test company_scope() applies - so the cron could re-send a
 	# customer for a company the save hook itself would never have queued.
 	companies = _customer_sync_companies()
+	allowed = _allowed_companies_by_customer(failed_customers)
 
 	for customer_name in failed_customers:
-		for company in companies:
+		for company in _restrict_companies(companies, allowed[customer_name]):
 			frappe.enqueue(
 				"taxjar_integration.taxjar_integration.taxjar_integration.sync_customer_to_taxjar",
 				customer_name=customer_name,

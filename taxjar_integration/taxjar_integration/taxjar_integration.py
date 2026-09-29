@@ -3745,6 +3745,14 @@ def resync_customer(customer_name: str, company: str):
 	below stays un-whitelisted so enqueue callers are unaffected.
 	"""
 	frappe.has_permission("Customer", "write", doc=customer_name, throw=True)
+	allowed = _allowed_companies_by_customer([customer_name])[customer_name]
+	if not _restrict_companies([company], allowed):
+		frappe.throw(
+			_("Customer {0} is restricted to other companies, so it is not sent to the TaxJar account of {1}.").format(
+				frappe.bold(customer_name), frappe.bold(company)
+			),
+			title=_("Company Not Allowed"),
+		)
 	return sync_customer_to_taxjar(customer_name, company=company)
 
 
@@ -3771,6 +3779,17 @@ def sync_customer_to_taxjar(customer_name, company=None):
 		return
 
 	customer_doc = frappe.get_doc("Customer", customer_name)
+	if company and not _restrict_companies([company], _allowed_companies_of(customer_doc)):
+		# Queued before a save took this company off the customer's list. That
+		# save queued its own jobs, so this one has nothing left to do.
+		log_taxjar_call(
+			action="sync_customer",
+			status="skipped",
+			error="Customer is restricted to other companies",
+			context={"doctype": "Customer", "name": customer_name, "company": company},
+		)
+		return
+
 	exemption_type = _map_exemption_type(customer_doc.get("taxjar_exemption_type"))
 
 	exempt_regions = [
@@ -3999,6 +4018,10 @@ def _has_taxjar_fields_changed(doc):
 	if doc.has_value_changed("customer_name"):
 		return True
 
+	# A newly allowed company needs the customer; a dropped one needs it removed.
+	if _has_restriction_changed(doc):
+		return True
+
 	previous = doc.get_doc_before_save()
 	if not previous:
 		return bool(doc.get("taxjar_exempt_regions"))
@@ -4154,13 +4177,27 @@ def on_customer_update(doc, method):
 			_set_customer_sync_status(doc.name, "")
 		return
 
-	companies = _customer_sync_companies()
-	if not companies:
+	taxjar_companies = _customer_sync_companies()
+	if not taxjar_companies:
 		if doc.get("taxjar_customer_sync_status"):
 			_set_customer_sync_status(doc.name, "")
 		frappe.msgprint(
 			_("No company on this site is set up for TaxJar, so this customer's "
 			  "exemption details were saved but not sent to TaxJar."),
+			indicator="orange",
+			alert=True,
+		)
+		return
+
+	_remove_from_dropped_companies(doc, taxjar_companies)
+
+	companies = _restrict_companies(taxjar_companies, _allowed_companies_of(doc))
+	if not companies:
+		if doc.get("taxjar_customer_sync_status"):
+			_set_customer_sync_status(doc.name, "")
+		frappe.msgprint(
+			_("None of the companies this customer is restricted to uses TaxJar, so this "
+			  "customer's exemption details were saved but not sent to TaxJar."),
 			indicator="orange",
 			alert=True,
 		)
@@ -4192,6 +4229,86 @@ def _customer_sync_companies(settings=None):
 		for config in (settings.company_config or [])
 		if company_scope(config.company, config=config).uses_taxjar
 	]
+
+
+def _allowed_companies_of(doc):
+	"""The companies a customer is restricted to, or None when it is open to all.
+
+	This is ERPNext's "Restrict to Companies" on the Customer. A restricted
+	customer syncs only to the TaxJar companies in its list.
+	"""
+	if not doc.get("restrict_to_companies"):
+		return None
+	return {row.company for row in doc.get("allowed_companies") or []}
+
+
+def _allowed_companies_by_customer(customer_names):
+	"""_allowed_companies_of() for many customers, in two queries at most."""
+	allowed = dict.fromkeys(customer_names)
+	# An ERPNext without company restrictions has no such column to filter on.
+	if not customer_names or not frappe.get_meta("Customer").has_field("restrict_to_companies"):
+		return allowed
+
+	restricted = frappe.get_all(
+		"Customer",
+		filters={"name": ("in", list(customer_names)), "restrict_to_companies": 1},
+		pluck="name",
+	)
+	if not restricted:
+		return allowed
+
+	for name in restricted:
+		allowed[name] = set()
+	for row in frappe.get_all(
+		"Company Restriction",
+		filters={"parenttype": "Customer", "parentfield": "allowed_companies", "parent": ("in", restricted)},
+		fields=["parent", "company"],
+	):
+		allowed[row.parent].add(row.company)
+	return allowed
+
+
+def _restrict_companies(companies, allowed):
+	"""Keep the companies a customer allows. None from _allowed_companies_of() keeps all."""
+	if allowed is None:
+		return list(companies)
+	return [company for company in companies if company in allowed]
+
+
+def _has_restriction_changed(doc):
+	"""True when this save changed which companies the customer is open to."""
+	if doc.has_value_changed("restrict_to_companies"):
+		return True
+	if not doc.get("restrict_to_companies"):
+		return False
+	previous = doc.get_doc_before_save()
+	return bool(previous) and _allowed_companies_of(previous) != _allowed_companies_of(doc)
+
+
+def _remove_from_dropped_companies(doc, taxjar_companies):
+	"""Delete the customer from each TaxJar account this save took it out of.
+
+	The customer record stays in a company's TaxJar account after the company
+	leaves the allowed list, unless something removes it. The delete waits for
+	the commit, so a save that rolls back removes nothing.
+	"""
+	taxjar_customer_id = doc.get("taxjar_customer_id")
+	previous = doc.get_doc_before_save()
+	if not taxjar_customer_id or not previous or not _has_restriction_changed(doc):
+		return
+
+	before = set(_restrict_companies(taxjar_companies, _allowed_companies_of(previous)))
+	after = set(_restrict_companies(taxjar_companies, _allowed_companies_of(doc)))
+	for company in sorted(before - after):
+		frappe.enqueue(
+			"taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar",
+			taxjar_customer_id=taxjar_customer_id,
+			company=company,
+			queue="short",
+			job_id=f"remove_customer_taxjar_{doc.name}_{company}_{frappe.generate_hash(length=8)}",
+			enqueue_after_commit=True,
+			now=frappe.flags.in_test,
+		)
 
 
 def _enqueue_customer_sync(customer_name, company):

@@ -14,10 +14,12 @@ from taxjar_integration.taxjar_integration.pagination import (
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_QUEUED_STUCK_MINUTES,
 	_EXEMPTION_TYPES_REQUIRING_REGIONS,
+	_allowed_companies_by_customer,
 	_customer_sync_companies,
 	_customer_sync_status_fields,
 	_enqueue_customer_sync,
 	_publish_customer_update,
+	_restrict_companies,
 )
 
 # A representative TaxJar custom field; if this column is absent the fields were
@@ -505,6 +507,8 @@ def bulk_sync_to_taxjar(customers: list | str):
 			title=_("TaxJar Not Configured"),
 		)
 
+	allowed = _allowed_companies_by_customer(customers)
+
 	queued = 0
 	for name in customers:
 		# One row, one read: two get_value calls for two columns of the same row
@@ -515,11 +519,17 @@ def bulk_sync_to_taxjar(customers: list | str):
 		if not fields.get("taxjar_customer_id") and not fields.get("taxjar_exemption_type"):
 			continue
 
+		# A customer restricted to companies without TaxJar has nowhere to go,
+		# so it must not be marked Queued either.
+		customer_companies = _restrict_companies(companies, allowed[name])
+		if not customer_companies:
+			continue
+
 		frappe.db.set_value(
 			"Customer", name, _customer_sync_status_fields("Queued"), update_modified=False
 		)
 		_publish_customer_update(name, "Queued")
-		for company in companies:
+		for company in customer_companies:
 			# No deduplicate here, for the reason spelled out in
 			# _enqueue_customer_sync(): a dropped enqueue leaves the "Queued"
 			# written just above with no job to clear it, and this button is

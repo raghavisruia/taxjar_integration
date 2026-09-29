@@ -9643,6 +9643,7 @@ class TestRetryFailedCustomerSyncs(UnitTestCase):
 		     patch("taxjar_integration.taxjar_integration.tasks.recover_stuck_customer_syncs", return_value=[]), \
 		     patch("taxjar_integration.taxjar_integration.tasks._customer_sync_companies", return_value=["Test Co"]), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_all", return_value=["CUST-001", "CUST-002"]), \
+		     patch("taxjar_integration.taxjar_integration.tasks._allowed_companies_by_customer", side_effect=dict.fromkeys), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.enqueue") as mock_enqueue:
 			retry_failed_taxjar_customer_syncs()
 
@@ -10162,7 +10163,9 @@ class TestHasTaxjarFieldsChangedCustomerName(UnitTestCase):
 		previous.get.return_value = [old_region]
 		doc.get_doc_before_save.return_value = previous
 		new_region = MagicMock(country="US", state="TX")
-		doc.get.return_value = [new_region]
+		# Only the regions table holds rows; a flat return_value would also
+		# answer "restrict_to_companies" with a truthy list.
+		doc.get.side_effect = lambda f, d=None: [new_region] if f == "taxjar_exempt_regions" else d
 		self.assertFalse(_has_taxjar_fields_changed(doc))
 
 
@@ -21359,6 +21362,7 @@ class TestCustomerRetryCronSweepsFirst(UnitTestCase):
 		     patch(f"{_TJ_TASKS}.recover_stuck_customer_syncs", side_effect=_sweep), \
 		     patch(f"{_TJ_TASKS}._customer_sync_companies", return_value=["Test Co"]), \
 		     patch(f"{_TJ_TASKS}.frappe.get_all", side_effect=_get_all), \
+		     patch(f"{_TJ_TASKS}._allowed_companies_by_customer", side_effect=dict.fromkeys), \
 		     patch(f"{_TJ_TASKS}.frappe.enqueue") as mock_enqueue:
 			from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
 			retry_failed_taxjar_customer_syncs()
@@ -21382,6 +21386,7 @@ class TestCustomerRetryCronSweepsFirst(UnitTestCase):
 		     patch(f"{_TJ_TASKS}.recover_stuck_customer_syncs", return_value=[]), \
 		     patch(f"{_TJ_TASKS}._customer_sync_companies", return_value=[]) as mock_companies, \
 		     patch(f"{_TJ_TASKS}.frappe.get_all", return_value=["CUST-001"]), \
+		     patch(f"{_TJ_TASKS}._allowed_companies_by_customer", side_effect=dict.fromkeys), \
 		     patch(f"{_TJ_TASKS}.frappe.enqueue") as mock_enqueue:
 			from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
 			retry_failed_taxjar_customer_syncs()
@@ -21427,6 +21432,7 @@ class TestBulkSyncToTaxJarQueuesOnlyWhatItSends(UnitTestCase):
 		     patch(f"{_TJ_PAGE}._ensure_taxjar_customer_fields"), \
 		     patch(f"{_TJ_PAGE}._check_each"), \
 		     patch(f"{_TJ_PAGE}._customer_sync_companies", return_value=list(companies)), \
+		     patch(f"{_TJ_PAGE}._allowed_companies_by_customer", side_effect=dict.fromkeys), \
 		     patch(f"{_TJ_PAGE}.frappe.db.get_value", return_value=row), \
 		     patch(f"{_TJ_PAGE}.frappe.db.set_value") as mock_set, \
 		     patch(f"{_TJ_PAGE}._publish_customer_update"), \
@@ -21819,3 +21825,246 @@ class TestNoNativeTitleTooltips(UnitTestCase):
 		self.assertIn('.frappe-timestamp[title]', helper)
 		self.assertIn('span.removeAttribute("title");', helper)
 		self.assertIn("frappe.ui.tooltip(span, { text })", helper)
+
+
+# ── Customers restricted to companies ───────────────────────────────────────
+
+_SYNC_JOB = f"{_TJ}.sync_customer_to_taxjar"
+_REMOVE_JOB = f"{_TJ}.delete_customer_from_taxjar"
+_UNSAVED = object()
+
+
+def _restricted_customer(allowed, previous=_UNSAVED, customer_id="CUST-001"):
+	"""A Customer mock. allowed=None means "Restrict to Companies" is off.
+
+	previous is the allowed list before this save; leave it out for a new customer.
+	"""
+
+	def _fields(allowed_list):
+		return {
+			"taxjar_exemption_type": "Wholesale",
+			"taxjar_customer_id": customer_id,
+			"taxjar_exempt_regions": [],
+			"taxjar_customer_sync_status": "",
+			"restrict_to_companies": int(allowed_list is not None),
+			"allowed_companies": [frappe._dict(company=c) for c in allowed_list or []],
+		}
+
+	now = _fields(allowed)
+	doc = MagicMock()
+	doc.name = "CUST-001"
+	doc.db_set = MagicMock()
+	doc.customer_name = "Acme Corp"
+	doc.get.side_effect = lambda field, default=None: now.get(field, default)
+
+	if previous is _UNSAVED:
+		doc.get_doc_before_save.return_value = None
+		doc.has_value_changed.return_value = True
+		return doc
+
+	before = _fields(previous)
+	previous_doc = MagicMock()
+	previous_doc.get.side_effect = lambda field, default=None: before.get(field, default)
+	doc.get_doc_before_save.return_value = previous_doc
+	doc.has_value_changed.side_effect = lambda field: now.get(field) != before.get(field)
+	return doc
+
+
+class TestAllowedCompaniesOfACustomer(UnitTestCase):
+	def test_an_unrestricted_customer_is_open_to_every_company(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _allowed_companies_of
+		self.assertIsNone(_allowed_companies_of(_restricted_customer(None)))
+
+	def test_a_restricted_customer_lists_its_companies(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _allowed_companies_of
+		self.assertEqual(_allowed_companies_of(_restricted_customer(["A Co", "B Co"])), {"A Co", "B Co"})
+
+	def test_restrict_companies_keeps_the_order_of_the_taxjar_list(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _restrict_companies
+		self.assertEqual(_restrict_companies(["A Co", "B Co", "C Co"], None), ["A Co", "B Co", "C Co"])
+		self.assertEqual(_restrict_companies(["A Co", "B Co", "C Co"], {"C Co", "A Co"}), ["A Co", "C Co"])
+		self.assertEqual(_restrict_companies(["A Co"], set()), [])
+
+	def test_the_lookup_for_many_customers_reads_the_child_rows(self):
+		def _get_all(doctype, **kwargs):
+			if doctype == "Customer":
+				return ["CUST-002"]
+			return [frappe._dict(parent="CUST-002", company="B Co")]
+
+		with patch(f"{_TJ}.frappe.get_meta"), \
+		     patch(f"{_TJ}.frappe.get_all", side_effect=_get_all) as mock_get_all:
+			from taxjar_integration.taxjar_integration.taxjar_integration import _allowed_companies_by_customer
+			allowed = _allowed_companies_by_customer(["CUST-001", "CUST-002"])
+
+		self.assertEqual(allowed, {"CUST-001": None, "CUST-002": {"B Co"}})
+		self.assertEqual(mock_get_all.call_count, 2)
+
+	def test_the_lookup_skips_the_child_query_when_no_one_is_restricted(self):
+		with patch(f"{_TJ}.frappe.get_meta"), \
+		     patch(f"{_TJ}.frappe.get_all", return_value=[]) as mock_get_all:
+			from taxjar_integration.taxjar_integration.taxjar_integration import _allowed_companies_by_customer
+			allowed = _allowed_companies_by_customer(["CUST-001"])
+
+		self.assertEqual(allowed, {"CUST-001": None})
+		mock_get_all.assert_called_once()
+
+
+class TestSaveHookSyncsOnlyToAllowedCompanies(UnitTestCase):
+	def _run(self, doc, companies=("A Co", "B Co")):
+		settings = MagicMock(company_config=[
+			MagicMock(company=c, taxjar_calculate_tax=1, taxjar_create_transactions=1) for c in companies
+		])
+		with patch(f"{_TJ}.frappe.db.get_single_value", return_value=1), \
+		     patch(f"{_TJ}.frappe.get_single", return_value=settings), \
+		     patch(f"{_TJ}.get_region", return_value="United States"), \
+		     patch(f"{_TJ}.get_company_config", side_effect=lambda c: MagicMock(
+		         taxjar_calculate_tax=1, taxjar_create_transactions=1)), \
+		     patch(f"{_TJ}._set_customer_sync_status") as mock_status, \
+		     patch(f"{_TJ}._publish_customer_update"), \
+		     patch(f"{_TJ}.frappe.msgprint") as mock_msgprint, \
+		     patch(f"{_TJ}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.taxjar_integration import on_customer_update
+			on_customer_update(doc, None)
+		return mock_enqueue, mock_status, mock_msgprint
+
+	def _companies(self, mock_enqueue, job):
+		return sorted(c[1]["company"] for c in mock_enqueue.call_args_list if c[0][0] == job)
+
+	def test_an_unrestricted_customer_goes_to_every_company(self):
+		mock_enqueue, _status, _msg = self._run(_restricted_customer(None))
+		self.assertEqual(self._companies(mock_enqueue, _SYNC_JOB), ["A Co", "B Co"])
+
+	def test_a_restricted_customer_goes_to_its_companies_only(self):
+		mock_enqueue, _status, _msg = self._run(_restricted_customer(["B Co", "Non-TaxJar Co"]))
+		self.assertEqual(self._companies(mock_enqueue, _SYNC_JOB), ["B Co"])
+
+	def test_no_allowed_company_uses_taxjar(self):
+		doc = _restricted_customer(["Non-TaxJar Co"])
+		mock_enqueue, _status, mock_msgprint = self._run(doc)
+
+		mock_enqueue.assert_not_called()
+		doc.db_set.assert_not_called()
+		self.assertIn("restricted", str(mock_msgprint.call_args[0][0]))
+
+	def test_turning_the_restriction_on_removes_the_customer_from_the_rest(self):
+		doc = _restricted_customer(["A Co"], previous=None)
+		mock_enqueue, _status, _msg = self._run(doc)
+
+		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), ["B Co"])
+		self.assertEqual(self._companies(mock_enqueue, _SYNC_JOB), ["A Co"])
+		removal = next(c for c in mock_enqueue.call_args_list if c[0][0] == _REMOVE_JOB)
+		self.assertEqual(removal[1]["taxjar_customer_id"], "CUST-001")
+		self.assertTrue(removal[1]["enqueue_after_commit"])
+
+	def test_a_company_leaving_the_list_is_the_only_removal(self):
+		doc = _restricted_customer(["A Co"], previous=["A Co", "B Co"])
+		mock_enqueue, _status, _msg = self._run(doc, companies=("A Co", "B Co", "C Co"))
+		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), ["B Co"])
+
+	def test_a_company_joining_the_list_syncs_and_removes_nothing(self):
+		doc = _restricted_customer(["A Co", "B Co"], previous=["A Co"])
+		mock_enqueue, _status, _msg = self._run(doc)
+
+		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), [])
+		self.assertEqual(self._companies(mock_enqueue, _SYNC_JOB), ["A Co", "B Co"])
+
+	def test_turning_the_restriction_off_syncs_everywhere(self):
+		doc = _restricted_customer(None, previous=["A Co"])
+		mock_enqueue, _status, _msg = self._run(doc)
+
+		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), [])
+		self.assertEqual(self._companies(mock_enqueue, _SYNC_JOB), ["A Co", "B Co"])
+
+	def test_a_never_synced_customer_has_nothing_to_remove(self):
+		doc = _restricted_customer(["A Co"], previous=None, customer_id="")
+		mock_enqueue, _status, _msg = self._run(doc)
+		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), [])
+
+	def test_an_unchanged_restriction_starts_no_sync(self):
+		doc = _restricted_customer(["A Co"], previous=["A Co"])
+		mock_enqueue, _status, _msg = self._run(doc)
+		mock_enqueue.assert_not_called()
+
+
+class TestTheWorkerSkipsADisallowedCompany(UnitTestCase):
+	"""A job queued before a save took its company off the customer's list."""
+
+	def _run(self, company):
+		client = MagicMock()
+		with patch(f"{_TJ}.get_client", return_value=client), \
+		     patch(f"{_TJ}.frappe.get_doc", return_value=_restricted_customer(["A Co"])), \
+		     patch(f"{_TJ}.log_taxjar_call") as mock_log, \
+		     patch(f"{_TJ}._record_customer_sync_success"), \
+		     patch(f"{_TJ}._set_customer_sync_status"):
+			from taxjar_integration.taxjar_integration.taxjar_integration import sync_customer_to_taxjar
+			sync_customer_to_taxjar("CUST-001", company=company)
+		return client, mock_log
+
+	def test_a_disallowed_company_is_not_sent_the_customer(self):
+		client, mock_log = self._run("B Co")
+		client.update_customer.assert_not_called()
+		client.create_customer.assert_not_called()
+		self.assertEqual(mock_log.call_args[1]["status"], "skipped")
+
+	def test_an_allowed_company_is_sent_the_customer(self):
+		client, _log = self._run("A Co")
+		client.update_customer.assert_called_once()
+
+
+class TestResyncButtonRespectsTheRestriction(UnitTestCase):
+	def _run(self, company):
+		with patch(f"{_TJ}.frappe.has_permission", return_value=True), \
+		     patch(f"{_TJ}._allowed_companies_by_customer", return_value={"CUST-001": {"A Co"}}), \
+		     patch(f"{_TJ}.sync_customer_to_taxjar") as mock_sync:
+			from taxjar_integration.taxjar_integration.taxjar_integration import resync_customer
+			resync_customer("CUST-001", company)
+		return mock_sync
+
+	def test_a_disallowed_company_is_refused(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._run("B Co")
+
+	def test_an_allowed_company_syncs(self):
+		self._run("A Co").assert_called_once_with("CUST-001", company="A Co")
+
+
+class TestBulkSyncAndCronRespectTheRestriction(UnitTestCase):
+	_ALLOWED = {"CUST-001": {"B Co"}, "CUST-002": {"Non-TaxJar Co"}, "CUST-003": None}
+
+	def test_bulk_sync_queues_each_customer_for_its_own_companies(self):
+		row = {"taxjar_customer_id": "X", "taxjar_exemption_type": "Wholesale"}
+		with patch(f"{_TJ_PAGE}.frappe.has_permission", return_value=True), \
+		     patch(f"{_TJ_PAGE}._ensure_taxjar_customer_fields"), \
+		     patch(f"{_TJ_PAGE}._check_each"), \
+		     patch(f"{_TJ_PAGE}._customer_sync_companies", return_value=["A Co", "B Co"]), \
+		     patch(f"{_TJ_PAGE}._allowed_companies_by_customer", return_value=self._ALLOWED), \
+		     patch(f"{_TJ_PAGE}.frappe.db.get_value", return_value=row), \
+		     patch(f"{_TJ_PAGE}.frappe.db.set_value") as mock_set, \
+		     patch(f"{_TJ_PAGE}._publish_customer_update"), \
+		     patch(f"{_TJ_PAGE}._enqueue_customer_sync") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.page.taxjar_customers.taxjar_customers import (
+				bulk_sync_to_taxjar,
+			)
+			result = bulk_sync_to_taxjar(["CUST-001", "CUST-002", "CUST-003"])
+
+		self.assertEqual(result["queued"], 2)
+		self.assertEqual(
+			[c[0] for c in mock_enqueue.call_args_list],
+			[("CUST-001", "B Co"), ("CUST-003", "A Co"), ("CUST-003", "B Co")],
+		)
+		self.assertEqual([c[0][1] for c in mock_set.call_args_list], ["CUST-001", "CUST-003"])
+
+	def test_the_cron_retries_each_customer_for_its_own_companies(self):
+		with patch(f"{_TJ_TASKS}._is_taxjar_enabled", return_value=True), \
+		     patch(f"{_TJ_TASKS}.recover_stuck_customer_syncs", return_value=[]), \
+		     patch(f"{_TJ_TASKS}._customer_sync_companies", return_value=["A Co", "B Co"]), \
+		     patch(f"{_TJ_TASKS}._allowed_companies_by_customer", return_value=self._ALLOWED), \
+		     patch(f"{_TJ_TASKS}.frappe.get_all", return_value=["CUST-001", "CUST-002", "CUST-003"]), \
+		     patch(f"{_TJ_TASKS}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.tasks import retry_failed_taxjar_customer_syncs
+			retry_failed_taxjar_customer_syncs()
+
+		self.assertEqual(
+			[(c[1]["customer_name"], c[1]["company"]) for c in mock_enqueue.call_args_list],
+			[("CUST-001", "B Co"), ("CUST-003", "A Co"), ("CUST-003", "B Co")],
+		)
