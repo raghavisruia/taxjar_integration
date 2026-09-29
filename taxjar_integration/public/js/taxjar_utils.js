@@ -644,7 +644,11 @@ taxjar_integration._check_destination_address = function (frm, address) {
 // Off the stand-in, not off region_resolved. A stored "XX" resolves - that is
 // what stops the dialog reopening - but it was accepted rather than worked out,
 // and the box has to say which of the two it holds.
-taxjar_integration._region_code_hint = function (is_placeholder) {
+//
+// With the State box empty, nothing was looked up yet, so "cannot find" is not
+// true. The box then says where its code comes from.
+taxjar_integration._region_code_hint = function (is_placeholder, has_state) {
+	if (!has_state) return __("Auto-filled based on State/Province.");
 	return is_placeholder ? __("Cannot find region code, using fallback code.") : "";
 };
 
@@ -713,6 +717,8 @@ taxjar_integration._refresh_dialog_region = function (d) {
 	const current = (d.get_value("taxjar_region_code") || "").trim();
 	if (current !== (d.__taxjar_region_code || "")) return;
 
+	const has_state = !!(d.get_value("state") || "").trim();
+
 	const apply = (code) => {
 		const is_placeholder = code === taxjar_integration.UNKNOWN_REGION_CODE;
 
@@ -721,7 +727,7 @@ taxjar_integration._refresh_dialog_region = function (d) {
 		d.set_df_property(
 			"taxjar_region_code",
 			"description",
-			taxjar_integration._region_code_hint(is_placeholder)
+			taxjar_integration._region_code_hint(is_placeholder, has_state)
 		);
 		// The red outline asks for an answer. This is one, so it goes -
 		// _mark_missing_fields clears it on a keystroke for the same reason,
@@ -731,7 +737,7 @@ taxjar_integration._refresh_dialog_region = function (d) {
 
 	// Nothing to work out without a region name. The stand-in is what the
 	// server would answer, so the trip is skipped rather than made.
-	if (!(d.get_value("state") || "").trim()) {
+	if (!has_state) {
 		return apply(taxjar_integration.UNKNOWN_REGION_CODE);
 	}
 
@@ -827,7 +833,10 @@ taxjar_integration._show_destination_address_dialog = function (frm, row, missin
 			// Address, which this dialog does not collect. Asking for a region
 			// code there offers a box nothing reads.
 			depends_on: 'eval:doc.country !== "United States"',
-			description: taxjar_integration._region_code_hint(row.region_placeholder),
+			description: taxjar_integration._region_code_hint(
+				row.region_placeholder,
+				!!(row.state || "").trim()
+			),
 		},
 		{ fieldtype: "Link", fieldname: "country", label: __("Country"), options: "Country", reqd: 1, default: row.country || "",
 			onchange: () => taxjar_integration._refresh_dialog_region(d) },

@@ -242,6 +242,24 @@ describe("the save-time dialog", () => {
 		expect(frappe.xcall).not.toHaveBeenCalled();
 	});
 
+	it("says where the code comes from when it opens with no state", () => {
+		const d = open_dialog({ state: "" });
+
+		expect(hint(d)).toBe("Auto-filled based on State/Province.");
+	});
+
+	it("says where the code comes from again when the state is cleared", async () => {
+		answer_xcall(frappe, { [REGION_METHOD]: { region_code: "" } });
+
+		const d = open_dialog({ state: "Nowhere" });
+		expect(hint(d)).toBe("Cannot find region code, using fallback code.");
+
+		await d.set_value("state", "");
+		await flush();
+
+		expect(hint(d)).toBe("Auto-filled based on State/Province.");
+	});
+
 	it("asks nothing while the country is the United States", async () => {
 		const d = open_dialog({ country: "United States" });
 		await d.set_value("state", "Florida");
