@@ -109,10 +109,12 @@ after_uninstall = "taxjar_integration.uninstall.after_uninstall"
 # Disable / Enable
 # ----------------
 
-# A disabled app keeps its schema and its data, so the custom fields and property
-# setters this app wrote onto core doctypes stay live unless something hides them.
-# Frappe offers four hooks here; these two are the pair its hooks.md names for that
-# job, and the other two have no work for this app. See app_toggle.py.
+# A disabled app keeps its schema and its data. So the custom fields and property
+# setters this app wrote onto core doctypes stay live, and the TaxJar tax template
+# stays the company default with nothing left to fill its row in. Both have to be
+# undone here and redone on enable. Frappe offers four hooks; these two are the pair
+# its hooks.md names for that job, and the other two have no work for this app. See
+# app_toggle.py.
 before_disable = "taxjar_integration.app_toggle.before_disable"
 after_enable = "taxjar_integration.app_toggle.after_enable"
 

@@ -17610,8 +17610,12 @@ class TestAppToggle(UnitTestCase):
 	"""Disabling the app has to take its marks off the doctypes it does not own.
 
 	A disabled app keeps its schema and its data, so nothing removes the taxjar_*
-	fields from Sales Invoice, or un-hides ERPNext's own exempt_from_sales_tax
-	checkbox, unless this module does it.
+	fields from Sales Invoice, un-hides ERPNext's own exempt_from_sales_tax
+	checkbox, or un-defaults the TaxJar tax template, unless this module does it.
+
+	The template is the part that actually hurts if this regresses, and it is the
+	same harm TestUninstall guards: the site keeps defaulting sales transactions to
+	a TaxJar template nothing populates, with ERPNext's own US templates disabled.
 	"""
 
 	MOD = "taxjar_integration.app_toggle"
@@ -17637,12 +17641,59 @@ class TestAppToggle(UnitTestCase):
 
 		with patch(f"{self.MOD}.get_customizations", return_value=payload), patch(
 			f"{self.MOD}.hide_customizations"
-		) as hide, patch(f"{self.MOD}.unhide_customizations") as unhide:
+		) as hide, patch(f"{self.MOD}.unhide_customizations") as unhide, patch(
+			f"{self.MOD}.restore_default_tax_templates"
+		), patch(f"{self.MOD}.sync_all_company_tax_templates"):
 			app_toggle.before_disable()
 			app_toggle.after_enable()
 
 		hide.assert_called_once_with(payload)
 		unhide.assert_called_once_with(payload)
+
+	def test_disable_hands_the_tax_templates_back_and_enable_takes_them_again(self):
+		"""The $0 row is the silent half. set_sales_tax() is a doc_event, so it stops
+		running when the app goes quiet, and nothing else fills the template's Actual
+		row - the site submits invoices with no sales tax and throws nothing."""
+		from taxjar_integration import app_toggle
+
+		with patch(f"{self.MOD}.hide_customizations"), patch(
+			f"{self.MOD}.unhide_customizations"
+		), patch(f"{self.MOD}.restore_default_tax_templates") as hand_back, patch(
+			f"{self.MOD}.sync_all_company_tax_templates"
+		) as take_back:
+			app_toggle.before_disable()
+			self.assertEqual(hand_back.call_count, 1)
+			self.assertEqual(take_back.call_count, 0)
+
+			app_toggle.after_enable()
+			self.assertEqual(take_back.call_count, 1)
+			self.assertEqual(hand_back.call_count, 1)
+
+	def test_the_two_halves_are_the_install_and_uninstall_paths_themselves(self):
+		"""Reused whole, not restated. A change to either path reaches this module
+		without a second edit, and cannot drift from it."""
+		from taxjar_integration import app_toggle
+		from taxjar_integration.taxjar_integration.regional.united_states import (
+			sync_all_company_tax_templates,
+		)
+		from taxjar_integration.uninstall import restore_default_tax_templates
+
+		self.assertIs(app_toggle.restore_default_tax_templates, restore_default_tax_templates)
+		self.assertIs(app_toggle.sync_all_company_tax_templates, sync_all_company_tax_templates)
+
+	def test_the_templates_are_handed_back_before_the_fields_go_dark(self):
+		"""before_disable still has this app's doctypes to read. The hand-back is the
+		half that reads them, so it runs first - the same split uninstall.py makes."""
+		from taxjar_integration import app_toggle
+
+		order = []
+
+		with patch(
+			f"{self.MOD}.restore_default_tax_templates", side_effect=lambda: order.append("templates")
+		), patch(f"{self.MOD}.hide_customizations", side_effect=lambda _: order.append("fields")):
+			app_toggle.before_disable()
+
+		self.assertEqual(order, ["templates", "fields"])
 
 	def test_every_filter_names_a_doctype_and_a_field(self):
 		"""The rule frappe.custom enforces: a filter without a doctype name would
