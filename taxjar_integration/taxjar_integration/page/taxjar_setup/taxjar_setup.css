@@ -351,8 +351,10 @@
 .taxjar-setup .es-button.ts-cred-ok {
 	color: var(--ink-green-7);
 	border-color: var(--outline-green-3);
+	/* A status, not an action: no hover, no press, no pointer cursor. */
+	pointer-events: none;
+	cursor: default;
 }
-.taxjar-setup .es-button.ts-cred-ok:hover { border-color: var(--ink-green-7); }
 /* The failure reason, sitting in the token column's second line - exactly
    where that field's own .help-box would have put it. It is the only red left
    on a failed row now that the input is no longer marked invalid, so it has to

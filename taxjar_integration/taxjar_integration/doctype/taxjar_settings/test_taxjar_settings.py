@@ -16183,18 +16183,23 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertIn('label: __("Connect")', fn)
 		self.assertNotIn("Test connection", fn)
 
-	def test_connect_action_slot_retests_in_every_state(self):
-		"""Verified and failed both stay clickable - the same _test_connection
-		handler as the idle button, so a stale Success or a failure can always
-		be re-checked without reloading the wizard."""
+	def test_connect_action_slot_verified_state_is_not_clickable(self):
+		"""Connected is a status. It has no handler and blocks the mouse and
+		the keyboard. The idle and failed states keep the _test_connection
+		handler."""
 		js = self._js()
 		fn = js.split("_render_cred_action(entry) {")[1].split("\n\t}\n")[0]
 		for branch in ("if (entry.tested) {", "} else if (entry.lastError) {", "} else {"):
 			self.assertIn(branch, fn)
-		# All three wire the handler inline now. The verified state was a badge -
-		# non-interactive markup that needed role, tabindex and keydown bolted on
-		# to behave like the button it already was - and is a real button.
-		self.assertEqual(fn.count("onclick: () => this._test_connection(entry)"), 3)
+		verified = fn.split("if (entry.tested) {")[1].split("} else if")[0]
+		self.assertNotIn("onclick", verified)
+		self.assertNotIn("tooltip", verified)
+		self.assertIn('"aria-disabled": "true"', verified)
+		self.assertIn('tabindex: "-1"', verified)
+		self.assertEqual(fn.count("onclick: () => this._test_connection(entry)"), 2)
+		ok = self._setup_css().split(".taxjar-setup .es-button.ts-cred-ok {")[1].split("}")[0]
+		self.assertIn("pointer-events: none;", ok)
+		self.assertNotIn(".ts-cred-ok:hover", self._setup_css())
 		self.assertNotIn("_build_status_badge", fn)
 		# The helper survives for the Address step's Valid badge, its one caller.
 		badge = js.split("_build_status_badge(opts, onactivate) {")[1].split("\n\t}\n")[0]
@@ -21716,7 +21721,6 @@ class TestNoNativeTitleTooltips(UnitTestCase):
 	def test_setup_page_buttons_use_tooltip_not_title(self):
 		js = self._page_js("taxjar_setup")
 		for text in (
-			'__("Verified. Click to test again.")',
 			'__("Found by TaxJar. Click to check again.")',
 			'__("Fetch from TaxJar")',
 			'__("Remove")',

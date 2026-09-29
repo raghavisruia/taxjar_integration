@@ -786,8 +786,8 @@ class TaxJarSetup {
 	}
 
 	// The action slot cycles through four states: an idle Connect button, a
-	// transient Connecting… (see _test_connection), a green Connected badge
-	// once verified (a status, so a badge - clicking it re-tests), and a Retry
+	// transient Connecting… (see _test_connection), a green Connected status
+	// once verified (not clickable), and a Retry
 	// button on failure (an action, so a real button, unlike the status it
 	// sits next to).
 	//
@@ -808,16 +808,15 @@ class TaxJarSetup {
 		const $action = entry.$card.find(".ts-cred-action").empty();
 		this._set_token_error(entry, entry.lastError);
 		if (entry.tested) {
-			// A button, not a badge. It was a badge because it is a status, but
-			// it has always been clickable too - and a badge is non-interactive
-			// markup, so it needed role, tabindex and a keydown handler bolted
-			// on to behave like the button it already was. As a button it gets
-			// all of that natively, and it stops being a filled pill of a
-			// different height and radius in a row of three buttons.
+			// Button markup for the look only: it keeps the same height and
+			// radius as the other states in the slot. It is a status, so it has
+			// no handler. aria-disabled and tabindex -1 take it out of the
+			// keyboard order, and the CSS rule blocks the mouse. To re-test,
+			// the user edits the company or the token, which resets the slot.
 			$action.append(frappe.ui.button({
 				label: __("Connected"), icon: "circle-check", variant: "outline",
-				css_class: "ts-cred-ok", tooltip: __("Verified. Click to test again."),
-				onclick: () => this._test_connection(entry),
+				css_class: "ts-cred-ok",
+				attrs: { "aria-disabled": "true", tabindex: "-1" },
 			}));
 		} else if (entry.lastError) {
 			$action.append(frappe.ui.button({
