@@ -1460,9 +1460,18 @@ def set_sales_tax(doc, method):
 
 	scope = company_scope(doc.company)
 	if not scope.calculates:
-		log_taxjar_call(action="tax_for_order", status="skipped",
-			error=f"Company does not calculate tax through TaxJar ({scope.reason or 'switched off'})",
-			context=_ctx)
+		# Logged only for a company with an API Credentials row. A company with
+		# no row has nothing to do with TaxJar, and every one of its Quotation,
+		# Sales Order and Sales Invoice saves used to write a log row. A company
+		# with a row is logged whichever switch stopped it, the site's or its
+		# own, because someone set it up and may ask why no tax came back.
+		# get_company_config() and not scope.config: company_scope() returns
+		# before it reads the row when TaxJar is off or the company is not in
+		# the United States.
+		if get_company_config(doc.company):
+			log_taxjar_call(action="tax_for_order", status="skipped",
+				error=f"Company does not calculate tax through TaxJar ({scope.reason or 'switched off'})",
+				context=_ctx)
 		return
 
 	if not doc.items:

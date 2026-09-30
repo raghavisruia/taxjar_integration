@@ -1558,6 +1558,44 @@ class TestSetSalesTax(UnitTestCase):
 		self.assertEqual(len(doc.taxes), 0)
 
 
+class TestSetSalesTaxSkipLog(UnitTestCase):
+	"""Which skipped saves write a TaxJar API Log row.
+
+	A company with no API Credentials row has nothing to do with TaxJar, so its
+	saves write nothing. A company with a row writes the skip, whichever switch
+	stopped the calculation, because someone set it up and may ask why no tax
+	came back.
+	"""
+
+	def _save(self, taxjar_enabled=1, region="United States", config=None):
+		doc = _make_doc()
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=taxjar_enabled), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value=region), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_company_config", return_value=config), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call") as mock_log:
+			set_sales_tax(doc, None)
+		return mock_log
+
+	def test_no_log_when_company_has_no_credentials_row(self):
+		self._save(config=None).assert_not_called()
+
+	def test_no_log_when_company_has_no_row_and_taxjar_is_off(self):
+		self._save(taxjar_enabled=0, config=None).assert_not_called()
+
+	def test_no_log_when_company_has_no_row_and_is_outside_the_us(self):
+		self._save(region="India", config=None).assert_not_called()
+
+	def test_logs_when_calculation_is_switched_off_for_the_company(self):
+		mock_log = self._save(config=MagicMock(taxjar_calculate_tax=0, taxjar_create_transactions=1))
+		mock_log.assert_called_once()
+		self.assertEqual(mock_log.call_args.kwargs["status"], "skipped")
+
+	def test_logs_when_taxjar_is_off_for_the_site(self):
+		mock_log = self._save(taxjar_enabled=0, config=MagicMock(taxjar_calculate_tax=1))
+		mock_log.assert_called_once()
+		self.assertIn("site_off", mock_log.call_args.kwargs["error"])
+
+
 class TestSetSalesTaxCache(UnitTestCase):
 	"""set_sales_tax caches a successful TaxJar response for 5 minutes, keyed on
 	the request payload plus TaxJar Settings' own `modified` timestamp.
