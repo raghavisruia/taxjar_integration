@@ -206,8 +206,30 @@
 	font-size: 12px;
 }
 
-/* Tax ID and email, set a little apart from the address above them */
-.taxjar-party-extra {
+/*
+	Ship From / Bill To / Ship To cells: the heading sits on top, then the
+	name, the address and its Tax ID. The cell has no padding of its own;
+	the heading and the body carry it.
+*/
+.info-table > tbody > tr > td.taxjar-party-cell {
+	padding: 0 !important;
+}
+
+.taxjar-party-head {
+	padding: 10px 12px 2px 12px;
+	font-size: 10.5px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: #7c7c7c;
+}
+
+.taxjar-party-body {
+	padding: 8px 12px;
+}
+
+/* Tax ID: under the address, the same size as the address, a little apart from it */
+.taxjar-tax-id {
 	margin-top: 6px;
 }
 

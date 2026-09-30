@@ -92,11 +92,13 @@
 		#}
 		<table class="info-table">
 			<tr>
-				<td style="width: 50%">
-					<div class="title">{{ _("Ship From") }}</div>
-					<div class="info-text text-bold">{{ doc.company }}</div>
-					{% if doc.company_address_display %}<div class="info-text">{{ clean_address(doc.company_address_display) }}</div>{% endif %}
-					{% if doc.company_tax_id %}<div class="info-text taxjar-party-extra"><span class="title">{{ _("Tax ID") }}:</span> {{ doc.company_tax_id }}</div>{% endif %}
+				<td class="taxjar-party-cell" style="width: 50%">
+					<div class="taxjar-party-head">{{ _("Ship From") }}</div>
+					<div class="taxjar-party-body">
+						<div class="info-text text-bold">{{ doc.company }}</div>
+						{% if doc.company_address_display %}<div class="info-text">{{ clean_address(doc.company_address_display) }}</div>{% endif %}
+						{% if doc.company_tax_id %}<div class="info-text taxjar-tax-id"><span class="title">{{ _("Tax ID") }}:</span> {{ doc.company_tax_id }}</div>{% endif %}
+					</div>
 				</td>
 				<td class="taxjar-doc-details-cell" style="width: 50%">
 					<table class="taxjar-doc-details">
@@ -139,16 +141,20 @@
 				</td>
 			</tr>
 			<tr>
-				<td style="width: 50%">
-					<div class="title">{{ _("Bill To") }}</div>
-					<div class="info-text text-bold">{{ doc.customer_name }}</div>
-					{% if doc.address_display %}<div class="info-text">{{ clean_address(doc.address_display) }}</div>{% endif %}
-					{% if doc.tax_id %}<div class="info-text taxjar-party-extra"><span class="title">{{ _("Tax ID") }}:</span> {{ doc.tax_id }}</div>{% endif %}
+				<td class="taxjar-party-cell" style="width: 50%">
+					<div class="taxjar-party-head">{{ _("Bill To") }}</div>
+					<div class="taxjar-party-body">
+						<div class="info-text text-bold">{{ doc.customer_name }}</div>
+						{% if doc.address_display %}<div class="info-text">{{ clean_address(doc.address_display) }}</div>{% endif %}
+						{% if doc.tax_id %}<div class="info-text taxjar-tax-id"><span class="title">{{ _("Tax ID") }}:</span> {{ doc.tax_id }}</div>{% endif %}
+					</div>
 				</td>
-				<td style="width: 50%">
-					<div class="title">{{ _("Ship To") }}</div>
-					<div class="info-text text-bold">{{ doc.customer_name }}</div>
-					<div class="info-text">{{ clean_address(doc.shipping_address or doc.address_display or "") }}</div>
+				<td class="taxjar-party-cell" style="width: 50%">
+					<div class="taxjar-party-head">{{ _("Ship To") }}</div>
+					<div class="taxjar-party-body">
+						<div class="info-text text-bold">{{ doc.customer_name }}</div>
+						<div class="info-text">{{ clean_address(doc.shipping_address or doc.address_display or "") }}</div>
+					</div>
 				</td>
 			</tr>
 		</table>
