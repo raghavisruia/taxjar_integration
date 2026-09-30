@@ -81,6 +81,9 @@ class TaxJarTransactionSync {
 		this.current_page = 1;
 		this.page_size = 20;
 		this.active_tab = ALL_TAB;
+		// The inline filter row's text, one entry per tab. Each tab has its own
+		// table and its own filter row, so a search typed on one tab narrows
+		// that tab and nothing else.
 		this.column_search = {};
 
 		// Built once so on_hide() has the same reference to pass to
@@ -282,7 +285,7 @@ class TaxJarTransactionSync {
 				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.export_transactions",
 			// The page's filters and the open tab, exactly as refresh() sends
 			// them - so the file is the table, without the page boundary.
-			get_args: () => ({ filters: this.get_scope_filters(), scope: this.active_tab }),
+			get_args: () => ({ filters: this.get_table_filters(), scope: this.active_tab }),
 		});
 	}
 
@@ -328,10 +331,10 @@ class TaxJarTransactionSync {
 
 	// ── Data ──────────────────────────────────────────────────────────────
 
-	// What the page is scoped to: company, dates, type and the inline column
-	// search. Which tab is open is NOT part of it - the tab is sent separately
-	// as the scope, so the summary can count every tab's population under the
-	// same filters while the table shows one of them.
+	// What the page is scoped to: company, dates, type and nature. Which tab is
+	// open is NOT part of it - the tab is sent separately as the scope, so the
+	// summary can count every tab's population under the same filters while
+	// the table shows one of them.
 	get_scope_filters() {
 		const filters = {};
 
@@ -350,24 +353,35 @@ class TaxJarTransactionSync {
 		const transaction_nature = this.filter_transaction_nature?.get_value();
 		if (transaction_nature) filters.transaction_nature = transaction_nature;
 
-		// The datatable's inline filter row, resolved server-side so it
-		// narrows the whole result set rather than the loaded page.
-		if (Object.keys(this.column_search).length) filters.search = this.column_search;
+		return filters;
+	}
 
+	// The scope plus the open tab's inline filter row. The filter row sits in
+	// the table, so it narrows the table and the file Export makes of it, and
+	// leaves the cards alone: they count the page's scope, and a search typed
+	// on one tab must not change the numbers on the others. Resolved
+	// server-side so it narrows the whole result set, not the loaded page.
+	get_table_filters() {
+		const filters = this.get_scope_filters();
+		const search = this.column_search[this.active_tab];
+		if (search && Object.keys(search).length) filters.search = search;
 		return filters;
 	}
 
 	refresh() {
-		const filters = this.get_scope_filters();
-
 		Promise.all([
 			frappe.xcall(
 				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_transactions",
-				{ filters, page: this.current_page, scope: this.active_tab, page_size: this.page_size }
+				{
+					filters: this.get_table_filters(),
+					page: this.current_page,
+					scope: this.active_tab,
+					page_size: this.page_size,
+				}
 			),
 			frappe.xcall(
 				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_summary",
-				{ filters }
+				{ filters: this.get_scope_filters() }
 			),
 		]).then(([data, summary]) => {
 			if (data.not_configured) {
@@ -550,7 +564,7 @@ class TaxJarTransactionSync {
 				},
 				on_check_row: () => this.update_bulk_state(),
 				on_filter_change: (search) => {
-					this.column_search = search;
+					this.column_search[key] = search;
 					this.current_page = 1;
 					this.refresh();
 				},

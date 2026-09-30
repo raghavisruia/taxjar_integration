@@ -7092,7 +7092,21 @@ class TestDeskPageChromeJS(UnitTestCase):
 
 		js = self._read_page_js("taxjar_transactions")
 		self.assertIn("on_filter_change: (search) => {", js)
-		self.assertIn("filters.search = this.column_search", js)
+		self.assertIn("this.column_search[key] = search", js)
+		self.assertIn("filters.search = search", js)
+
+	def test_column_search_narrows_only_its_own_table(self):
+		"""The filter row sits inside one tab's table. It narrows that table
+		and its export, and leaves the cards and the other tabs alone."""
+		js = self._read_page_js("taxjar_transactions")
+		scope_fn = js.split("get_scope_filters() {")[1].split("\n\t}\n")[0]
+		self.assertNotIn("search", scope_fn)
+		table_fn = js.split("get_table_filters() {")[1].split("\n\t}\n")[0]
+		self.assertIn("this.column_search[this.active_tab]", table_fn)
+		refresh_fn = js.split("\n\trefresh() {")[1].split("\n\t}\n")[0]
+		self.assertIn("filters: this.get_table_filters(),", refresh_fn)
+		self.assertIn("{ filters: this.get_scope_filters() }", refresh_fn)
+		self.assertIn("get_args: () => ({ filters: this.get_table_filters(),", js)
 
 	def test_customer_page_search_is_also_resolved_server_side(self):
 		"""Different control, same rule: the Customer page has no inline filter
@@ -7184,8 +7198,9 @@ class TestDeskPageChromeJS(UnitTestCase):
 		self.assertIn("sync_status", filters_fn)
 		self.assertIn("get_summary", js.split("{ filters: this.get_scope_filters() }")[0])
 
-		# Nothing is layered over the scope there, so there is no second filter
-		# builder to get wrong.
+		# No status filter is layered over the scope there. The one thing that
+		# is, the column search, has its own builder (get_table_filters) - see
+		# test_column_search_narrows_only_its_own_table.
 		self.assertNotIn("get_filters()", self._read_page_js("taxjar_transactions"))
 
 	def test_summary_endpoints_drop_the_status_filter(self):
