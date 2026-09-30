@@ -67,3 +67,18 @@ class IntegrationTestTaxJarAPILog(IntegrationTestCase):
 
 	def test_no_response_logs_nothing(self):
 		self.assertIsNone(_taxjar_response_payload(None))
+
+	def test_accounts_manager_reads_the_log_but_cannot_change_it(self):
+		"""The guided setup and the sync pages are open to Accounts Manager, and
+		their errors send the reader to this log. Reading it is enough - the rows
+		are a record of what TaxJar said, not something to edit or hand out."""
+		import frappe
+
+		perms = [
+			p for p in frappe.get_meta("TaxJar API Log").permissions
+			if p.role == "Accounts Manager" and p.permlevel == 0
+		]
+		self.assertEqual(len(perms), 1)
+		self.assertTrue(perms[0].read)
+		for ptype in ("write", "create", "delete", "export", "share"):
+			self.assertFalse(perms[0].get(ptype), ptype)

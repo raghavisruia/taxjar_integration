@@ -3231,12 +3231,14 @@ class TestNexusPage(UnitTestCase):
 		self.assertEqual(data["module"], "TaxJar Integration")
 
 	def test_page_role_matches_the_permission_its_data_needs(self):
-		"""Every endpoint reads TaxJar Settings, which only System Manager can
-		read - a wider role here would put the page in someone's sidebar only
-		for it to fail on open."""
+		"""Every endpoint reads TaxJar Settings, which System Manager and
+		Accounts Manager can read - a wider role here would put the page in
+		someone's sidebar only for it to fail on open."""
 		import json
 		data = json.loads(self._read("taxjar_nexus.json"))
-		self.assertEqual({r["role"] for r in data["roles"]}, {"System Manager"})
+		self.assertEqual(
+			{r["role"] for r in data["roles"]}, {"System Manager", "Accounts Manager"}
+		)
 
 	def test_page_draws_its_own_cards_not_the_shared_table_renderers(self):
 		"""Every card on this page carries its own title, subtitle, "Synced ..."
@@ -14887,6 +14889,20 @@ class TestGuidedSetupSchemaAndEntry(UnitTestCase):
 		roles = {r["role"] for r in data.get("roles", [])}
 		self.assertIn("System Manager", roles)
 		self.assertIn("Accounts Manager", roles)
+
+	def test_every_setup_page_role_can_write_the_settings(self):
+		"""Every guided setup endpoint checks write on TaxJar Settings. A page
+		role without that permission opens the guide and then fails on the
+		first Save & continue."""
+		import json, os
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.json"))
+		page_roles = {r["role"] for r in json.load(open(path)).get("roles", [])}
+		writers = {
+			p.role for p in frappe.get_meta("TaxJar Settings").permissions
+			if p.permlevel == 0 and p.read and p.write
+		}
+		self.assertLessEqual(page_roles, writers)
 
 	def test_settings_js_has_setup_intro(self):
 		import os
