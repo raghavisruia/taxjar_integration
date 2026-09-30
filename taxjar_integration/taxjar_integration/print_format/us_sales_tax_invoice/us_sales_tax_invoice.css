@@ -23,6 +23,20 @@
 	margin-right: 15mm;
 }
 
+/*
+	The rule above is also a margin on the element itself. On screen that
+	margin sits outside the white page, so the preview shows only the page's
+	own 15mm padding. In Print and PDF the page margin is already 15mm, and
+	the element margin came on top of it: 30mm in all. Printing drops it, so
+	both match the preview. The PDF step reads page margins only from a rule
+	whose selector is exactly .print-format, so this one does not change them.
+*/
+@media print {
+	.print-format-gutter .print-format {
+		margin: 0;
+	}
+}
+
 .invoice-page {
 	font-family: Inter, sans-serif;
 	color: #171717;
@@ -330,15 +344,15 @@
 	border-radius: 10px;
 	border: 1px solid #ededed;
 	background: #f8f8f8;
-	padding: 6px 16px 12px 16px;
+	padding: 6px 12px;
 	margin-top: 12px;
 	font-size: 12px;
 }
 
 /* A single short line, nothing below it - equal padding top/bottom so it sits centred in the box, not closer to the bottom. */
 .taxjar-status-panel-compact {
-	padding-top: 12px;
-	padding-bottom: 12px;
+	padding-top: 6px;
+	padding-bottom: 6px;
 }
 
 /* Joined onto the table above it - no gap, no rounding of its own (the card wrapper handles that), just a thin divider where the table ends. */
@@ -362,7 +376,8 @@
 }
 
 .taxjar-status-panel .taxjar-status-line {
-	font-size: 13px;
+	font-size: 12px;
+	line-height: 1.4;
 	color: #7c7c7c;
 }
 
@@ -422,31 +437,42 @@
 	border-spacing: 0;
 }
 
-.taxjar-analysis-card table th,
-.taxjar-analysis-card table td {
+/*
+	A light table: thin lines between rows only, compact cells, and a
+	small grey header. The .print-format prefix outranks the Print Style's
+	own .print-format .table / .table-bordered cell rules (10px padding,
+	a grid on every cell), which otherwise win here.
+*/
+.print-format .taxjar-analysis-card .table th,
+.print-format .taxjar-analysis-card .table td {
 	border: none;
-	border-right: 1px solid #ededed;
+	border-bottom: 1px solid #f0f0f0;
+	padding: 5px 8px;
+	font-size: 11px;
+	line-height: 1.4;
+}
+
+.print-format .taxjar-analysis-card .table thead th {
+	background: none;
+	color: #7c7c7c !important;
+	/* Normal case: the PDF column is narrow, and "JURISDICTION" in capitals does not fit. */
+	font-size: 10.5px;
+	font-weight: 600;
+	padding-top: 7px;
 	border-bottom: 1px solid #ededed;
-	padding: 8px;
-	font-size: 12px;
 }
 
-.taxjar-analysis-card table th:last-child,
-.taxjar-analysis-card table td:last-child {
-	border-right: none;
+/* Jurisdiction names come bold from the shared include; plain here. */
+.print-format .taxjar-analysis-card .table tbody td strong {
+	font-weight: normal;
 }
 
-.taxjar-analysis-card table tbody tr:last-child td,
-.taxjar-analysis-card table tfoot td {
+.print-format .taxjar-analysis-card .table tbody tr:last-child td {
 	border-bottom: none;
 }
 
-.taxjar-analysis-card table thead th {
-	background: #f8f8f8;
-	color: #7c7c7c !important;
-	font-weight: 600;
-}
-
-.taxjar-analysis-card table tfoot td {
-	border-top: 1px solid #171717;
+.print-format .taxjar-analysis-card .table tfoot td {
+	border-top: 1px solid #ededed;
+	border-bottom: none;
+	padding-bottom: 7px;
 }
