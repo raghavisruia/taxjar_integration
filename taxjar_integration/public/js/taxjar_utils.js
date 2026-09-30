@@ -1467,21 +1467,38 @@ taxjar_integration.show_return_reference_dialog = function (frm) {
 
 // The customer has nothing this credit note can reverse, so the dialog offers
 // the one move that is left. A picker here would open on an empty list and say
-// nothing about why.
+// nothing about why. The same banner as the picker states the rule, and the
+// line under it links the customer, where the reader goes to find the invoice.
 taxjar_integration.show_no_returnable_invoice_dialog = function (frm) {
-	const customer = taxjar_integration.customer_label(frm);
+	taxjar_integration._inject_requirements_banner_styles();
+
+	const customer_link = frappe.utils.get_form_link(
+		"Customer",
+		frm.doc.customer,
+		true,
+		frappe.utils.escape_html(taxjar_integration.customer_label(frm))
+	);
 
 	const d = new frappe.ui.Dialog({
 		title: __("Credit Note Against Invoice"),
 		fields: [
 			{
 				fieldtype: "HTML",
+				fieldname: "taxjar_return_requirements",
+				options: taxjar_integration.requirements_banner(
+					__("Original sales invoice must be referenced for credit note.")
+				),
+			},
+			{
+				fieldtype: "HTML",
 				fieldname: "taxjar_no_invoice",
-				options: `<p><b>${__("{0} has no submitted invoice.", [
-					frappe.utils.escape_html(customer),
-				])}</b></p>
-				<p class="text-muted">${__(
-					"TaxJar files a credit note against the invoice it reverses, and a draft was never sent to it. Submit the invoice first, then start the credit note again."
+				// Space above sets the text apart from the banner. The bold line
+				// says what is wrong, and the line under it says what to do.
+				options: `<p class="mt-3 font-weight-bold">${__("{0} has no submitted invoice.", [
+					customer_link,
+				])}</p>
+				<p>${__(
+					"Please submit a sales invoice against the customer to generate a credit note."
 				)}</p>`,
 			},
 		],

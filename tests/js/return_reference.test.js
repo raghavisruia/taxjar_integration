@@ -322,8 +322,25 @@ describe("the customer with nothing to reverse", () => {
 
 		expect(dialogs).toHaveLength(1);
 		expect(dialogs[0].fields_dict.return_against).toBeUndefined();
-		expect(dialog_html(dialogs[0], "taxjar_no_invoice")).toContain(
-			"Northwind Traders (CUST-0003) has no submitted invoice."
+		const html = dialog_html(dialogs[0], "taxjar_no_invoice");
+		expect(html).toContain(
+			'<a href="/desk/customer/CUST-0003">Northwind Traders (CUST-0003)</a> has no submitted invoice.'
+		);
+		expect(html).toContain(
+			"Please submit a sales invoice against the customer to generate a credit note."
+		);
+	});
+
+	// The same rule the picker states, in the same yellow block, above the
+	// line that says why this customer cannot meet it yet.
+	it("leads with the requirements banner", async () => {
+		answer_invoice_reads(0);
+
+		await tick_is_return(open_credit_note(US_FILE));
+
+		expect(dialogs[0].options.fields[0].fieldname).toBe("taxjar_return_requirements");
+		expect(dialog_html(dialogs[0], "taxjar_return_requirements")).toContain(
+			"Original sales invoice must be referenced for credit note."
 		);
 	});
 

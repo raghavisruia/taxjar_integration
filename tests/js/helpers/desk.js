@@ -221,6 +221,12 @@ export function install_desk() {
 		},
 		utils: {
 			escape_html,
+			// frappe's own markup: the display text arrives escaped, the name
+			// rides in the route encoded.
+			get_form_link: (doctype, name, html = false, display_text = null) => {
+				const route = `/desk/${doctype.toLowerCase().replace(/ /g, "-")}/${encodeURIComponent(name)}`;
+				return html ? `<a href="${route}">${display_text || escape_html(name)}</a>` : route;
+			},
 			icon: (name) => `<svg class="icon icon-${name}"></svg>`,
 			// frappe's own test: does the string contain a tag.
 			is_html: (text) => /<[a-z][\s\S]*>/i.test(String(text)),
