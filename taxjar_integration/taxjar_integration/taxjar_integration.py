@@ -3828,15 +3828,53 @@ def resync_customer(customer_name: str, company: str):
 	below stays un-whitelisted so enqueue callers are unaffected.
 	"""
 	frappe.has_permission("Customer", "write", doc=customer_name, throw=True)
-	allowed = _allowed_companies_by_customer([customer_name])[customer_name]
-	if not _restrict_companies([company], allowed):
+	# The company is named by the caller, so it is checked like any other
+	# argument, the same as in verify_address_with_taxjar() and
+	# get_company_scope().
+	frappe.has_permission("Company", "read", doc=company, throw=True)
+
+	if company not in customer_sync_companies(customer_name):
+		# One test for three refusals - the company does not use TaxJar, it is
+		# not configured at all, or the customer is restricted away from it.
+		# Asking the same list the save hook and the cron ask means there is no
+		# second rule here to fall out of step with them.
 		frappe.throw(
-			_("Customer {0} is restricted to other companies, so it is not sent to the TaxJar account of {1}.").format(
-				frappe.bold(customer_name), frappe.bold(company)
-			),
+			_("{0} is not a company this customer syncs to. Check TaxJar Settings, and the "
+			  "customer's own Restrict to Companies.").format(frappe.bold(company)),
 			title=_("Company Not Allowed"),
 		)
+
 	return sync_customer_to_taxjar(customer_name, company=company)
+
+
+def customer_sync_companies(customer_name):
+	"""Every company this one customer's sync goes to.
+
+	_customer_sync_companies() answers "in scope and configured"; the
+	customer's own Restrict to Companies narrows it. The save hook composes
+	the same two, and so does the bulk retry.
+	"""
+	allowed = _allowed_companies_by_customer([customer_name])[customer_name]
+	return _restrict_companies(_customer_sync_companies(), allowed)
+
+
+@frappe.whitelist()
+def get_customer_sync_companies(customer_name: str):
+	"""Which companies the Customer form's Sync button may send this customer to.
+
+	The button used to send frappe.defaults.get_user_default("Company") - a
+	guess about the user, not a fact about the customer. Where that default was
+	not a TaxJar company the press marked the customer Failed, and where it was
+	another company's the customer went into that account.
+
+	Deliberately a list rather than a sync of all of them. A save decides to
+	sync and to remove together (see _remove_from_dropped_companies), and only
+	the save knows which companies it just dropped. A button that pushed to
+	every allowed company would re-create the customer in an account a removal
+	is still waiting to clear.
+	"""
+	frappe.has_permission("Customer", "read", doc=customer_name, throw=True)
+	return customer_sync_companies(customer_name)
 
 
 def sync_customer_to_taxjar(customer_name, company=None):

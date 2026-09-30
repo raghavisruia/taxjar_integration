@@ -9948,6 +9948,46 @@ class TestCustomerClientScriptUpdated(UnitTestCase):
 		self.assertIn("taxjar_integration.show_taxjar_sync_error(", sync_click)
 		self.assertIn("frm.doc.taxjar_customer_sync_error", sync_click)
 
+	def test_the_button_asks_which_company_instead_of_guessing(self):
+		"""It used to send frappe.defaults.get_user_default("Company"), which is
+		a fact about the user and not about the customer."""
+		js = self._read_js()
+
+		# Comment lines dropped first: the comment above _sync_to_taxjar names
+		# the old call to say why it went, so the literal is still in the file
+		# and only its use is gone.
+		code = "\n".join(
+			line for line in js.splitlines() if not line.strip().startswith("//")
+		)
+		self.assertNotIn('get_user_default("Company")', code)
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.get_customer_sync_companies",
+			code,
+		)
+
+	def test_the_button_sends_one_company_per_press(self):
+		"""Not every company the customer is allowed for: a save decides to
+		sync and to remove together, so a press that pushed to all of them
+		could re-create the customer in an account a removal has not cleared."""
+		js = self._read_js()
+
+		sync = js.split("function _sync_to_company(frm, company) {")[1].split("\n}\n")[0]
+		self.assertIn("customer_name: frm.doc.name", sync)
+		self.assertIn("company,", sync)
+		self.assertNotIn("forEach", sync)
+		self.assertNotIn("map(", sync)
+
+	def test_several_companies_are_offered_as_a_choice(self):
+		picker = self._read_js().split("function _sync_to_taxjar(frm) {")[1].split("\n}\n")[0]
+		self.assertIn("companies.length === 1", picker)
+		self.assertIn("frappe.ui.Dialog", picker)
+		self.assertIn('fieldtype: "Select"', picker)
+
+	def test_no_company_says_so_rather_than_pressing_into_a_refusal(self):
+		picker = self._read_js().split("function _sync_to_taxjar(frm) {")[1].split("\n}\n")[0]
+		self.assertIn("!companies.length", picker)
+		self.assertIn("Nothing to Sync To", picker)
+
 	def test_dead_state_filter_code_removed(self):
 		"""The raw taxjar_exempt_regions grid is hidden and configure_exemption
 		is the only write path now - the per-row state-filter code that kept
@@ -22850,20 +22890,135 @@ class TestTheWorkerSkipsADisallowedCompany(UnitTestCase):
 
 
 class TestResyncButtonRespectsTheRestriction(UnitTestCase):
-	def _run(self, company):
-		with patch(f"{_TJ}.frappe.has_permission", return_value=True), \
-		     patch(f"{_TJ}._allowed_companies_by_customer", return_value={"CUST-001": {"A Co"}}), \
+	"""The Customer form's Sync button.
+
+	It used to send frappe.defaults.get_user_default("Company") - a guess about
+	the user, not a fact about the customer. Where that default was not a
+	TaxJar company the press marked the customer Failed, and where it was
+	another company's the customer went into that account. The server now owns
+	the list, and the press is held to it.
+	"""
+
+	def _run(self, company, taxjar_companies=("A Co", "C Co"), allowed={"A Co"}, permitted=True):
+		with patch(f"{_TJ}.frappe.has_permission", return_value=True) if permitted \
+		     else patch(f"{_TJ}.frappe.has_permission", side_effect=frappe.PermissionError), \
+		     patch(f"{_TJ}._customer_sync_companies", return_value=list(taxjar_companies)), \
+		     patch(f"{_TJ}._allowed_companies_by_customer", return_value={"CUST-001": allowed}), \
 		     patch(f"{_TJ}.sync_customer_to_taxjar") as mock_sync:
 			from taxjar_integration.taxjar_integration.taxjar_integration import resync_customer
 			resync_customer("CUST-001", company)
 		return mock_sync
 
 	def test_a_disallowed_company_is_refused(self):
+		"""The customer's own Restrict to Companies keeps it out of that account."""
 		with self.assertRaises(frappe.ValidationError):
 			self._run("B Co")
 
 	def test_an_allowed_company_syncs(self):
 		self._run("A Co").assert_called_once_with("CUST-001", company="A Co")
+
+	def test_a_company_that_does_not_use_taxjar_is_refused(self):
+		"""Allowed by the customer, but TaxJar is off for it. The old check
+		asked only about the restriction, so this one went through and the
+		worker recorded "TaxJar is not configured for this company"."""
+		with self.assertRaises(frappe.ValidationError):
+			self._run("D Co", taxjar_companies=("A Co",), allowed={"A Co", "D Co"})
+
+	def test_a_customer_open_to_all_companies_still_syncs(self):
+		"""No restriction is None, not an empty set."""
+		self._run("C Co", allowed=None).assert_called_once_with("CUST-001", company="C Co")
+
+	def test_one_press_sends_the_customer_to_one_account(self):
+		"""Not to every company it is allowed for. A save decides to sync and
+		to remove together (_remove_from_dropped_companies), and only the save
+		knows which companies it just dropped - so a press that pushed to all
+		of them could re-create the customer in an account a removal is still
+		waiting to clear."""
+		mock_sync = self._run("A Co", taxjar_companies=("A Co", "C Co"), allowed=None)
+		self.assertEqual(mock_sync.call_count, 1)
+
+
+class TestResyncButtonChecksTheCompanyItIsGiven(UnitTestCase):
+	"""The company argument is permission-checked, the same as in
+	verify_address_with_taxjar() and get_company_scope()."""
+
+	def test_the_company_is_permission_checked(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as mod
+
+		checked = []
+
+		def guard(doctype, ptype, *args, **kwargs):
+			checked.append((doctype, ptype))
+			return True
+
+		with patch.object(mod.frappe, "has_permission", side_effect=guard), \
+		     patch.object(mod, "_customer_sync_companies", return_value=["A Co"]), \
+		     patch.object(mod, "_allowed_companies_by_customer", return_value={"CUST-001": None}), \
+		     patch.object(mod, "sync_customer_to_taxjar"):
+			mod.resync_customer("CUST-001", "A Co")
+
+		self.assertIn(("Customer", "write"), checked)
+		self.assertIn(("Company", "read"), checked)
+
+	def test_requires_read_permission_on_the_company(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as mod
+
+		def guard(doctype, ptype, *args, **kwargs):
+			if doctype == "Company":
+				raise frappe.PermissionError
+			return True
+
+		with patch.object(mod.frappe, "has_permission", side_effect=guard), \
+		     patch.object(mod, "sync_customer_to_taxjar") as mock_sync:
+			with self.assertRaises(frappe.PermissionError):
+				mod.resync_customer("CUST-001", "A Co")
+		mock_sync.assert_not_called()
+
+
+class TestCustomerSyncCompaniesEndpoint(UnitTestCase):
+	"""What the button reads before it presses anything."""
+
+	def _call(self, taxjar_companies, allowed):
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			get_customer_sync_companies,
+		)
+
+		with patch(f"{_TJ}.frappe.has_permission", return_value=True), \
+		     patch(f"{_TJ}._customer_sync_companies", return_value=list(taxjar_companies)), \
+		     patch(f"{_TJ}._allowed_companies_by_customer", return_value={"CUST-001": allowed}):
+			return get_customer_sync_companies("CUST-001")
+
+	def test_it_is_the_taxjar_companies_narrowed_by_the_restriction(self):
+		self.assertEqual(self._call(("A Co", "C Co"), {"A Co", "D Co"}), ["A Co"])
+
+	def test_a_customer_open_to_all_gets_every_taxjar_company(self):
+		self.assertEqual(self._call(("A Co", "C Co"), None), ["A Co", "C Co"])
+
+	def test_a_customer_allowed_nowhere_taxjar_serves_gets_none(self):
+		"""The button then offers nothing and says why, rather than pressing
+		into a refusal."""
+		self.assertEqual(self._call(("A Co",), {"D Co"}), [])
+
+	def test_it_checks_read_on_the_customer(self):
+		from taxjar_integration.taxjar_integration import taxjar_integration as mod
+
+		with patch.object(mod.frappe, "has_permission", side_effect=frappe.PermissionError) as guard:
+			with self.assertRaises(frappe.PermissionError):
+				mod.get_customer_sync_companies("CUST-001")
+		self.assertEqual(guard.call_args[0][:2], ("Customer", "read"))
+
+	def test_it_writes_nothing(self):
+		"""A reader. The button calls it on every press, before it decides."""
+		from taxjar_integration.taxjar_integration import taxjar_integration as mod
+
+		with patch.object(mod.frappe, "has_permission", return_value=True), \
+		     patch.object(mod, "_customer_sync_companies", return_value=["A Co"]), \
+		     patch.object(mod, "_allowed_companies_by_customer", return_value={"CUST-001": None}), \
+		     patch.object(mod, "sync_customer_to_taxjar") as mock_sync, \
+		     patch.object(mod, "_enqueue_customer_sync") as mock_enqueue:
+			mod.get_customer_sync_companies("CUST-001")
+		mock_sync.assert_not_called()
+		mock_enqueue.assert_not_called()
 
 
 class TestBulkSyncAndCronRespectTheRestriction(UnitTestCase):

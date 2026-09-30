@@ -302,6 +302,81 @@ function open_manage_exemption_dialog(frm) {
 	update_requirement();
 }
 
+// A Customer is not company-scoped, but a TaxJar account is, so the press has
+// to name one. It used to send frappe.defaults.get_user_default("Company") - a
+// guess about the user rather than a fact about the customer. Where that
+// default was not a TaxJar company the press marked the customer Failed, and
+// where it was another company's, the customer went into that account.
+//
+// The server owns the list: TaxJar Settings decides which companies sync at
+// all, and the customer's own Restrict to Companies narrows it. One company
+// needs no question; several do, because the form carries one sync status and
+// can report one account's result.
+function _sync_to_taxjar(frm) {
+	return frappe
+		.xcall(
+			"taxjar_integration.taxjar_integration.taxjar_integration.get_customer_sync_companies",
+			{ customer_name: frm.doc.name }
+		)
+		.then((companies) => {
+			if (!companies || !companies.length) {
+				frappe.msgprint({
+					title: __("Nothing to Sync To"),
+					message: __(
+						"No company this customer belongs to is set up for TaxJar. Check TaxJar Settings, and the customer's own Restrict to Companies."
+					),
+					indicator: "orange",
+				});
+				return;
+			}
+
+			if (companies.length === 1) return _sync_to_company(frm, companies[0]);
+
+			// Deliberately one company per press, not all of them: a save
+			// decides to sync and to remove together, and only the save knows
+			// which companies it just dropped. See get_customer_sync_companies.
+			const dialog = new frappe.ui.Dialog({
+				title: __("Sync to TaxJar"),
+				fields: [
+					{
+						fieldname: "company",
+						fieldtype: "Select",
+						label: __("Company"),
+						options: companies,
+						default: companies[0],
+						reqd: 1,
+						description: __("Which company's TaxJar account to send this customer to."),
+					},
+				],
+				primary_action_label: __("Sync"),
+				primary_action: (values) => {
+					dialog.hide();
+					_sync_to_company(frm, values.company);
+				},
+			});
+			dialog.show();
+		});
+}
+
+function _sync_to_company(frm, company) {
+	return frappe
+		.xcall("taxjar_integration.taxjar_integration.taxjar_integration.resync_customer", {
+			customer_name: frm.doc.name,
+			company,
+		})
+		.then(() => frm.reload_doc())
+		.then(() => {
+			if (frm.doc.taxjar_customer_sync_status === "Failed") {
+				taxjar_integration.show_taxjar_sync_error(
+					__("TaxJar Sync Failed"),
+					frm.doc.taxjar_customer_sync_error || __("Sync failed.")
+				);
+			} else {
+				frappe.show_alert({ message: __("Customer sync queued"), indicator: "green" });
+			}
+		});
+}
+
 frappe.ui.form.on("Customer", {
 	// Registered once per form load, not refresh - see sales_invoice.js's
 	// identical setup(frm) listener for the full reasoning. on_customer_update
@@ -317,28 +392,7 @@ frappe.ui.form.on("Customer", {
 			frm.doc.taxjar_exemption_type &&
 			frm.fields_dict["taxjar_customer_id"]
 		) {
-			frm.add_custom_button(
-				__("Sync to TaxJar"),
-				() => {
-					frappe.xcall(
-						"taxjar_integration.taxjar_integration.taxjar_integration.resync_customer",
-						// A Customer is not company-scoped, but a TaxJar account is:
-						// without naming one this pushed the exemption to whichever
-						// credential sat first in the table.
-						{ customer_name: frm.doc.name, company: frappe.defaults.get_user_default("Company") },
-					).then(() => frm.reload_doc()).then(() => {
-						if (frm.doc.taxjar_customer_sync_status === "Failed") {
-							taxjar_integration.show_taxjar_sync_error(
-								__("TaxJar Sync Failed"),
-								frm.doc.taxjar_customer_sync_error || __("Sync failed.")
-							);
-						} else {
-							frappe.show_alert({ message: __("Customer sync queued"), indicator: "green" });
-						}
-					});
-				},
-				__("TaxJar"),
-			);
+			frm.add_custom_button(__("Sync to TaxJar"), () => _sync_to_taxjar(frm), __("TaxJar"));
 		}
 
 		render_exemption_summary(frm);
