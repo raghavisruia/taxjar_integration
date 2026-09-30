@@ -289,17 +289,75 @@
 	margin-bottom: 3px;
 }
 
-.info-card {
-	/*
-		clear: both, now that In Words moved inside .taxjar-totals-column -
-		this is the first thing below both floated columns, so it needs the
-		clearing itself. padding-top, not margin-top - a margin-top has no
-		visible effect on a box that clears floats (the "clearance" quirk
-		documented elsewhere in this file).
-	*/
+/*
+	Terms and Conditions: a small grey label like TAX ANALYSIS and IN
+	WORDS, over a light card. clear: both, as the first thing below the two
+	floated columns; padding-top, not margin-top - a margin-top has no
+	visible effect on a box that clears floats.
+*/
+.taxjar-terms {
 	clear: both;
-	padding-top: 40px;
+	padding-top: 30px;
+}
+
+.taxjar-terms-label {
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
 	color: #7c7c7c;
+	margin-bottom: 4px;
+}
+
+.taxjar-terms-body {
+	border: 1px solid #ededed;
+	border-radius: 10px;
+	padding: 10px 14px;
+	font-size: 11px;
+	line-height: 1.5;
+	color: #4d4d4d;
+}
+
+/*
+	Text pasted into the editor keeps its own inline size, colour and white
+	background on every span. The terms take the format's look instead.
+*/
+.taxjar-terms-body * {
+	font-size: inherit !important;
+	color: inherit !important;
+	background-color: transparent !important;
+}
+
+.taxjar-terms-body strong,
+.taxjar-terms-body b {
+	color: #171717 !important;
+	font-weight: 600;
+}
+
+/* The editor's own wrapper adds padding of its own. */
+.taxjar-terms-body .ql-editor {
+	padding: 0;
+}
+
+.taxjar-terms-body p {
+	margin: 0 0 6px 0;
+}
+
+.taxjar-terms-body ul,
+.taxjar-terms-body ol {
+	margin: 0;
+	padding-left: 16px;
+}
+
+.taxjar-terms-body li {
+	margin-bottom: 3px;
+	padding-left: 0;
+}
+
+.taxjar-terms-body > :last-child,
+.taxjar-terms-body .ql-editor > :last-child,
+.taxjar-terms-body li:last-child {
+	margin-bottom: 0;
 }
 
 /*
