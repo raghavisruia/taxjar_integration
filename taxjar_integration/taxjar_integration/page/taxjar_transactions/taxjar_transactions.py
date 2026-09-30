@@ -8,6 +8,7 @@ from taxjar_integration.taxjar_integration.pagination import (
 	parse_document_names,
 	paginated_response,
 	parse_filters,
+	parse_page,
 	parse_page_size,
 	permitted_count,
 )
@@ -100,7 +101,7 @@ def get_transactions(
 		return not_configured_response("invoices")
 
 	filters = parse_filters(filters)
-	page = max(1, int(page))
+	page = parse_page(page)
 	page_size = parse_page_size(page_size)
 
 	conditions = _build_conditions(filters, scope)

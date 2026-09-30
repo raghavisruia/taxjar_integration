@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import cint
 
 from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_MAX_SYNC_RETRIES,
@@ -18,10 +19,18 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 
 
 def purge_old_api_logs():
-	retention_days = frappe.db.get_single_value("TaxJar Settings", "log_retention_days")
-	if not retention_days:
+	"""Daily job: drop log rows older than the retention window.
+
+	Zero means keep everything, which the field's own description says. So does
+	a negative, which the field refuses (non_negative) but a raw
+	db.set_single_value from a console does not: -30 puts the cutoff a month in
+	the future and deletes the whole table, this morning's rows included. The
+	guard is here as well as on the field because this is the line that deletes.
+	"""
+	retention_days = cint(frappe.db.get_single_value("TaxJar Settings", "log_retention_days"))
+	if retention_days <= 0:
 		return
-	cutoff = frappe.utils.add_days(frappe.utils.today(), -int(retention_days))
+	cutoff = frappe.utils.add_days(frappe.utils.today(), -retention_days)
 	frappe.db.delete("TaxJar API Log", {"creation": ("<", cutoff)})
 
 

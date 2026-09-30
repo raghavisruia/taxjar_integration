@@ -13,6 +13,11 @@ PAGE_SIZES = (20, 50, 100)
 # reader press it and meet an error page.
 EXPORT_ROW_LIMIT = 10000
 
+# The most documents one bulk action may name. The pages themselves can send no
+# more than one page of checked rows, so this is the ceiling for a request that
+# did not come from them - every name costs a permission check and a read.
+MAX_BULK_DOCUMENTS = 500
+
 
 def parse_filters(filters):
 	"""Normalise the filters argument from a whitelisted page method."""
@@ -41,6 +46,14 @@ def parse_document_names(names, label="documents"):
 			title=frappe._("Invalid Request"),
 		)
 
+	if len(names) > MAX_BULK_DOCUMENTS:
+		frappe.throw(
+			frappe._("A bulk action takes at most {0} {1} at a time. This one named {2}.").format(
+				MAX_BULK_DOCUMENTS, label, len(names)
+			),
+			title=frappe._("Too Many Records"),
+		)
+
 	bad = [n for n in names if not isinstance(n, str) or not n.strip()]
 	if bad:
 		frappe.throw(
@@ -49,6 +62,22 @@ def parse_document_names(names, label="documents"):
 		)
 
 	return list(names)
+
+
+def parse_page(page):
+	"""Clamp a caller-supplied page number to one the table can hold.
+
+	The same treatment parse_page_size() gives its own argument, and for the
+	same reason: these are whitelisted endpoints, so the value is
+	attacker-controlled. int("abc") raised, and the caller met a 500 with a
+	traceback rather than a page of rows.
+	"""
+	try:
+		page = int(page)
+	except (TypeError, ValueError):
+		return 1
+
+	return max(1, page)
 
 
 def parse_page_size(page_size):

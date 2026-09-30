@@ -18992,6 +18992,156 @@ class TestBulkBoundariesRefuseNonNames(UnitTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			parse_document_names('"SINV-001"')
 
+	def test_a_bulk_action_takes_at_most_five_hundred_names(self):
+		"""The pages send one page of checked rows, so a longer list did not
+		come from them. Every name costs a permission check and a read."""
+		from taxjar_integration.taxjar_integration.pagination import (
+			MAX_BULK_DOCUMENTS,
+			parse_document_names,
+		)
+
+		at_the_limit = [f"SINV-{i:05d}" for i in range(MAX_BULK_DOCUMENTS)]
+		self.assertEqual(len(parse_document_names(at_the_limit)), MAX_BULK_DOCUMENTS)
+
+		with self.assertRaises(frappe.ValidationError):
+			parse_document_names(at_the_limit + ["SINV-99999"])
+
+	def test_the_page_number_is_clamped_like_the_page_size(self):
+		"""int("abc") raised, so a crafted page number answered with a 500 and
+		a traceback where the page size beside it answered with a page."""
+		from taxjar_integration.taxjar_integration.pagination import parse_page
+
+		self.assertEqual(parse_page(3), 3)
+		self.assertEqual(parse_page("3"), 3)
+		self.assertEqual(parse_page("abc"), 1)
+		self.assertEqual(parse_page(None), 1)
+		self.assertEqual(parse_page(0), 1)
+		self.assertEqual(parse_page(-5), 1)
+
+	def test_both_list_pages_read_the_page_number_through_it(self):
+		"""A guard one page applies and the other does not is the state this
+		replaced."""
+		import os
+
+		base = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "page"))
+		for page in ("taxjar_transactions", "taxjar_customers"):
+			with self.subTest(page=page):
+				with open(os.path.join(base, page, f"{page}.py")) as f:
+					source = f.read()
+				self.assertIn("page = parse_page(page)", source)
+				self.assertNotIn("int(page)", source)
+
+
+class TestGetTaxDataHandlesAnUnreadableCountry(UnitTestCase):
+	"""Country.code is mandatory, so an empty one means a Link pointing at
+	nothing or a row written around validation. .upper() on it raised an
+	AttributeError inside validate: the document could not be saved, and the
+	message named neither the address nor the country. Four other readers of
+	the same column already guarded it.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.taxjar_integration"
+
+	def _call(self, country_code):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_tax_data
+
+		config = MagicMock(tax_account_head="Sales Tax - TC", shipping_account_head="Freight - TC")
+		address = MagicMock(
+			pincode="78701", city="Austin", address_line1="1 Main St",
+			country="Atlantis", state="TX",
+		)
+		address.get.side_effect = lambda key, default=None: {
+			"state": "TX", "taxjar_state_code": "TX", "country": "Atlantis",
+		}.get(key, default)
+
+		def fake_get_value(doctype, *args, **kwargs):
+			if doctype == "Country":
+				return country_code
+			return DEFAULT
+
+		doc = _make_doc(items=[_FakeItem(idx=1, qty=1, rate=100.0, net_amount=100.0)], taxes=[])
+
+		with patch(f"{self.MOD}.get_company_config", return_value=config), \
+		     patch(f"{self.MOD}.get_company_address_details", return_value=address), \
+		     patch(f"{self.MOD}.get_shipping_address_details", return_value=address), \
+		     patch(f"{self.MOD}.frappe.db.get_value", wraps=frappe.db.get_value, side_effect=fake_get_value), \
+		     patch(f"{self.MOD}._get_usd_exchange_rate", return_value=None), \
+		     patch(f"{self.MOD}._get_taxjar_customer_id", return_value=None):
+			return get_tax_data(doc)
+
+	def test_a_country_with_no_code_builds_no_payload(self):
+		"""No payload, and no exception. set_sales_tax() records the reason,
+		which is what it already does for a destination it cannot price."""
+		self.assertIsNone(self._call(None))
+
+	def test_an_empty_country_code_builds_no_payload(self):
+		self.assertIsNone(self._call(""))
+
+	def test_a_country_with_a_code_still_builds_one(self):
+		payload = self._call("us")
+		self.assertIsNotNone(payload)
+		self.assertEqual(payload["from_country"], "US")
+		self.assertEqual(payload["to_country"], "US")
+
+
+class TestPurgeOldApiLogs(UnitTestCase):
+	"""The daily job that trims the log table.
+
+	Zero means keep everything, which the field's description says. A negative
+	put the cutoff in the future and deleted every row, this morning's included.
+	The field now refuses one (non_negative); this covers the job, which is the
+	line that deletes and which a raw db.set_single_value can still reach.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.tasks"
+
+	def _run(self, retention_days):
+		from taxjar_integration.taxjar_integration.tasks import purge_old_api_logs
+
+		with patch(f"{self.MOD}.frappe.db.get_single_value", return_value=retention_days), \
+		     patch(f"{self.MOD}.frappe.db.delete") as mock_delete:
+			purge_old_api_logs()
+		return mock_delete
+
+	def test_a_negative_retention_deletes_nothing(self):
+		self._run(-30).assert_not_called()
+
+	def test_zero_keeps_every_row(self):
+		self._run(0).assert_not_called()
+
+	def test_an_unwritten_setting_keeps_every_row(self):
+		self._run(None).assert_not_called()
+
+	def test_a_real_retention_deletes_what_is_older_than_the_cutoff(self):
+		mock_delete = self._run(15)
+		mock_delete.assert_called_once()
+		doctype, filters = mock_delete.call_args[0]
+		self.assertEqual(doctype, "TaxJar API Log")
+		operator, cutoff = filters["creation"]
+		self.assertEqual(operator, "<")
+		self.assertEqual(cutoff, frappe.utils.add_days(frappe.utils.today(), -15))
+
+	def test_the_field_itself_refuses_a_negative(self):
+		"""frappe's own non_negative flag, so the form, the guided setup's
+		save_connection and any doc.save() are covered by one declaration.
+
+		Read from the DocType JSON the app ships, not from this site's meta:
+		the flag reaches a site through migrate, and a test that asserted the
+		live meta would report the state of the last migrate rather than the
+		state of the app.
+		"""
+		import os
+
+		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.json")
+		with open(path) as f:
+			doctype_json = json.load(f)
+
+		field = next(
+			f for f in doctype_json["fields"] if f["fieldname"] == "log_retention_days"
+		)
+		self.assertEqual(field.get("non_negative"), 1)
+
+
 # ── Step 6: address split, failure modes, bulk paths ──────────────────────────
 
 

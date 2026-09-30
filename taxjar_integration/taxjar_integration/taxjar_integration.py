@@ -1053,13 +1053,15 @@ def get_tax_data(doc):
 
 	from_address = get_company_address_details(doc)
 	from_shipping_state = from_address.get("state")
-	from_country_code = frappe.db.get_value("Country", from_address.country, "code", cache=True)
-	from_country_code = from_country_code.upper()
+	# "or ''" like the four other readers of this column. Country.code is
+	# mandatory, so an empty one means a Link pointing at nothing, or a row
+	# written around validation. Either way .upper() on it ended the save with
+	# an AttributeError naming neither the address nor the country.
+	from_country_code = (frappe.db.get_value("Country", from_address.country, "code", cache=True) or "").upper()
 
 	to_address = get_shipping_address_details(doc)
 	to_shipping_state = to_address.get("state")
-	to_country_code = frappe.db.get_value("Country", to_address.country, "code", cache=True)
-	to_country_code = to_country_code.upper()
+	to_country_code = (frappe.db.get_value("Country", to_address.country, "code", cache=True) or "").upper()
 
 	_record_address_context(doc, from_address, to_address)
 
@@ -1086,7 +1088,7 @@ def get_tax_data(doc):
 
 	# The company end must always resolve. TaxJar files United States sales tax
 	# state by state, so a payload with no ship-from state belongs nowhere.
-	if not from_shipping_state:
+	if not from_shipping_state or not from_country_code:
 		return None
 
 	# The destination end is not the same question. A United States sale with no
@@ -1094,6 +1096,11 @@ def get_tax_data(doc):
 	# a country with no ISO region, or to an address that names none, is a
 	# complete sale - TaxJar is told what there is.
 	if not to_shipping_state and to_country_code == "US":
+		return None
+
+	# An unreadable destination country is not an export, it is an unknown. The
+	# test above lets one through because it asks only about the United States.
+	if not to_country_code:
 		return None
 
 	usd_rate = _get_usd_exchange_rate(doc)

@@ -71,7 +71,8 @@
    "description": "Automatically delete API Logs older than specified days.<br> (Set 0 to retain logs)",
    "fieldname": "log_retention_days",
    "fieldtype": "Int",
-   "label": "Log Retention (Days)"
+   "label": "Log Retention (Days)",
+   "non_negative": 1
   },
   {
    "depends_on": "eval: doc.taxjar_enabled == 1",
