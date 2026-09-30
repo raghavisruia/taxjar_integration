@@ -138,10 +138,55 @@ taxjar_integration.DataTableManager = class DataTableManager {
 		this.$wrapper.on("input", ".dt-filter", push_filters);
 	}
 
+	// datatable.refresh() rebuilds the whole header (columnmanager.js:28-45),
+	// filter row included, so the new inputs come back empty and the row comes
+	// back hidden. The server filter still holds the old text, so the rows stay
+	// filtered by a word the reader can no longer see. The filter row's state is
+	// read before the rebuild and put back after it, focus and caret included,
+	// because a refresh lands while the reader is still typing.
 	refresh(data, columns) {
 		this.data = data || [];
+		const filter_state = this.get_filter_state();
 		this.datatable.refresh(this.data, columns);
+		this.restore_filter_state(filter_state);
 		this.fit_height();
+	}
+
+	// Read off the DOM, not columnmanager.isFilterShown: nothing here sets that
+	// flag, yet the row is on screen, so the flag cannot say whether it shows.
+	get_filter_state() {
+		const $row = this.$wrapper.find(".dt-row-filter");
+		const values = {};
+		this.$wrapper.find(".dt-filter").each((_, input) => {
+			if (input.value) values[input.dataset.colIndex] = input.value;
+		});
+
+		const focused = document.activeElement;
+		const has_focus = focused?.classList.contains("dt-filter") && this.$wrapper[0].contains(focused);
+
+		return {
+			shown: $row.length > 0 && $row.css("display") !== "none",
+			values,
+			focus: has_focus
+				? {
+						col_index: focused.dataset.colIndex,
+						start: focused.selectionStart,
+						end: focused.selectionEnd,
+				  }
+				: null,
+		};
+	}
+
+	restore_filter_state({ shown, values, focus }) {
+		if (!shown && !Object.keys(values).length) return;
+		this.datatable.columnmanager.toggleFilter(true);
+
+		this.$wrapper.find(".dt-filter").each((_, input) => {
+			input.value = values[input.dataset.colIndex] || "";
+			if (focus?.col_index !== input.dataset.colIndex) return;
+			input.focus();
+			input.setSelectionRange(focus.start, focus.end);
+		});
 	}
 
 	get_dt_columns() {
