@@ -97,8 +97,8 @@
 					<div class="info-text text-bold">{{ doc.company }}</div>
 					{% if doc.company_address_display %}<div class="info-text">{{ clean_address(doc.company_address_display) }}</div>{% endif %}
 				</td>
-				<td style="width: 45%">
-					<table style="width: 100%">
+				<td class="taxjar-doc-details-cell" style="width: 45%">
+					<table class="taxjar-doc-details">
 						<tr>
 							<td class="title" style="width: 45%">{{ _("Invoice Number") }}</td>
 							<td class="info-text text-right">{{ doc.name }}</td>
@@ -130,12 +130,12 @@
 			</tr>
 			<tr>
 				<td style="width: 55%">
-					<div class="title mt-15">{{ _("Bill To") }}</div>
+					<div class="title">{{ _("Bill To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
 					{% if doc.address_display %}<div class="info-text">{{ clean_address(doc.address_display) }}</div>{% endif %}
 				</td>
 				<td style="width: 45%">
-					<div class="title mt-15">{{ _("Ship To") }}</div>
+					<div class="title">{{ _("Ship To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
 					<div class="info-text">{{ clean_address(doc.shipping_address or doc.address_display or "") }}</div>
 				</td>
