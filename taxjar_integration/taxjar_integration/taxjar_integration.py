@@ -4630,7 +4630,24 @@ def recover_stuck_customer_syncs():
 
 
 def on_customer_delete(doc, method):
-	"""Delete customer from TaxJar when trashed in ERPNext."""
+	"""Delete the customer from TaxJar when it is deleted here, or stop the delete.
+
+	Registered on after_delete, not on_trash. Frappe runs on_trash before its
+	link check, so deleting a Customer that has invoices used to remove it from
+	TaxJar, and then the link check refused the delete and the Customer stayed.
+	after_delete runs once the link check has passed, in the same transaction.
+
+	A failed DELETE throws, which rolls the whole delete back. Letting the
+	delete go on would leave the customer in TaxJar with no row to retry from:
+	the pending-removal list and the cron that reads it both live on the
+	Customer. India Compliance cancels an e-Invoice the same way, inline and
+	failing closed. A 404 is not a failure; delete_customer_from_taxjar()
+	treats it as done.
+
+	Every TaxJar company, not only the ones the customer is restricted to. A
+	company the customer dropped can still hold it while that removal is
+	pending, and a DELETE the account does not need costs only a 404.
+	"""
 	taxjar_customer_id = doc.get("taxjar_customer_id")
 	if not taxjar_customer_id:
 		return
@@ -4638,19 +4655,26 @@ def on_customer_delete(doc, method):
 	if not _is_taxjar_enabled():
 		return
 
-	taxjar_settings = frappe.get_single("TaxJar Settings")
-	for config in taxjar_settings.company_config or []:
-		if not company_scope(config.company, config=config).uses_taxjar:
-			continue
+	for company in _customer_sync_companies():
 		try:
-			delete_customer_from_taxjar(taxjar_customer_id, config.company)
-		except Exception:
-			_get_taxjar_logger().error(traceback.format_exc())
+			delete_customer_from_taxjar(taxjar_customer_id, company)
+		except Exception as err:
+			info = classify_taxjar_error(err)
+			if info["kind"] == "unknown":
+				_get_taxjar_logger().error(info["log_detail"])
 			log_taxjar_call(
 				action="delete_customer",
 				status="error",
-				error=traceback.format_exc(),
-				context={"doctype": "Customer", "name": doc.name, "company": config.company},
+				error=info["log_detail"],
+				context={"doctype": "Customer", "name": doc.name, "company": company},
+			)
+			# Stops at the first failure. Each company already done has lost
+			# the customer while the Customer stays; the next sync puts it back
+			# (a PUT that meets a 404 creates), and a second delete finishes it.
+			frappe.throw(
+				_("{0} was not deleted, because TaxJar could not remove it from the account of {1}: "
+				  "{2} Try again later.").format(frappe.bold(doc.name), frappe.bold(company), info["message"]),
+				title=_("Customer Not Deleted"),
 			)
 
 

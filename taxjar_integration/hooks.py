@@ -195,7 +195,7 @@ doc_events = {
 	"Customer": {
 		"validate": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_validate",
 		"on_update": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_update",
-		"on_trash": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_delete",
+		"after_delete": "taxjar_integration.taxjar_integration.taxjar_integration.on_customer_delete",
 	},
 	"Workspace": {
 		"validate": "taxjar_integration.install.keep_guided_setup_alert",

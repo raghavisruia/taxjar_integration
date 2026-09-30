@@ -10389,26 +10389,139 @@ class TestOnCustomerDelete(UnitTestCase):
 
 		mock_delete.assert_not_called()
 
-	def test_does_not_block_delete_on_api_error(self):
-		"""API errors during delete should be caught, not prevent Customer deletion."""
+	def test_blocks_delete_when_taxjar_refuses(self):
+		"""A failed DELETE stops the Customer delete. Once the row is gone,
+		nothing is left to retry from, so the customer would stay in TaxJar."""
 		doc = self._make_customer_doc(customer_id="CUST-001")
-		config = MagicMock(company="Test Co")
-		settings = MagicMock()
-		settings.company_config = [config]
 
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_single_value", return_value=1), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.frappe.get_single", return_value=settings), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.get_region", return_value="United States"), \
-		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar", side_effect=Exception("API down")), \
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._customer_sync_companies", return_value=["Test Co"]), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar",
+		           side_effect=taxjar.exceptions.TaxJarConnectionError("timed out")), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
 		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_taxjar_logger"):
-			on_customer_delete(doc, None)  # should not raise
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				on_customer_delete(doc, None)
 
-	def test_hooks_registers_on_trash(self):
+		self.assertIn("Test Co", str(ctx.exception))
+		self.assertIn("unreachable", str(ctx.exception))
+
+	def test_stops_at_the_first_company_that_fails(self):
+		"""Each company deleted before the failure has already lost the
+		customer while the Customer stays, so stop sending at once."""
+		doc = self._make_customer_doc(customer_id="CUST-001")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._customer_sync_companies", return_value=["A Co", "B Co"]), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar",
+		           side_effect=taxjar.exceptions.TaxJarConnectionError("timed out")) as mock_delete, \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._get_taxjar_logger"):
+			with self.assertRaises(frappe.ValidationError):
+				on_customer_delete(doc, None)
+
+		mock_delete.assert_called_once_with("CUST-001", "A Co")
+
+	def test_deletes_from_companies_the_customer_is_restricted_away_from(self):
+		"""The customer can still be in the account of a company it dropped,
+		while that removal is pending. Only a delete from every TaxJar company
+		covers it, so the loop must not apply Restrict to Companies."""
+		doc = self._make_customer_doc(customer_id="CUST-001")
+		doc.get.side_effect = lambda field, default=None: {
+			"taxjar_customer_id": "CUST-001",
+			"restrict_to_companies": 1,
+			"allowed_companies": [MagicMock(company="A Co")],
+			"taxjar_customer_pending_removals": "B Co",
+		}.get(field, default)
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._customer_sync_companies", return_value=["A Co", "B Co"]), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar") as mock_delete:
+			on_customer_delete(doc, None)
+
+		self.assertEqual(mock_delete.call_args_list, [call("CUST-001", "A Co"), call("CUST-001", "B Co")])
+
+	def test_hooks_registers_after_delete(self):
+		"""after_delete, not on_trash: Frappe runs on_trash before its link
+		check, so a Customer with invoices left TaxJar and then stayed here."""
 		from taxjar_integration import hooks
 		customer_events = hooks.doc_events.get("Customer", {})
-		self.assertIn("on_trash", customer_events)
-		self.assertIn("on_customer_delete", customer_events["on_trash"])
+		self.assertIn("on_customer_delete", customer_events.get("after_delete", ""))
+		self.assertNotIn("on_customer_delete", str(customer_events.get("on_trash", "")))
+
+
+class TestCustomerDeleteThroughFrappe(UnitTestCase):
+	"""on_customer_delete as frappe.delete_doc() runs it, on a real Customer.
+
+	The unit tests above call the hook directly, so they cannot see where in
+	the delete it runs. These tests can. The TaxJar call and the company list
+	are patched, so no test reaches TaxJar or reads the site's own settings.
+	"""
+
+	def setUp(self):
+		suffix = frappe.generate_hash(length=6)
+		# Off while the fixture is written, so on_customer_update does not
+		# queue a sync to the site's real TaxJar account.
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=False):
+			self.customer = frappe.get_doc({
+				"doctype": "Customer",
+				"customer_name": f"_TaxJar Delete {suffix}",
+				"customer_group": frappe.db.get_value("Customer Group", {"is_group": 0}, "name"),
+				"territory": frappe.db.get_value("Territory", {"is_group": 0}, "name"),
+			}).insert(ignore_permissions=True)
+		self.taxjar_customer_id = f"TJ-{suffix}"
+		frappe.db.set_value("Customer", self.customer.name, "taxjar_customer_id", self.taxjar_customer_id)
+		self.addCleanup(self._drop, "Customer", self.customer.name)
+
+	def _drop(self, doctype, name):
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar"):
+			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True,
+			                  ignore_missing=True, delete_permanently=True)
+
+	def _taxjar_on(self, **delete_kwargs):
+		"""TaxJar on for one company, and the DELETE replaced by a mock."""
+		self.enterContext(patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled",
+		                        return_value=True))
+		self.enterContext(patch("taxjar_integration.taxjar_integration.taxjar_integration._customer_sync_companies",
+		                        return_value=["Test Co"]))
+		self.enterContext(patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"))
+		return self.enterContext(patch(
+			"taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar", **delete_kwargs
+		))
+
+	def test_linked_customer_is_not_removed_from_taxjar(self):
+		"""Frappe refuses to delete a Customer that other documents link to.
+		That refusal must come before the DELETE, not after it."""
+		project = frappe.get_doc({
+			"doctype": "Project",
+			"project_name": f"_TaxJar Delete {self.customer.name}",
+			"customer": self.customer.name,
+		}).insert(ignore_permissions=True)
+		self.addCleanup(self._drop, "Project", project.name)
+		mock_delete = self._taxjar_on()
+
+		with self.assertRaises(frappe.LinkExistsError):
+			frappe.delete_doc("Customer", self.customer.name, ignore_permissions=True)
+
+		mock_delete.assert_not_called()
+
+	def test_unlinked_customer_is_removed_from_taxjar(self):
+		mock_delete = self._taxjar_on()
+
+		frappe.delete_doc("Customer", self.customer.name, ignore_permissions=True)
+
+		mock_delete.assert_called_once_with(self.taxjar_customer_id, "Test Co")
+
+	def test_failed_delete_keeps_the_customer(self):
+		"""The throw reaches the caller, and the request's rollback keeps the row."""
+		self._taxjar_on(side_effect=taxjar.exceptions.TaxJarConnectionError("timed out"))
+
+		frappe.db.savepoint("taxjar_customer_delete")
+		with self.assertRaises(frappe.ValidationError):
+			frappe.delete_doc("Customer", self.customer.name, ignore_permissions=True)
+		frappe.db.rollback(save_point="taxjar_customer_delete")
+
+		self.assertTrue(frappe.db.exists("Customer", self.customer.name))
 
 
 # ── TaxJar Customer API — _make_safe_customer_id ──────────────────────────
