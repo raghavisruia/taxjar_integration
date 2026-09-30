@@ -184,7 +184,9 @@ function escape_html(value) {
 function badge_html(opts = {}) {
 	const theme = opts.theme === "orange" ? "amber" : opts.theme;
 	const attr = theme && theme !== "gray" ? ` data-theme="${theme}"` : "";
-	return `<span class="es-badge"${attr}>${escape_html(opts.label || "")}</span>`;
+	// frappe draws the icon before the label, from its own sprite.
+	const icon = opts.icon ? `<svg class="icon icon-${opts.icon}"></svg>` : "";
+	return `<span class="es-badge"${attr}>${icon}${escape_html(opts.label || "")}</span>`;
 }
 
 export function install_desk() {

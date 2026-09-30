@@ -1000,10 +1000,9 @@ taxjar_integration._confirm_foreign_tax_rows = function (frm) {
 };
 
 taxjar_integration._hash_foreign_rows = function (rows) {
-	// affected_item_count is part of the fingerprint too - a negative row's
-	// rendered sentence ("...across {0} line item(s)...") changes when the
-	// item set it's distributed across changes, even if the row's own
-	// account_head/amount/treatment stay the same.
+	// affected_item_count is part of the fingerprint too - a negative row is
+	// spread across the items, so a changed item set changes what it does,
+	// even if the row's own account_head/amount/treatment stay the same.
 	return JSON.stringify(
 		rows.map((row) => [row.account_head, row.amount, row.treatment, row.affected_item_count])
 	);
@@ -1018,36 +1017,52 @@ taxjar_integration._show_foreign_tax_rows_dialog = function (frm, rows, ack_hash
 		resolve();
 	};
 
-	let table_rows = rows
-		.map((row) => {
-			let treatment =
-				row.treatment === "taxable_line_item"
-					? __("Added as an additional taxable line item: {0}", [
-							frappe.utils.escape_html(row.description || ""),
-					  ])
-					: __("Applied as a discount across {0} line item(s) - consider using Additional Discount instead", [
-							row.affected_item_count || 0,
-					  ]);
+	// The Type column says which way the row moves the taxable value, with an
+	// arrow and a color, and the Impact column says how TaxJar is sent it. The
+	// row's own description is on the Sales Taxes and Charges row already.
+	let taxable = (row) => row.treatment === "taxable_line_item";
 
-			return `<tr>
+	let type_badge = (row) =>
+		taxable(row)
+			? frappe.ui.badge.html({
+					label: __("Increases Taxable Value"),
+					icon: "arrow-up",
+					theme: "blue",
+					size: "sm",
+			  })
+			: frappe.ui.badge.html({
+					label: __("Decreases Taxable Value"),
+					icon: "arrow-down",
+					theme: "amber",
+					size: "sm",
+			  });
+
+	let impact = (row) =>
+		taxable(row)
+			? __("Additional line item is added & taxed.")
+			: __("Discount is applied to each line item proportionally.");
+
+	let table_rows = rows
+		.map(
+			(row) => `<tr>
 				<td>${frappe.utils.escape_html(row.account_head)}</td>
-				<td>${frappe.utils.escape_html(row.description || "")}</td>
-				<td class="text-right">${format_currency(row.amount, frm.doc.currency)}</td>
-				<td>${treatment}</td>
-			</tr>`;
-		})
+				<td class="text-right text-nowrap">${format_currency(row.amount, frm.doc.currency)}</td>
+				<td class="text-nowrap">${type_badge(row)}</td>
+				<td class="text-muted">${impact(row)}</td>
+			</tr>`
+		)
 		.join("");
 
 	let html = `
-		<p class="text-muted">${__("This document has Sales Taxes and Charges rows TaxJar doesn't already recognize as tax or shipping. Here's how they'll be treated for tax calculation:")}</p>
+		<p class="text-muted">${__("Additional rows have been added to Sales Taxes & Charges, please review.")}</p>
 		<div style="max-height:300px;overflow-y:auto;margin-top:10px">
-			<table class="table table-bordered table-hover">
-				<thead style="background-color:var(--subtle-fg)">
+			<table class="table">
+				<thead>
 					<tr>
 						<th>${__("Ledger")}</th>
-						<th>${__("Description")}</th>
 						<th class="text-right">${__("Amount")}</th>
-						<th>${__("Treatment")}</th>
+						<th>${__("Type")}</th>
+						<th>${__("Impact")}</th>
 					</tr>
 				</thead>
 				<tbody>${table_rows}</tbody>
@@ -1057,12 +1072,16 @@ taxjar_integration._show_foreign_tax_rows_dialog = function (frm, rows, ack_hash
 
 	let d = new frappe.ui.Dialog({
 		title: __("Confirm Tax Treatment for Extra Charges"),
+		// Wide enough that the Type badge stays on one line beside the ledger.
+		size: "large",
 		fields: [{ fieldtype: "HTML", fieldname: "foreign_rows_table", options: html }],
 		primary_action_label: __("Proceed"),
 		primary_action() {
 			frm._taxjar_foreign_rows_ack = ack_hash;
-			d.hide();
+			// Settle before hide: hide() runs on_hide, which settles as Cancel
+			// and so stops the save that Proceed must let through.
 			settle(true);
+			d.hide();
 		},
 		secondary_action_label: __("Cancel"),
 		secondary_action() {
