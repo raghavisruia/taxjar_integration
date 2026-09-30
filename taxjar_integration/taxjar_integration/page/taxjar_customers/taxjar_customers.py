@@ -4,6 +4,7 @@ from frappe import _
 from taxjar_integration.taxjar_integration.exporting import send_xlsx
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
+	clamp_page,
 	parse_document_names,
 	not_configured_response,
 	paginated_response,
@@ -131,6 +132,7 @@ def get_customers(
 	conditions = _build_conditions(filters, scope)
 
 	total = permitted_count("Customer", conditions)
+	page = clamp_page(page, total, page_size)
 	customers = _fetch_customers(conditions, (page - 1) * page_size, page_size)
 
 	return paginated_response("customers", customers, total, page, page_size)

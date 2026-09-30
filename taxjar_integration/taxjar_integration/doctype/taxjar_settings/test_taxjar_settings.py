@@ -10992,8 +10992,10 @@ class TestCustomerConfigPageAPI(UnitTestCase):
 		self.assertGreaterEqual(result["total_pages"], 1)
 
 	def test_get_customers_page_out_of_range(self):
+		"""A page past the end answers with the last page, not an empty table."""
 		result = get_customers(page=9999)
-		self.assertEqual(len(result["customers"]), 0)
+		self.assertEqual(result["page"], result["total_pages"])
+		self.assertEqual(bool(result["customers"]), bool(result["total"]))
 
 	def test_configure_exemption_writes_type_and_regions_together(self):
 		"""One call sets the type and its regions, so the two cannot disagree."""
@@ -19650,6 +19652,33 @@ class TestBulkBoundariesRefuseNonNames(UnitTestCase):
 					source = f.read()
 				self.assertIn("page = parse_page(page)", source)
 				self.assertNotIn("int(page)", source)
+
+	def test_a_page_past_the_end_becomes_the_last_page(self):
+		from taxjar_integration.taxjar_integration.pagination import clamp_page
+
+		self.assertEqual(clamp_page(9, total=45, page_size=20), 3)
+		self.assertEqual(clamp_page(3, total=45, page_size=20), 3)
+		self.assertEqual(clamp_page(2, total=45, page_size=20), 2)
+		self.assertEqual(clamp_page(5, total=0, page_size=20), 1)
+
+	def test_both_list_pages_return_the_last_page_for_a_page_past_the_end(self):
+		"""A bulk action on the last page moves its rows off the tab, and the
+		reload asks for the same page. That page no longer exists, so the
+		table came back empty under "Page 3 of 2"."""
+		from taxjar_integration.taxjar_integration.page.taxjar_customers import taxjar_customers
+		from taxjar_integration.taxjar_integration.page.taxjar_transactions import taxjar_transactions
+
+		for module, endpoint, fetch in (
+			(taxjar_transactions, taxjar_transactions.get_transactions, "_fetch_invoices"),
+			(taxjar_customers, taxjar_customers.get_customers, "_fetch_customers"),
+		):
+			with self.subTest(endpoint=endpoint.__name__):
+				with patch.object(module, "permitted_count", return_value=45), \
+				     patch.object(module, fetch, return_value=[]) as mock_fetch:
+					result = endpoint(filters={}, page=9, page_size=20)
+
+				self.assertEqual(result["page"], 3)
+				self.assertIn(40, mock_fetch.call_args.args)
 
 
 class TestGetTaxDataHandlesAnUnreadableCountry(UnitTestCase):

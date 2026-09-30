@@ -80,6 +80,17 @@ def parse_page(page):
 	return max(1, page)
 
 
+def clamp_page(page, total, page_size):
+	"""Turn a page past the end into the last page.
+
+	A bulk action on the last page can move every row on it off the tab, and
+	the reload asks for the same page again. That page no longer exists, so the
+	table came back empty under "Page 3 of 2". The reply carries the page it
+	used, and the paginator renders from the reply.
+	"""
+	return min(page, max(1, -(-total // page_size)))
+
+
 def parse_page_size(page_size):
 	"""Clamp a caller-supplied page size to the sizes the UI offers.
 

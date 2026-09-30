@@ -4,6 +4,7 @@ from frappe import _
 from taxjar_integration.taxjar_integration.exporting import send_xlsx
 from taxjar_integration.taxjar_integration.pagination import (
 	PAGE_SIZE,
+	clamp_page,
 	not_configured_response,
 	parse_document_names,
 	paginated_response,
@@ -107,6 +108,7 @@ def get_transactions(
 	conditions = _build_conditions(filters, scope)
 
 	total = permitted_count("Sales Invoice", conditions)
+	page = clamp_page(page, total, page_size)
 	invoices = _fetch_invoices(conditions, scope, (page - 1) * page_size, page_size)
 
 	return paginated_response("invoices", invoices, total, page, page_size)
