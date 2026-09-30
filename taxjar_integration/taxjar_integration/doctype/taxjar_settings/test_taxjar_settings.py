@@ -12138,6 +12138,128 @@ class TestGetTaxjarBreakdownHtml(UnitTestCase):
 		self.assertIn("&lt;script&gt;", html)
 
 
+# ── No tax charged: a reason in place of an empty breakdown ──
+# TaxJar answers a non-taxable line (bottled water in Florida, say) with no
+# jurisdiction rows and a 0% total. The table of nothing that rendered from
+# that told the reader nothing; the form and the print format now say why.
+
+def _zero_tax_doc(**fields):
+	doc = _make_doc()
+	doc.taxjar_has_nexus = 1
+	doc.taxjar_customer_taxable = 1
+	doc.taxjar_transaction_exempt = 0
+	doc.taxjar_ship_to = "Miami, FL 33169"
+	doc.taxjar_breakdown_json = json.dumps({
+		"currency": "USD",
+		"transaction": [],
+		"totals": {"rate": 0.0, "amount_to_collect": 0.0, "taxable_amount": 0.0},
+		"line_items": [{"id": "1", "tax_collectable": 0.0, "taxable_amount": 0.0,
+		                "item_amount": 1000.0, "breakdown": []}],
+	})
+	for key, value in fields.items():
+		setattr(doc, key, value)
+	return doc
+
+
+class TestZeroTaxState(UnitTestCase):
+
+	def test_non_taxable_items_replace_the_empty_table(self):
+		doc = _zero_tax_doc(taxjar_product_taxable="No")
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn(
+			"None of the items are taxable in Miami, FL 33169, hence no taxes are charged.", html
+		)
+		self.assertNotIn("<table", html)
+
+	def test_exempt_customer_is_the_reason(self):
+		doc = _zero_tax_doc(taxjar_customer_taxable=0, taxjar_product_taxable="No")
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("The customer is exempt from sales tax", html)
+
+	def test_exempt_transaction_is_the_reason(self):
+		doc = _zero_tax_doc(taxjar_transaction_exempt=1)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("This transaction is marked as exempt from sales tax", html)
+
+	def test_taxable_items_with_no_tax_get_a_general_reason(self):
+		doc = _zero_tax_doc(taxjar_product_taxable="Yes")
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("No sales tax applies in Miami, FL 33169", html)
+
+	def test_a_calculation_with_tax_still_shows_the_table(self):
+		doc = _make_doc()
+		doc.taxjar_has_nexus = 1
+		_store_breakdown_data(_make_us_breakdown(), doc)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("<table", html)
+		self.assertNotIn("hence no taxes are charged", html)
+
+	def test_no_nexus_keeps_its_own_message(self):
+		"""No breakdown JSON: the no-nexus path clears it (_clear_breakdown_data)."""
+		doc = _zero_tax_doc(
+			taxjar_has_nexus=0,
+			taxjar_nexus_reason="Nexus not configured for NJ",
+			taxjar_breakdown_json=None,
+		)
+		html = get_taxjar_breakdown_html(doc)
+		self.assertIn("Nexus not configured for NJ, hence no taxes are charged.", html)
+		self.assertNotIn("None of the items", html)
+
+
+class TestTaxjarPrintContext(UnitTestCase):
+
+	def test_no_taxable_items_is_the_zero_tax_reason(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+
+		context = get_taxjar_print_context(_zero_tax_doc(taxjar_product_taxable="No"))
+		self.assertIn("None of the items are taxable", context.zero_tax_reason)
+
+	def test_a_calculation_with_tax_gives_no_zero_tax_reason(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+
+		doc = _make_doc()
+		doc.taxjar_has_nexus = 1
+		doc.taxjar_customer_taxable = 1
+		_store_breakdown_data(_make_us_breakdown(), doc)
+		self.assertIsNone(get_taxjar_print_context(doc).zero_tax_reason)
+
+	def test_exempt_transaction_reason_is_written_for_the_invoice(self):
+		"""The reported case. taxjar_customer_taxable_reason is the form's
+		status line, "Taxable, but transaction is marked as exempt"."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+
+		context = get_taxjar_print_context(_zero_tax_doc(taxjar_transaction_exempt=1))
+		self.assertEqual(
+			context.exemption_reason, "This transaction is marked as exempt from sales tax"
+		)
+
+	def test_exempt_customer_reason(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+
+		context = get_taxjar_print_context(_zero_tax_doc(taxjar_customer_taxable=0))
+		self.assertEqual(context.exemption_reason, "The customer is exempt from sales tax")
+
+	def test_no_exemption_reason_without_nexus(self):
+		"""Exemption only means something once there is nexus to be exempt from."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+
+		doc = _zero_tax_doc(taxjar_has_nexus=0, taxjar_transaction_exempt=1)
+		self.assertIsNone(get_taxjar_print_context(doc).exemption_reason)
+
+	def test_no_calculation_gives_no_answer(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+
+		self.assertIsNone(get_taxjar_print_context(_make_doc()).zero_tax_reason)
+
+	def test_print_context_is_a_jinja_method(self):
+		from taxjar_integration import hooks
+
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.taxjar_integration.get_taxjar_print_context",
+			hooks.jinja["methods"],
+		)
+
+
 # ── Tax Breakdown: onload/before_print wiring (set_taxjar_breakdown_html) ──
 
 class TestSetTaxjarBreakdownHtml(UnitTestCase):
@@ -20436,10 +20558,11 @@ class TestItemTaxFieldNames(UnitTestCase):
 
 		self.assertEqual(result["sales_tax"], 7.25)
 
-	def test_print_format_reads_the_renamed_field(self):
+	def test_print_format_does_not_read_the_old_field(self):
 		"""Failure mode 2. A site-level Print Format query cannot see this one:
 		US Sales Tax Invoice is a standard format, so its HTML lives in the app
-		file rather than in the html column."""
+		file rather than in the html column. The format no longer prints
+		per-item taxability, so it reads neither name."""
 		import os
 
 		path = os.path.normpath(os.path.join(
@@ -20450,8 +20573,9 @@ class TestItemTaxFieldNames(UnitTestCase):
 			html = f.read()
 
 		fieldname = _item_tax_field("product_tax_category")["fieldname"]
-		self.assertIn(f"item.{fieldname} ==", html)
-		self.assertNotIn("item.product_tax_category ==", html)
+		self.assertNotIn(f"item.{fieldname}", html)
+		self.assertNotIn("item.product_tax_category", html)
+		self.assertNotIn("line_labels", html)
 
 	def test_settings_form_fieldnames_are_untouched(self):
 		"""These contain the substring and are not the renamed field: three

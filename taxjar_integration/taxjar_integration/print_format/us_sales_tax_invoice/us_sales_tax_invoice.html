@@ -36,6 +36,18 @@
 #}
 {% set is_exempt = doc.taxjar_has_nexus and ((not doc.taxjar_customer_taxable) or doc.taxjar_transaction_exempt) %}
 {% set has_tax_data = doc.taxjar_nexus_reason or doc.taxjar_customer_taxable_reason or doc.taxjar_ship_to %}
+{% set tj = get_taxjar_print_context(doc) %}
+{#
+	Same ship-to-else-bill-to fallback _destination_address() uses in
+	taxjar_integration.py, so this checks the same address the tax engine
+	itself would have. TaxJar only covers the United States - a destination
+	outside it is not "nexus not configured", it is an export with no US
+	sales tax exposure to begin with. The title and the Tax Analysis panel
+	both read it.
+#}
+{% set destination_address_name = doc.shipping_address_name or doc.customer_address %}
+{% set destination_country = frappe.db.get_value("Address", destination_address_name, "country") if destination_address_name else None %}
+{% set is_export = not doc.taxjar_has_nexus and destination_country and destination_country != "United States" %}
 
 {% for page in layout %}
 <div class="page-break invoice-page">
@@ -52,6 +64,9 @@
 			{% else %}{{ _("Sales Invoice") }}
 			{% endif %}
 		</h2>
+		{% if is_export %}
+		<div class="taxjar-doc-subtitle">{{ _("EXPORT") }}</div>
+		{% endif %}
 	</div>
 
 	{%- if doc.meta.is_submittable and doc.docstatus == 2 -%}
@@ -193,12 +208,7 @@
 				{% set line_discount = (line_amount - (item.net_amount or 0)) | abs %}
 				<tr>
 					<td class="text-center">{{ loop.index }}</td>
-					<td class="text-left">
-						{{ item.item_name }}
-						<span class="taxjar-tax-tag">
-							{% if item.taxjar_product_tax_category == "99999" %}{{ _("Exempt") }}{% else %}{{ _("Taxable") }}{% endif %}
-						</span>
-					</td>
+					<td class="text-left">{{ item.item_name }}</td>
 					{% if item_naming_by != "Item Code" %}
 					<td class="text-left">{{ item.item_code }}</td>
 					{% endif %}
@@ -219,79 +229,69 @@
 			</tbody>
 		</table>
 
+		{% set state_label = doc.taxjar_ship_to or _("destination") %}
+		{% if is_export %}
+			{% set tj_source_line = _("No taxes on export transactions") %}
+		{% elif not doc.taxjar_has_nexus %}
+			{% set tj_source_line = _("Nexus not configured for {0}").format(state_label) %}
+		{% elif doc.taxjar_tax_source == "origin" %}
+			{% set tj_source_line = _("Origin-based tax for {0}").format(state_label) %}
+		{% elif doc.taxjar_tax_source == "destination" %}
+			{% set tj_source_line = _("Destination-based tax for {0}").format(state_label) %}
+		{% else %}
+			{% set tj_source_line = _("Nexus present in {0}").format(state_label) %}
+		{% endif %}
+
 		{#
-			No nexus means no tax was worked out at all, so the jurisdiction
-			table has nothing real to show - doc.taxjar_breakdown_html falls
-			back to its own "hence no taxes are charged" line in that case,
-			which only duplicates the grey status line below it. Skip the
-			table (and the card that joins it to the status line) whenever
-			there is no nexus, no matter what the print setting says.
+			The jurisdiction table prints only when TaxJar charged tax. With
+			no tax - no nexus, an exemption, or a calculation that came back
+			at 0 - the white area of the card gives one short reason in place
+			of the table, and the grey line under it still names the tax
+			source. An export has no reason to add to its grey line.
+			An exemption is 0 tax by definition, even before a calculation.
 		#}
-		{% set show_breakdown_table = print_settings.taxjar_show_tax_breakdown and doc.taxjar_has_nexus %}
-		{% if show_breakdown_table or has_tax_data %}
+		{% set is_zero_tax = (not doc.taxjar_has_nexus) or is_exempt or tj.zero_tax_reason %}
+		{% set show_tax_analysis = print_settings.taxjar_show_tax_breakdown and (doc.taxjar_has_nexus or has_tax_data) %}
+		{% set show_breakdown_table = show_tax_analysis and not is_zero_tax %}
+		{% set show_no_tax_message = show_tax_analysis and is_zero_tax and not is_export %}
+		{% if is_exempt and not doc.taxjar_customer_taxable %}
+			{% set no_tax_message = _("Customer is exempted from taxes") %}
+		{% elif is_exempt %}
+			{% set no_tax_message = _("Transaction is exempted from taxes") %}
+		{% else %}
+			{% set no_tax_message = _("Taxes are not applicable") %}
+		{% endif %}
+		{% set is_card = show_breakdown_table or show_no_tax_message %}
+		{% if show_tax_analysis or has_tax_data %}
 		<div class="taxjar-left-column">
-			{% if show_breakdown_table %}
+			{% if show_tax_analysis %}
 			<div class="taxjar-breakdown-section">
 				<h4>{{ _("Tax Analysis") }}</h4>
 			</div>
 			{% endif %}
 
 			{#
-				When the breakdown table is showing, the status panel below
-				joins it as one continuous card (no gap, no independent
-				rounding of its own) rather than a second separate box - the
-				wrapper's own border/radius/overflow:hidden is what rounds
-				the panel's bottom corners here, same as it already rounds
-				the table's top corners via its header.
+				The table or the no-tax message and the status panel below it
+				join as one continuous card (no gap, no rounding of their own) -
+				the wrapper's own border/radius/overflow:hidden rounds the
+				corners.
 			#}
-			<div class="{{ 'taxjar-analysis-card' if show_breakdown_table else '' }}">
+			<div class="{{ 'taxjar-analysis-card' if is_card else '' }}">
 				{% if show_breakdown_table %}
 				{{ doc.taxjar_breakdown_html }}
+				{% elif show_no_tax_message %}
+				<div class="taxjar-no-tax-message">{{ no_tax_message }}</div>
 				{% endif %}
 
 				{% if has_tax_data %}
-				{% set state_label = doc.taxjar_ship_to or _("destination") %}
-				{#
-					Same ship-to-else-bill-to fallback _destination_address()
-					uses in taxjar_integration.py, so this checks the same
-					address the tax engine itself would have. TaxJar only
-					covers the United States - a destination outside it is
-					not "nexus not configured", it is a country the product
-					never had US sales tax exposure to begin with.
-				#}
-				{% set destination_address_name = doc.shipping_address_name or doc.customer_address %}
-				{% set destination_country = frappe.db.get_value("Address", destination_address_name, "country") if destination_address_name else None %}
-				{% set is_export = destination_country and destination_country != "United States" %}
-				{% if not doc.taxjar_has_nexus and is_export %}
-					{% set tj_source_line = _("Sales tax not applicable for exports") %}
-				{% elif not doc.taxjar_has_nexus %}
-					{% set tj_source_line = _("Nexus not configured for {0}").format(state_label) %}
-				{% elif doc.taxjar_tax_source == "origin" %}
-					{% set tj_source_line = _("Origin-based tax for {0}").format(state_label) %}
-				{% elif doc.taxjar_tax_source == "destination" %}
-					{% set tj_source_line = _("Destination-based tax for {0}").format(state_label) %}
-				{% else %}
-					{% set tj_source_line = _("Nexus present in {0}").format(state_label) %}
-				{% endif %}
 				{#
 					A short line on its own reads as an off-centre scrap when
-					left-aligned in a box this wide - centred instead, up to
-					the point it would wrap. Once it wraps, or once there is
-					an exemption line below it, left-aligned is what actually
-					lines up cleanly, so this only centres a single short
-					line, never a long or multi-line one.
+					left-aligned in a box this wide - centred instead, up to the
+					point it would wrap.
 				#}
-				{% set is_short_line = (tj_source_line | length <= 45) and not is_exempt %}
-				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if show_breakdown_table else '' }} {{ 'taxjar-status-panel-compact' if is_short_line else '' }}">
+				{% set is_short_line = tj_source_line | length <= 45 %}
+				<div class="taxjar-status-panel {{ 'taxjar-status-panel-attached' if is_card else '' }} {{ 'taxjar-status-panel-compact' if is_short_line else '' }}">
 					<div class="taxjar-status-line {{ 'text-center' if is_short_line else '' }}">{{ tj_source_line }}</div>
-					{% if is_exempt %}
-					{% set customer_exemption_type = frappe.db.get_value("Customer", doc.customer, "taxjar_exemption_type") %}
-					<div>
-						<span class="text-bold">{{ _("Sales Tax Exemption") }}:</span>
-						{{ doc.taxjar_customer_taxable_reason or _("This transaction is exempt from sales tax.") }}
-						{% if customer_exemption_type %}({{ customer_exemption_type }}){% endif %}
-					</div>
-					{% endif %}
 				</div>
 				{% endif %}
 			</div>

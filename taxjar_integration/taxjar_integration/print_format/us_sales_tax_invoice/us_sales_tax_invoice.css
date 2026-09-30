@@ -3,8 +3,8 @@
 	Invoice with Item Image" print format (accounts/print_format/
 	sales_invoice_with_item_image) - same rounded highlight-bg tables, same
 	#171717 / #7c7c7c ink, so this sits next to core formats without looking
-	like a different product. Everything TaxJar-specific (status panel, tax
-	tag, breakdown section) is new, styled to match.
+	like a different product. Everything TaxJar-specific (status panel,
+	breakdown section) is new, styled to match.
 */
 
 /*
@@ -107,6 +107,15 @@
 	color: #171717;
 	margin: 0;
 	letter-spacing: 0.02em;
+}
+
+/* "EXPORT" under the title, close to it */
+.taxjar-doc-subtitle {
+	margin-top: 2px;
+	font-size: 12px;
+	font-weight: 400;
+	letter-spacing: 0.08em;
+	color: #7c7c7c;
 }
 
 .mt-20 {
@@ -292,6 +301,14 @@
 	border-width: 1px 0 0 0;
 }
 
+/* The white area of the card when there is no tax: one short reason in place of the jurisdiction table. */
+.taxjar-no-tax-message {
+	padding: 12px 16px;
+	font-size: 13px;
+	text-align: center;
+	color: #171717;
+}
+
 .taxjar-status-panel .taxjar-status-line {
 	font-size: 13px;
 	color: #7c7c7c;
@@ -299,14 +316,6 @@
 
 .taxjar-status-panel .taxjar-status-line + div {
 	margin-top: 4px;
-}
-
-/* Per-line-item taxability note, under the item name */
-.taxjar-tax-tag {
-	display: block;
-	font-size: 10px;
-	color: #7c7c7c;
-	margin-top: 2px;
 }
 
 .taxjar-line-note {

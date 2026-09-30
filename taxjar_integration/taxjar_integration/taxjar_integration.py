@@ -2136,12 +2136,7 @@ def get_taxjar_breakdown_html(doc):
 	"like-disabled-input" background, which reads fine for a table but not
 	for a standalone indicator.
 	"""
-	data = None
-	if getattr(doc, "taxjar_breakdown_json", None):
-		try:
-			data = json.loads(doc.taxjar_breakdown_json)
-		except (TypeError, ValueError):
-			data = None
+	data = _stored_breakdown(doc)
 
 	# The template path is a literal in this repo, never caller-supplied.
 	# nosemgrep: frappe-ssti
@@ -2159,6 +2154,9 @@ def get_taxjar_breakdown_html(doc):
 				if not getattr(doc, "taxjar_has_nexus", None)
 				else None
 			),
+			# A table of no rows and a 0% total says nothing the reader can
+			# use, so a calculation that came back with no tax says why too.
+			zero_tax_reason=_zero_tax_reason(doc, data),
 		),
 	)
 	# Jinja's {% if/for %} control tags leave behind their surrounding blank
@@ -2167,6 +2165,70 @@ def get_taxjar_breakdown_html(doc):
 	# its own gst_breakup_table render (set_gst_breakup in
 	# india_compliance.gst_india.overrides.transaction).
 	return html.replace("\n", "").replace("\t", "")
+
+
+def _stored_breakdown(doc):
+	"""doc.taxjar_breakdown_json parsed, or None when it is empty or not JSON."""
+	if not getattr(doc, "taxjar_breakdown_json", None):
+		return None
+	try:
+		return json.loads(doc.taxjar_breakdown_json)
+	except (TypeError, ValueError):
+		return None
+
+
+def _is_exempt_for_display(doc):
+	"""The same exemption test the US Sales Tax Invoice print format applies:
+	exemption only means something once there is nexus to be exempt from."""
+	return bool(getattr(doc, "taxjar_has_nexus", None)) and (
+		not getattr(doc, "taxjar_customer_taxable", None)
+		or bool(getattr(doc, "taxjar_transaction_exempt", None))
+	)
+
+
+def _exemption_reason(doc):
+	"""Why the document is exempt, for a reader of the invoice, or None.
+
+	taxjar_customer_taxable_reason is a status line for the form and reads
+	"Taxable, but transaction is marked as exempt" - true about the customer
+	master, but not a sentence to print on an invoice.
+	"""
+	if not _is_exempt_for_display(doc):
+		return None
+	if not getattr(doc, "taxjar_customer_taxable", None):
+		return _("The customer is exempt from sales tax")
+	return _("This transaction is marked as exempt from sales tax")
+
+
+def _zero_tax_reason(doc, data):
+	"""Why a calculation with nexus came back with no tax, or None.
+
+	None when there is tax, when there is no calculation yet, and when there
+	is no nexus - the no-nexus message already says why in that case.
+	"""
+	if not data or not getattr(doc, "taxjar_has_nexus", None):
+		return None
+	if flt((data.get("totals") or {}).get("amount_to_collect")):
+		return None
+
+	exemption_reason = _exemption_reason(doc)
+	if exemption_reason:
+		return exemption_reason
+
+	destination = getattr(doc, "taxjar_ship_to", None) or _("the destination")
+	if getattr(doc, "taxjar_product_taxable", None) == "No":
+		return _("None of the items are taxable in {0}").format(destination)
+	return _("No sales tax applies in {0}").format(destination)
+
+
+def get_taxjar_print_context(doc):
+	"""Jinja method for the US Sales Tax Invoice print format: why the
+	document is exempt, and, when TaxJar charged nothing, why."""
+	data = _stored_breakdown(doc)
+	return frappe._dict(
+		exemption_reason=_exemption_reason(doc),
+		zero_tax_reason=_zero_tax_reason(doc, data),
+	)
 
 
 def set_taxjar_breakdown_html(doc, method=None, print_settings=None):
