@@ -92,27 +92,36 @@
 		#}
 		<table class="info-table">
 			<tr>
-				<td style="width: 55%">
+				<td style="width: 50%">
 					<div class="title">{{ _("Ship From") }}</div>
 					<div class="info-text text-bold">{{ doc.company }}</div>
 					{% if doc.company_address_display %}<div class="info-text">{{ clean_address(doc.company_address_display) }}</div>{% endif %}
 				</td>
-				<td class="taxjar-doc-details-cell" style="width: 45%">
+				<td class="taxjar-doc-details-cell" style="width: 50%">
 					<table class="taxjar-doc-details">
+						{# Same order of checks as the document title above. #}
+						{% if doc.is_return %}
+							{% set number_label = _("Credit Note No.") %}
+						{% elif doc.is_debit_note %}
+							{% set number_label = _("Debit Note No.") %}
+						{% else %}
+							{% set number_label = _("Invoice Number") %}
+						{% endif %}
 						<tr>
-							<td class="title" style="width: 45%">{{ _("Invoice Number") }}</td>
+							<td class="title" style="width: 45%">{{ number_label }}</td>
 							<td class="info-text text-right">{{ doc.name }}</td>
 						</tr>
+						{# A note names the invoice it corrects straight after its own number. #}
+						{% if (doc.is_return or doc.is_debit_note) and doc.return_against %}
+						<tr>
+							<td class="title">{{ _("Sales invoice Ref.") }}</td>
+							<td class="info-text text-right">{{ doc.return_against }}</td>
+						</tr>
+						{% endif %}
 						<tr>
 							<td class="title">{{ _("Invoice Date") }}</td>
 							<td class="info-text text-right">{{ doc.get_formatted("posting_date") }}</td>
 						</tr>
-						{% if (doc.is_return or doc.is_debit_note) and doc.return_against %}
-						<tr>
-							<td class="title">{{ _("Return Against") }}</td>
-							<td class="info-text text-right">{{ doc.return_against }}</td>
-						</tr>
-						{% endif %}
 						{% if doc.due_date %}
 						<tr>
 							<td class="title">{{ _("Payment Due Date") }}</td>
@@ -129,12 +138,12 @@
 				</td>
 			</tr>
 			<tr>
-				<td style="width: 55%">
+				<td style="width: 50%">
 					<div class="title">{{ _("Bill To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
 					{% if doc.address_display %}<div class="info-text">{{ clean_address(doc.address_display) }}</div>{% endif %}
 				</td>
-				<td style="width: 45%">
+				<td style="width: 50%">
 					<div class="title">{{ _("Ship To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
 					<div class="info-text">{{ clean_address(doc.shipping_address or doc.address_display or "") }}</div>
@@ -230,8 +239,35 @@
 		</table>
 
 		{% set state_label = doc.taxjar_ship_to or _("destination") %}
+		{#
+			An export and an exemption each say all there is to say on the
+			grey line on their own, in place of the tax source.
+		#}
 		{% if is_export %}
 			{% set tj_source_line = _("No taxes on export transactions") %}
+		{#
+			The exemption type names the kind of exemption: Wholesale and
+			Government say so, and anything else (Other, or no type) reads
+			plain. The customer's type is on its master record; whether it
+			applies here is already in taxjar_customer_taxable.
+		#}
+		{% elif is_exempt and not doc.taxjar_customer_taxable %}
+			{% set exemption_type = frappe.db.get_value("Customer", doc.customer, "taxjar_exemption_type") %}
+			{% if exemption_type == "Wholesale" %}
+				{% set tj_source_line = _("Wholesale customer is exempted from taxes") %}
+			{% elif exemption_type == "Government" %}
+				{% set tj_source_line = _("Government customer is exempted from taxes") %}
+			{% else %}
+				{% set tj_source_line = _("Customer is exempted from taxes") %}
+			{% endif %}
+		{% elif is_exempt %}
+			{% if doc.taxjar_transaction_exemption_type == "Wholesale" %}
+				{% set tj_source_line = _("Wholesale transaction is exempted from taxes") %}
+			{% elif doc.taxjar_transaction_exemption_type == "Government" %}
+				{% set tj_source_line = _("Government transaction is exempted from taxes") %}
+			{% else %}
+				{% set tj_source_line = _("Transaction is exempted from taxes") %}
+			{% endif %}
 		{% elif not doc.taxjar_has_nexus %}
 			{% set tj_source_line = _("Nexus not configured for {0}").format(state_label) %}
 		{% elif doc.taxjar_tax_source == "origin" %}
@@ -244,23 +280,17 @@
 
 		{#
 			The jurisdiction table prints only when TaxJar charged tax. With
-			no tax - no nexus, an exemption, or a calculation that came back
-			at 0 - the white area of the card gives one short reason in place
-			of the table, and the grey line under it still names the tax
-			source. An export has no reason to add to its grey line.
+			no tax - no nexus, or a calculation that came back at 0 - the
+			white area of the card says "Taxes are not applicable" in place of
+			the table, and the grey line under it still names the tax source.
+			An export or an exemption shows only its grey line (see above).
 			An exemption is 0 tax by definition, even before a calculation.
 		#}
 		{% set is_zero_tax = (not doc.taxjar_has_nexus) or is_exempt or tj.zero_tax_reason %}
 		{% set show_tax_analysis = print_settings.taxjar_show_tax_breakdown and (doc.taxjar_has_nexus or has_tax_data) %}
 		{% set show_breakdown_table = show_tax_analysis and not is_zero_tax %}
-		{% set show_no_tax_message = show_tax_analysis and is_zero_tax and not is_export %}
-		{% if is_exempt and not doc.taxjar_customer_taxable %}
-			{% set no_tax_message = _("Customer is exempted from taxes") %}
-		{% elif is_exempt %}
-			{% set no_tax_message = _("Transaction is exempted from taxes") %}
-		{% else %}
-			{% set no_tax_message = _("Taxes are not applicable") %}
-		{% endif %}
+		{% set show_no_tax_message = show_tax_analysis and is_zero_tax and not is_export and not is_exempt %}
+		{% set no_tax_message = _("Taxes are not applicable") %}
 		{% set is_card = show_breakdown_table or show_no_tax_message %}
 		{% if show_tax_analysis or has_tax_data %}
 		<div class="taxjar-left-column">
