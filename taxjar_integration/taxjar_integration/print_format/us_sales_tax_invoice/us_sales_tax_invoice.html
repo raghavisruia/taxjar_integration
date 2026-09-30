@@ -118,6 +118,12 @@
 							<td class="info-text text-right">{{ doc.return_against }}</td>
 						</tr>
 						{% endif %}
+						{% if doc.po_no %}
+						<tr>
+							<td class="title">{{ _("Purchase Order No.") }}</td>
+							<td class="info-text text-right">{{ doc.po_no }}</td>
+						</tr>
+						{% endif %}
 						<tr>
 							<td class="title">{{ _("Invoice Date") }}</td>
 							<td class="info-text text-right">{{ doc.get_formatted("posting_date") }}</td>
@@ -126,12 +132,6 @@
 						<tr>
 							<td class="title">{{ _("Payment Due Date") }}</td>
 							<td class="info-text text-right">{{ doc.get_formatted("due_date") }}</td>
-						</tr>
-						{% endif %}
-						{% if doc.po_no %}
-						<tr>
-							<td class="title">{{ _("PO No") }}</td>
-							<td class="info-text text-right">{{ doc.po_no }}</td>
 						</tr>
 						{% endif %}
 					</table>
