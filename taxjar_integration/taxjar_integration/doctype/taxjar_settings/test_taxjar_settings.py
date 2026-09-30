@@ -10777,18 +10777,16 @@ class TestInstallSetup(UnitTestCase):
 	def _run_setup(self, *, categories_exist):
 		from taxjar_integration import install
 
-		# frappe.db.exists is patched on the real frappe.db object (not a local
-		# copy), so a blanket return_value would also answer every other
-		# frappe.db.exists() call setup_taxjar() makes further down -
-		# defeating delete_doc's ignore_missing safety net with a lie and turning
-		# it into a real DoesNotExistError. Only fake the one check this is
-		# actually testing; let everything else hit the real frappe.db.exists.
-		real_exists = frappe.db.exists
+		# a_row_exists is the question install asks: does the table hold a row.
+		# It is patched on the real frappe.db object (not a local copy), so a
+		# blanket return_value would also answer every other caller. Only fake
+		# the one doctype this is testing; let everything else through.
+		real_a_row_exists = frappe.db.a_row_exists
 
-		def fake_exists(dt, *args, **kwargs):
-			if dt == "Product Tax Category" and not args and not kwargs:
+		def fake_a_row_exists(dt, *args, **kwargs):
+			if dt == "Product Tax Category":
 				return categories_exist
-			return real_exists(dt, *args, **kwargs)
+			return real_a_row_exists(dt, *args, **kwargs)
 
 		with patch("taxjar_integration.install.make_custom_fields") as mock_make, \
 		     patch("taxjar_integration.install.add_product_tax_categories") as mock_cats, \
@@ -10797,7 +10795,7 @@ class TestInstallSetup(UnitTestCase):
 		     patch("taxjar_integration.install.hide_legacy_exempt_from_sales_tax") as mock_hide, \
 		     patch("taxjar_integration.install.set_taxes_field_description") as mock_desc, \
 		     patch("taxjar_integration.install.add_guided_setup_alert") as mock_alert, \
-		     patch("taxjar_integration.install.frappe.db.exists", side_effect=fake_exists):
+		     patch("taxjar_integration.install.frappe.db.a_row_exists", side_effect=fake_a_row_exists):
 			install.setup_taxjar()
 		return mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert
 
@@ -17380,7 +17378,7 @@ class TestClassifyTaxJarError(UnitTestCase):
 		info = classify_taxjar_error(_response_error(422, "Something could not be processed"))
 		self.assertEqual(
 			info["message"],
-			"TaxJar could not process the request. Open the TaxJar API Log for the request TaxJar rejected.",
+			"TaxJar could not process the request. The TaxJar API Log records the request TaxJar rejected.",
 		)
 
 	def test_a_real_422_detail_still_reaches_the_user(self):
@@ -19140,6 +19138,46 @@ class TestPurgeOldApiLogs(UnitTestCase):
 			f for f in doctype_json["fields"] if f["fieldname"] == "log_retention_days"
 		)
 		self.assertEqual(field.get("non_negative"), 1)
+
+
+class TestSmallTruths(UnitTestCase):
+	"""Three statements the code made that were not true."""
+
+	def test_the_province_set_is_derived_from_the_province_names(self):
+		"""Two hand-written lists that had to agree, with nothing holding them
+		together. Its United States twin already derived from
+		SUPPORTED_STATE_CODES."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			CA_PROVINCE_NAMES,
+			_CA_PROVINCES,
+		)
+
+		self.assertEqual(_CA_PROVINCES, set(CA_PROVINCE_NAMES))
+		self.assertEqual(len(_CA_PROVINCES), 13)
+
+	def test_the_rejection_hint_does_not_promise_a_row_that_is_not_there_yet(self):
+		"""An error row goes through deferred_insert(), which the scheduler
+		flushes on its own 15 minutes. "Open the log" sent the reader to an
+		empty table and taught them the log was broken."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import _STATUS_HINTS
+
+		hint = _STATUS_HINTS[422]
+		self.assertIn("TaxJar API Log", hint)
+		self.assertNotIn("Open", hint)
+
+	def test_the_seed_asks_whether_the_table_holds_a_row(self):
+		"""frappe.db.exists() with one argument asks whether a document of that
+		name exists. It answered this question correctly by accident."""
+		import os
+
+		path = os.path.normpath(
+			os.path.join(os.path.dirname(__file__), "..", "..", "..", "install.py")
+		)
+		with open(path) as f:
+			source = f.read()
+
+		self.assertIn('a_row_exists("Product Tax Category")', source)
+		self.assertNotIn('exists("Product Tax Category")\n', source)
 
 
 # ── Step 6: address split, failure modes, bulk paths ──────────────────────────

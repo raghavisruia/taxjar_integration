@@ -162,7 +162,10 @@ def setup_taxjar():
 	"""
 	make_custom_fields()
 
-	if not frappe.db.exists("Product Tax Category"):
+	# a_row_exists, not exists(): with one argument exists() asks whether a
+	# document of that name exists, which is not the question. It answers this
+	# one correctly by accident, through get_value's own empty filter.
+	if not frappe.db.a_row_exists("Product Tax Category"):
 		add_product_tax_categories()
 
 	add_permissions()

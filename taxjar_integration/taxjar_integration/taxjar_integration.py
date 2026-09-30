@@ -3382,7 +3382,10 @@ TAXJAR_STATUS_MESSAGES = {
 # and _set_sync_status() adds the retry sentence for them anyway.
 _STATUS_HINTS = {
 	403: "Check that the TaxJar plan on this account covers this API.",
-	422: "Open the TaxJar API Log for the request TaxJar rejected.",
+	# Not "open the log": an error row goes through deferred_insert(), so the
+	# scheduler writes it within its own 15 minutes. A reader sent there at once
+	# finds nothing and concludes the log is broken.
+	422: "The TaxJar API Log records the request TaxJar rejected.",
 }
 
 # TaxJar answers some 422s with a detail that only restates the status line.
@@ -4115,9 +4118,9 @@ def on_customer_validate(doc, method):
 # validation stays in lockstep with tax-calculation state validation.
 _US_STATES = set(SUPPORTED_STATE_CODES)
 
-_CA_PROVINCES = {
-	"AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT",
-}
+# Derived, like _US_STATES above it. The two were written out by hand and had
+# to agree with CA_PROVINCE_NAMES, with nothing holding them together.
+_CA_PROVINCES = set(CA_PROVINCE_NAMES)
 
 _STATES_BY_COUNTRY = {"US": _US_STATES, "CA": _CA_PROVINCES}
 
