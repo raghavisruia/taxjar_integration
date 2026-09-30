@@ -3661,9 +3661,14 @@ class TestNexusPage(UnitTestCase):
 class TestSyncNexusList(UnitTestCase):
 	"""Tests for the daily scheduled task that refreshes nexus from TaxJar."""
 
-	def _make_settings_doc(self, calculate_tax=1, create_transactions=0, has_company_config=True):
+	def _make_settings_doc(self, calculate_tax=1, create_transactions=0, has_company_config=True,
+			skipped=None):
 		doc = MagicMock()
 		doc.taxjar_enabled = 1
+		# A real Document carries a _dict here. Left as a MagicMock attribute,
+		# doc.flags.get() answers with a truthy Mock and sync_nexus_list reads
+		# it as "these companies were skipped".
+		doc.flags = frappe._dict(nexus_sync_skipped=skipped)
 		if has_company_config:
 			row = MagicMock()
 			row.taxjar_calculate_tax = calculate_tax
@@ -3674,8 +3679,17 @@ class TestSyncNexusList(UnitTestCase):
 		return doc
 
 	def _call(self, doc):
+		"""One run of the daily job.
+
+		The notifier is held off because the patch above replaces
+		frappe.get_doc for every caller, not only this module's - and building
+		a Notification Log goes through it. What this class is about is which
+		runs reach TaxJar and that a failure never escapes the scheduler;
+		TestNexusSyncFailureReachesSomebody covers what gets told to whom.
+		"""
 		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
-		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc):
+		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc), \
+		     patch("taxjar_integration.taxjar_integration.tasks.notify_nexus_sync_failure"):
 			sync_nexus_list()
 
 	# Guard: features disabled
@@ -3717,8 +3731,12 @@ class TestSyncNexusList(UnitTestCase):
 		doc.update_nexus_list.side_effect = Exception("TaxJar API timeout")
 
 		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
+		# The notifier is held off for the reason given on _call: the get_doc
+		# patch above answers every caller, and building a Notification Log
+		# goes through it.
 		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_traceback", return_value="traceback"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.notify_nexus_sync_failure"), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.log_error") as mock_log:
 			sync_nexus_list()  # must not raise
 
@@ -3732,6 +3750,7 @@ class TestSyncNexusList(UnitTestCase):
 		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
 		with patch("taxjar_integration.taxjar_integration.tasks.frappe.get_doc", return_value=doc), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.get_traceback", return_value="tb"), \
+		     patch("taxjar_integration.taxjar_integration.tasks.notify_nexus_sync_failure"), \
 		     patch("taxjar_integration.taxjar_integration.tasks.frappe.log_error"):
 			try:
 				sync_nexus_list()
@@ -3918,6 +3937,94 @@ class TestCompanyConfigFeatureWording(UnitTestCase):
 		labels = self._fields()
 		self.assertIn(labels["taxjar_calculate_tax"]["label"], description)
 		self.assertIn(labels["taxjar_create_transactions"]["label"], description)
+
+
+class TestNexusSyncFailureReachesSomebody(UnitTestCase):
+	"""A nightly sync that did not run used to reach the Error Log and nothing
+	else. Nexus decides whether tax is charged at all, so a sync that stops is
+	a sale that stops collecting - and the three screens that show "Last
+	updated" go on showing an older date with nothing saying why.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.tasks"
+
+	def _run(self, error=None, skipped=None):
+		"""One nightly run. Returns what was handed to the notification API."""
+		from taxjar_integration.taxjar_integration.tasks import sync_nexus_list
+
+		settings = MagicMock()
+		settings.company_config = [MagicMock(company="A Co")]
+		settings.flags = frappe._dict(nexus_sync_skipped=skipped)
+		settings.update_nexus_list.side_effect = error
+
+		with patch(f"{self.MOD}.frappe.get_doc", return_value=settings), \
+		     patch(f"{self.MOD}._is_taxjar_enabled", return_value=True), \
+		     patch(f"{self.MOD}.frappe.log_error"), \
+		     patch(f"{self.MOD}.get_users_with_role", create=True), \
+		     patch("frappe.utils.user.get_users_with_role", return_value=["acc@example.com"]), \
+		     patch(
+			"frappe.desk.doctype.notification_log.notification_log.enqueue_create_notification"
+		     ) as mock_notify:
+			sync_nexus_list()
+		return mock_notify
+
+	def test_a_rejected_credential_is_reported_to_somebody(self):
+		notify = self._run(error=frappe.ValidationError("TaxJar rejected the API credential for A Co (HTTP 401)."))
+		notify.assert_called_once()
+		users, payload = notify.call_args[0]
+		self.assertIn("acc@example.com", users)
+		self.assertIn("could not refresh the nexus list", payload["title"])
+		self.assertIn("HTTP 401", payload["title"])
+
+	def test_a_company_that_was_skipped_is_named(self):
+		"""The silent half. No credential means no exception, so nothing raised
+		and nothing was written - the timestamp simply did not move."""
+		notify = self._run(skipped=["B Co"])
+		notify.assert_called_once()
+		_users, payload = notify.call_args[0]
+		self.assertIn("B Co", payload["title"])
+		self.assertIn("No usable API credential", payload["title"])
+
+	def test_a_run_that_worked_tells_nobody(self):
+		self._run().assert_not_called()
+
+	def test_the_notification_opens_the_nexus_page(self):
+		"""The desk reads `link` before document_type, so the bell lands on the
+		page that shows the nexus and the date it last came from TaxJar."""
+		from taxjar_integration.taxjar_integration.tasks import NEXUS_PAGE_ROUTE
+
+		notify = self._run(skipped=["B Co"])
+		_users, payload = notify.call_args[0]
+		self.assertEqual(payload["link"], NEXUS_PAGE_ROUTE)
+		self.assertEqual(payload["type"], "Alert")
+		self.assertIn(NEXUS_PAGE_ROUTE, payload["email_content"])
+
+	def test_the_route_is_site_relative(self):
+		"""A notification row belongs to one site, and the host it is read on
+		is not this job's to know."""
+		from taxjar_integration.taxjar_integration.tasks import NEXUS_PAGE_ROUTE
+
+		self.assertTrue(NEXUS_PAGE_ROUTE.startswith("/"))
+		self.assertNotIn("://", NEXUS_PAGE_ROUTE)
+
+	def test_both_roles_are_asked_for(self):
+		"""The accountant is told, not only whoever keeps the site."""
+		from taxjar_integration.taxjar_integration.tasks import NEXUS_ALERT_ROLES
+
+		self.assertEqual(sorted(NEXUS_ALERT_ROLES), ["Accounts Manager", "System Manager"])
+		for role in NEXUS_ALERT_ROLES:
+			self.assertTrue(frappe.db.exists("Role", role), role)
+
+	def test_nobody_to_tell_is_not_an_error(self):
+		"""A site with neither role filled: the job still finishes."""
+		from taxjar_integration.taxjar_integration.tasks import notify_nexus_sync_failure
+
+		with patch("frappe.utils.user.get_users_with_role", return_value=[]), \
+		     patch(
+			"frappe.desk.doctype.notification_log.notification_log.enqueue_create_notification"
+		     ) as mock_notify:
+			notify_nexus_sync_failure("anything")
+		mock_notify.assert_not_called()
 
 
 class TestNexusSyncKeepsWhatItCannotRefresh(UnitTestCase):

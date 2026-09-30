@@ -9,6 +9,7 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	_is_taxjar_enabled,
 	_pending_removals_of,
 	_restrict_companies,
+	classify_taxjar_error,
 	company_scope,
 	get_catalogue_client,
 	recover_stuck_customer_syncs,
@@ -34,6 +35,17 @@ def purge_old_api_logs():
 	frappe.db.delete("TaxJar API Log", {"creation": ("<", cutoff)})
 
 
+# Who hears about a nexus sync that did not run. Nexus decides whether tax is
+# charged at all, so this is an accounting fact before it is an administrative
+# one - the accountant is told, not only whoever keeps the site.
+NEXUS_ALERT_ROLES = ("Accounts Manager", "System Manager")
+
+# Where the notification lands: the page that shows the nexus per company and
+# the date it last came from TaxJar. Site-relative, because a notification row
+# belongs to one site and the host it is read on is not this job's to know.
+NEXUS_PAGE_ROUTE = "/desk/taxjar/taxjar-nexus"
+
+
 def sync_nexus_list():
 	"""Daily job: refresh nexus regions from TaxJar for all configured companies."""
 	doc = frappe.get_doc("TaxJar Settings", "TaxJar Settings")
@@ -45,8 +57,65 @@ def sync_nexus_list():
 
 	try:
 		doc.update_nexus_list()
-	except Exception:
+	except Exception as error:
 		frappe.log_error(frappe.get_traceback(), "TaxJar: Nexus sync failed")
+		notify_nexus_sync_failure(
+			frappe._("TaxJar could not refresh the nexus list: {0}").format(
+				classify_taxjar_error(error)["message"]
+			)
+		)
+		return
+
+	skipped = doc.flags.get("nexus_sync_skipped")
+	if skipped:
+		notify_nexus_sync_failure(
+			frappe._("TaxJar refreshed no nexus for {0}. No usable API credential.").format(
+				", ".join(sorted(skipped))
+			)
+		)
+
+
+def notify_nexus_sync_failure(message):
+	"""Raise a desk notification for the roles that can act on it.
+
+	The failure reached the Error Log and nothing else. Nexus decides whether
+	tax is charged, so a sync that stops is a sale that stops collecting - and
+	the screens that show "Last updated" go on showing an older date with
+	nothing saying why.
+
+	Only from the scheduled job. The Update Nexus List button and the guided
+	setup both raise their own error to the person who pressed them; notifying
+	as well would tell them twice.
+	"""
+	from frappe.desk.doctype.notification_log.notification_log import (
+		enqueue_create_notification,
+	)
+	from frappe.utils.user import get_users_with_role
+
+	users = sorted({user for role in NEXUS_ALERT_ROLES for user in get_users_with_role(role)})
+	if not users:
+		return
+
+	enqueue_create_notification(
+		users,
+		{
+			"type": "Alert",
+			# The bell reads `title`; `subject` is what an email carries, for a
+			# user who has email notifications on for this type.
+			"title": message,
+			"subject": message,
+			"email_content": frappe._(
+				"{0}<br><br>The nexus on file is unchanged, so tax is still "
+				"calculated from the regions of the last sync that worked. See "
+				'<a href="{1}">Nexus &amp; Product Category</a>.'
+			).format(message, NEXUS_PAGE_ROUTE),
+			"document_type": "TaxJar Settings",
+			"document_name": "TaxJar Settings",
+			# Taken before document_type by the desk, so the bell opens the page
+			# that shows the nexus rather than the settings form.
+			"link": NEXUS_PAGE_ROUTE,
+		},
+	)
 
 
 def sync_product_tax_categories():
