@@ -11404,7 +11404,7 @@ class TestWorkspaceBranding(UnitTestCase):
 			os.path.dirname(__file__), "..", "..", "..", "patches.txt",
 		))
 		with open(patches) as f:
-			self.assertIn("remove_old_taxjar_integration_module", f.read())
+			self.assertIn("fix_taxjar_integration_module_name", f.read())
 
 	def test_icon_is_valid_not_dollar_sign(self):
 		ws = self._workspace()
