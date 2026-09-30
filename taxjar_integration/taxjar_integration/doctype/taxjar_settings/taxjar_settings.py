@@ -1011,9 +1011,23 @@ def get_custom_fields():
 				no_copy=1,
 			),
 			dict(
+				# The companies whose TaxJar account must still lose this
+				# customer, one per line. A save that takes a company off the
+				# allowed list adds it, and the removal job takes it out when
+				# the DELETE is done. retry_pending_customer_removals() queues
+				# again whatever is left. Hidden: it is machinery.
+				fieldname="taxjar_customer_pending_removals",
+				fieldtype="Small Text",
+				insert_after="taxjar_customer_sync_queued_at",
+				label="TaxJar Pending Removals",
+				read_only=1,
+				hidden=1,
+				no_copy=1,
+			),
+			dict(
 				fieldname="taxjar_sync_details_cb",
 				fieldtype="Column Break",
-				insert_after="taxjar_customer_sync_queued_at",
+				insert_after="taxjar_customer_pending_removals",
 			),
 			dict(
 				fieldname="taxjar_customer_id",

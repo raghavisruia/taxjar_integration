@@ -5110,7 +5110,10 @@ class TestCustomerCustomFields(UnitTestCase):
 			fields["taxjar_customer_sync_queued_at"]["insert_after"], "taxjar_customer_sync_error"
 		)
 		self.assertEqual(
-			fields["taxjar_sync_details_cb"]["insert_after"], "taxjar_customer_sync_queued_at"
+			fields["taxjar_customer_pending_removals"]["insert_after"], "taxjar_customer_sync_queued_at"
+		)
+		self.assertEqual(
+			fields["taxjar_sync_details_cb"]["insert_after"], "taxjar_customer_pending_removals"
 		)
 		self.assertEqual(fields["taxjar_customer_id"]["insert_after"], "taxjar_sync_details_cb")
 		self.assertEqual(fields["taxjar_last_synced"]["insert_after"], "taxjar_customer_id")
@@ -10139,6 +10142,7 @@ class TestOnCustomerValidate(UnitTestCase):
 			"taxjar_customer_sync_status": sync_status,
 			"taxjar_customer_sync_error": sync_error,
 			"taxjar_customer_sync_queued_at": queued_at,
+			"taxjar_customer_pending_removals": "",
 			"taxjar_last_synced": last_synced,
 		}
 		doc.get.side_effect = lambda f, d=None: _values.get(f, d)
@@ -21892,11 +21896,11 @@ class TestNoNativeTitleTooltips(UnitTestCase):
 # ── Customers restricted to companies ───────────────────────────────────────
 
 _SYNC_JOB = f"{_TJ}.sync_customer_to_taxjar"
-_REMOVE_JOB = f"{_TJ}.delete_customer_from_taxjar"
+_REMOVE_JOB = f"{_TJ}.remove_customer_from_company"
 _UNSAVED = object()
 
 
-def _restricted_customer(allowed, previous=_UNSAVED, customer_id="CUST-001"):
+def _restricted_customer(allowed, previous=_UNSAVED, customer_id="CUST-001", pending=""):
 	"""A Customer mock. allowed=None means "Restrict to Companies" is off.
 
 	previous is the allowed list before this save; leave it out for a new customer.
@@ -21910,6 +21914,7 @@ def _restricted_customer(allowed, previous=_UNSAVED, customer_id="CUST-001"):
 			"taxjar_customer_sync_status": "",
 			"restrict_to_companies": int(allowed_list is not None),
 			"allowed_companies": [frappe._dict(company=c) for c in allowed_list or []],
+			"taxjar_customer_pending_removals": pending,
 		}
 
 	now = _fields(allowed)
@@ -22015,7 +22020,7 @@ class TestSaveHookSyncsOnlyToAllowedCompanies(UnitTestCase):
 		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), ["B Co"])
 		self.assertEqual(self._companies(mock_enqueue, _SYNC_JOB), ["A Co"])
 		removal = next(c for c in mock_enqueue.call_args_list if c[0][0] == _REMOVE_JOB)
-		self.assertEqual(removal[1]["taxjar_customer_id"], "CUST-001")
+		self.assertEqual(removal[1]["customer_name"], "CUST-001")
 		self.assertTrue(removal[1]["enqueue_after_commit"])
 
 	def test_a_company_leaving_the_list_is_the_only_removal(self):
@@ -22046,6 +22051,109 @@ class TestSaveHookSyncsOnlyToAllowedCompanies(UnitTestCase):
 		doc = _restricted_customer(["A Co"], previous=["A Co"])
 		mock_enqueue, _status, _msg = self._run(doc)
 		mock_enqueue.assert_not_called()
+
+	def _pending_written(self, doc):
+		calls = [c for c in doc.db_set.call_args_list if c[0][0] == "taxjar_customer_pending_removals"]
+		return calls[-1][0][1] if calls else None
+
+	def test_a_dropped_company_is_recorded_as_pending(self):
+		doc = _restricted_customer(["A Co"], previous=["A Co", "B Co"], pending="C Co")
+		self._run(doc, companies=("A Co", "B Co", "C Co"))
+		self.assertEqual(self._pending_written(doc), "B Co\nC Co")
+
+	def test_a_company_that_joins_again_leaves_the_pending_list(self):
+		doc = _restricted_customer(["A Co", "B Co"], previous=["A Co"], pending="B Co")
+		mock_enqueue, _status, _msg = self._run(doc)
+
+		self.assertEqual(self._pending_written(doc), "")
+		self.assertEqual(self._companies(mock_enqueue, _REMOVE_JOB), [])
+
+
+class TestTheRemovalJobChecksTheCurrentList(UnitTestCase):
+	"""A removal queued before a later save changed the allowed list again."""
+
+	def _run(self, allowed, pending="B Co", delete_error=None, customer_id="CUST-001"):
+		row = frappe._dict(taxjar_customer_id=customer_id, taxjar_customer_pending_removals=pending)
+		with patch(f"{_TJ}._is_taxjar_enabled", return_value=True), \
+		     patch(f"{_TJ}.frappe.db.get_value", return_value=row) as mock_get, \
+		     patch(f"{_TJ}._locked_allowed_companies", return_value=allowed), \
+		     patch(f"{_TJ}.delete_customer_from_taxjar", side_effect=delete_error) as mock_delete, \
+		     patch(f"{_TJ}._get_taxjar_logger"), \
+		     patch(f"{_TJ}.frappe.db.set_value") as mock_set:
+			from taxjar_integration.taxjar_integration.taxjar_integration import remove_customer_from_company
+			remove_customer_from_company("CUST-001", "B Co")
+		return mock_get, mock_delete, mock_set
+
+	def _pending_after(self, mock_set):
+		mock_set.assert_called_once()
+		return mock_set.call_args[0][3]
+
+	def test_the_customer_row_is_locked_for_the_check(self):
+		mock_get, _delete, _set = self._run({"A Co"})
+		self.assertTrue(mock_get.call_args[1]["for_update"])
+
+	def test_a_company_still_dropped_loses_the_customer(self):
+		_get, mock_delete, mock_set = self._run({"A Co"}, pending="B Co\nC Co")
+		mock_delete.assert_called_once_with("CUST-001", "B Co")
+		self.assertEqual(self._pending_after(mock_set), "C Co")
+
+	def test_a_company_added_back_keeps_the_customer(self):
+		_get, mock_delete, mock_set = self._run({"A Co", "B Co"})
+		mock_delete.assert_not_called()
+		self.assertEqual(self._pending_after(mock_set), "")
+
+	def test_a_restriction_turned_off_keeps_the_customer(self):
+		_get, mock_delete, _set = self._run(None)
+		mock_delete.assert_not_called()
+
+	def test_a_transient_failure_stays_pending(self):
+		_get, _delete, mock_set = self._run({"A Co"}, delete_error=taxjar.exceptions.TaxJarConnectionError("down"))
+		mock_set.assert_not_called()
+
+	def test_a_permanent_failure_leaves_the_pending_list(self):
+		_get, _delete, mock_set = self._run({"A Co"}, delete_error=ValueError("bad"))
+		self.assertEqual(self._pending_after(mock_set), "")
+
+	def test_nothing_happens_while_taxjar_is_off(self):
+		with patch(f"{_TJ}._is_taxjar_enabled", return_value=False), \
+		     patch(f"{_TJ}.frappe.db.get_value") as mock_get, \
+		     patch(f"{_TJ}.delete_customer_from_taxjar") as mock_delete:
+			from taxjar_integration.taxjar_integration.taxjar_integration import remove_customer_from_company
+			remove_customer_from_company("CUST-001", "B Co")
+		mock_get.assert_not_called()
+		mock_delete.assert_not_called()
+
+
+class TestTheCronRetriesPendingRemovals(UnitTestCase):
+	def _run(self, rows, enabled=True):
+		with patch(f"{_TJ_TASKS}._is_taxjar_enabled", return_value=enabled), \
+		     patch(f"{_TJ_TASKS}.frappe.get_all", return_value=rows), \
+		     patch(f"{_TJ}.frappe.enqueue") as mock_enqueue:
+			from taxjar_integration.taxjar_integration.tasks import retry_pending_customer_removals
+			retry_pending_customer_removals()
+		return mock_enqueue
+
+	def test_each_pending_company_is_queued_again(self):
+		rows = [frappe._dict(name="CUST-001", taxjar_customer_pending_removals="B Co\nA Co")]
+		mock_enqueue = self._run(rows)
+
+		self.assertEqual(
+			[(c[0][0], c[1]["customer_name"], c[1]["company"]) for c in mock_enqueue.call_args_list],
+			[(_REMOVE_JOB, "CUST-001", "A Co"), (_REMOVE_JOB, "CUST-001", "B Co")],
+		)
+		for call in mock_enqueue.call_args_list:
+			self.assertTrue(call[1]["deduplicate"])
+			self.assertEqual(call[1]["job_id"], f"taxjar_customer_removal_retry_CUST-001_{call[1]['company']}")
+
+	def test_nothing_is_queued_while_taxjar_is_off(self):
+		self._run([frappe._dict(name="CUST-001", taxjar_customer_pending_removals="B Co")], enabled=False).assert_not_called()
+
+	def test_the_cron_is_registered(self):
+		from taxjar_integration import hooks
+		self.assertIn(
+			"taxjar_integration.taxjar_integration.tasks.retry_pending_customer_removals",
+			hooks.scheduler_events["cron"]["*/15 * * * *"],
+		)
 
 
 class TestTheWorkerSkipsADisallowedCompany(UnitTestCase):

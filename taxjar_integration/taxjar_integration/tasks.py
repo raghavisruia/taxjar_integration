@@ -4,7 +4,9 @@ from taxjar_integration.taxjar_integration.taxjar_integration import (
 	TAXJAR_MAX_SYNC_RETRIES,
 	_allowed_companies_by_customer,
 	_customer_sync_companies,
+	_enqueue_customer_removal,
 	_is_taxjar_enabled,
+	_pending_removals_of,
 	_restrict_companies,
 	company_scope,
 	get_catalogue_client,
@@ -154,3 +156,21 @@ def retry_failed_taxjar_customer_syncs():
 				deduplicate=True,
 				enqueue_after_commit=True,
 			)
+
+
+def retry_pending_customer_removals():
+	"""Every 15 min: queue again each removal that a Customer still holds in
+	taxjar_customer_pending_removals - see _remove_from_dropped_companies().
+	"""
+	if not _is_taxjar_enabled():
+		return
+
+	customers = frappe.get_all(
+		"Customer",
+		filters=[["taxjar_customer_pending_removals", "is", "set"]],
+		fields=["name", "taxjar_customer_pending_removals"],
+		limit=50,
+	)
+	for customer in customers:
+		for company in sorted(_pending_removals_of(customer.taxjar_customer_pending_removals)):
+			_enqueue_customer_removal(customer.name, company, retry=True)

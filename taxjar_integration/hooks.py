@@ -216,6 +216,7 @@ scheduler_events = {
 		"*/15 * * * *": [
 			"taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_syncs",
 			"taxjar_integration.taxjar_integration.tasks.retry_failed_taxjar_customer_syncs",
+			"taxjar_integration.taxjar_integration.tasks.retry_pending_customer_removals",
 		],
 	},
 }

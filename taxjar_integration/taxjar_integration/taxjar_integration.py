@@ -4058,6 +4058,7 @@ _CUSTOMER_SYNC_MANAGED_FIELDS = (
 	"taxjar_customer_sync_status",
 	"taxjar_customer_sync_error",
 	"taxjar_customer_sync_queued_at",
+	"taxjar_customer_pending_removals",
 	"taxjar_last_synced",
 )
 
@@ -4307,6 +4308,10 @@ def _remove_from_dropped_companies(doc, taxjar_companies):
 	The customer record stays in a company's TaxJar account after the company
 	leaves the allowed list, unless something removes it. The delete waits for
 	the commit, so a save that rolls back removes nothing.
+
+	Each removal goes into taxjar_customer_pending_removals first, and leaves it
+	only when it is done. A removal that fails stays there, and the 15-min cron
+	queues it again. A company that joins the list again leaves it at once.
 	"""
 	taxjar_customer_id = doc.get("taxjar_customer_id")
 	previous = doc.get_doc_before_save()
@@ -4315,16 +4320,115 @@ def _remove_from_dropped_companies(doc, taxjar_companies):
 
 	before = set(_restrict_companies(taxjar_companies, _allowed_companies_of(previous)))
 	after = set(_restrict_companies(taxjar_companies, _allowed_companies_of(doc)))
-	for company in sorted(before - after):
-		frappe.enqueue(
-			"taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar",
-			taxjar_customer_id=taxjar_customer_id,
-			company=company,
-			queue="short",
-			job_id=f"remove_customer_taxjar_{doc.name}_{company}_{frappe.generate_hash(length=8)}",
-			enqueue_after_commit=True,
-			now=frappe.flags.in_test,
+	dropped = before - after
+
+	pending = _pending_removals_of(doc.get("taxjar_customer_pending_removals"))
+	still_pending = (pending | dropped) - after
+	if still_pending != pending:
+		doc.db_set("taxjar_customer_pending_removals", _join_pending_removals(still_pending), update_modified=False)
+
+	for company in sorted(dropped):
+		_enqueue_customer_removal(doc.name, company, now=frappe.flags.in_test)
+
+
+def _pending_removals_of(value):
+	"""The companies in a taxjar_customer_pending_removals value, one per line."""
+	return {company for company in (value or "").split("\n") if company}
+
+
+def _join_pending_removals(companies):
+	return "\n".join(sorted(companies))
+
+
+def _enqueue_customer_removal(customer_name, company, retry=False, now=False):
+	"""Queue one removal of a customer from one company's TaxJar account.
+
+	The save path uses a new job id for each call, for the reason
+	_enqueue_customer_sync() gives. The cron uses one fixed id and
+	deduplicate, as retry_failed_taxjar_customer_syncs() does: a removal it
+	drops now stays pending, and the next tick queues it again.
+	"""
+	if retry:
+		job_id, deduplicate = f"taxjar_customer_removal_retry_{customer_name}_{company}", True
+	else:
+		job_id, deduplicate = f"remove_customer_taxjar_{customer_name}_{company}_{frappe.generate_hash(length=8)}", False
+	frappe.enqueue(
+		"taxjar_integration.taxjar_integration.taxjar_integration.remove_customer_from_company",
+		customer_name=customer_name,
+		company=company,
+		queue="short",
+		job_id=job_id,
+		deduplicate=deduplicate,
+		enqueue_after_commit=True,
+		now=now,
+	)
+
+
+def remove_customer_from_company(customer_name, company):
+	"""Delete a customer from the TaxJar account of a company it no longer allows.
+
+	The job reads the allowed list again under a lock on the Customer row. A
+	save can add the company back after the job was queued. Without the check,
+	this job could then run after that save's sync and delete a customer the
+	account must keep. The lock holds such a save until the DELETE is done, so
+	its sync always runs after the DELETE and puts the customer back.
+
+	A failed DELETE keeps the company in taxjar_customer_pending_removals, and
+	retry_pending_customer_removals() queues it again. A DELETE that can never
+	succeed leaves the list, so the cron does not send it for ever. While
+	TaxJar is off, the job does nothing and the removal stays pending.
+	"""
+	if not _is_taxjar_enabled():
+		return
+
+	customer = frappe.db.get_value(
+		"Customer",
+		customer_name,
+		["taxjar_customer_id", "taxjar_customer_pending_removals"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not customer:
+		return
+
+	if customer.taxjar_customer_id and not _restrict_companies([company], _locked_allowed_companies(customer_name)):
+		try:
+			delete_customer_from_taxjar(customer.taxjar_customer_id, company)
+		except Exception as err:
+			_get_taxjar_logger().error(traceback.format_exc())
+			if classify_taxjar_error(err)["retryable"]:
+				return
+
+	pending = _pending_removals_of(customer.taxjar_customer_pending_removals)
+	if company in pending:
+		frappe.db.set_value(
+			"Customer", customer_name,
+			"taxjar_customer_pending_removals", _join_pending_removals(pending - {company}),
+			update_modified=False,
 		)
+
+
+def _locked_allowed_companies(customer_name):
+	"""_allowed_companies_of() read from the database with locking reads.
+
+	A plain read can come from a snapshot taken before the lock, and so miss
+	the save the lock waited for. A locking read always sees the latest rows.
+	"""
+	if not frappe.get_meta("Customer").has_field("restrict_to_companies"):
+		return None
+	if not frappe.db.get_value("Customer", customer_name, "restrict_to_companies", for_update=True):
+		return None
+
+	restriction = frappe.qb.DocType("Company Restriction")
+	return set(
+		frappe.qb.from_(restriction)
+		.select(restriction.company)
+		.where(restriction.parenttype == "Customer")
+		.where(restriction.parentfield == "allowed_companies")
+		.where(restriction.parent == customer_name)
+		.for_update()
+		.run(pluck=True)
+	)
 
 
 def _enqueue_customer_sync(customer_name, company):
