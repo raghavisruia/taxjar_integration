@@ -707,6 +707,10 @@ taxjar_integration._refresh_dialog_region = function (d) {
 	const field = d.fields_dict["taxjar_region_code"];
 	if (!field) return;
 
+	// Only the latest lookup may write the box - see _refresh_region_code in
+	// address.js. The server can answer overlapping lookups in any order.
+	const lookup = (d.__taxjar_region_lookup = (d.__taxjar_region_lookup || 0) + 1);
+
 	// The United States answer is taxjar_state_code on the Address, and the box
 	// is hidden here.
 	if (d.get_value("country") === "United States") return;
@@ -746,9 +750,12 @@ taxjar_integration._refresh_dialog_region = function (d) {
 			country: d.get_value("country"),
 			state: d.get_value("state"),
 		})
-		.then((answer) =>
-			apply((answer && answer.region_code) || taxjar_integration.UNKNOWN_REGION_CODE)
-		);
+		.then((answer) => {
+			if (lookup !== d.__taxjar_region_lookup) return;
+			// A code the reader typed while the lookup ran is their answer.
+			if ((d.get_value("taxjar_region_code") || "").trim() !== current) return;
+			apply((answer && answer.region_code) || taxjar_integration.UNKNOWN_REGION_CODE);
+		});
 };
 
 // The fields of an address dialog: one banner, then each group of boxes in a

@@ -51,6 +51,11 @@ function _describe_region_code(frm, code) {
 function _refresh_region_code(frm) {
 	if (!_has_region_code_field(frm)) return;
 
+	// Each call starts a new lookup and makes the older ones stale. Quick edits
+	// to the country or the state start lookups that overlap, and the server
+	// can answer them in any order. Only the latest may write the box.
+	const lookup = (frm.__taxjar_region_lookup = (frm.__taxjar_region_lookup || 0) + 1);
+
 	// taxjar_state_code carries the United States answer, and the box is hidden
 	// there. A code from the country before it is read by nothing.
 	if (frm.doc.country === "United States") {
@@ -80,6 +85,10 @@ function _refresh_region_code(frm) {
 			state: frm.doc.state,
 		})
 		.then((answer) => {
+			if (lookup !== frm.__taxjar_region_lookup) return;
+			// A code the reader typed while the lookup ran is their answer.
+			if ((frm.doc.taxjar_region_code || "").trim() !== stored) return;
+
 			const code = (answer && answer.region_code) || "";
 			frm.__taxjar_region_code = code;
 			if (code !== stored) frm.set_value("taxjar_region_code", code);

@@ -3003,6 +3003,28 @@ class TestAddressClientScript(UnitTestCase):
 		self.assertGreater(js.index("_set_taxjar_mandatory_fields", refresh_idx), refresh_idx)
 		self.assertGreater(js.index("_set_taxjar_mandatory_fields", country_idx), country_idx)
 
+	def _region_lookup_callbacks(self):
+		"""The .then() of the form lookup and of the address dialog lookup."""
+		import os
+		form = self._read_js().split("function _refresh_region_code(frm) {")[1].split("\n}\n")[0]
+		with open(os.path.join(self._app_root(), "public", "js", "taxjar_utils.js")) as f:
+			dialog = f.read().split("taxjar_integration._refresh_dialog_region = function (d) {")[1].split("\n};")[0]
+		return form, dialog
+
+	def test_only_the_latest_region_lookup_writes_the_box(self):
+		"""Quick edits to the country or state start lookups that overlap, and the
+		server can answer them in any order. An older answer must not write."""
+		form, dialog = self._region_lookup_callbacks()
+		self.assertIn("const lookup = (frm.__taxjar_region_lookup = (frm.__taxjar_region_lookup || 0) + 1);", form)
+		self.assertIn("if (lookup !== frm.__taxjar_region_lookup) return;", form.split(".then(")[1])
+		self.assertIn("const lookup = (d.__taxjar_region_lookup = (d.__taxjar_region_lookup || 0) + 1);", dialog)
+		self.assertIn("if (lookup !== d.__taxjar_region_lookup) return;", dialog.split(".then(")[1])
+
+	def test_a_region_code_typed_during_the_lookup_is_kept(self):
+		form, dialog = self._region_lookup_callbacks()
+		self.assertIn('if ((frm.doc.taxjar_region_code || "").trim() !== stored) return;', form.split(".then(")[1])
+		self.assertIn('if ((d.get_value("taxjar_region_code") || "").trim() !== current) return;', dialog.split(".then(")[1])
+
 	def test_address_js_makes_state_mandatory_for_us_and_ca(self):
 		"""state must become required for both United States and Canada."""
 		js = self._read_js()
