@@ -169,12 +169,14 @@ def _is_taxjar_logging_enabled():
 	keyed on frappe.flags is invisible to anything that clears caches, and in
 	tests it survives from one case into the next.
 
-	Defaults to on when the setting has never been written, and on failure: a
-	site that cannot read the setting should still log rather than go quiet.
+	A setting that has never been written reads as off: get_single_value()
+	casts a missing Check to 0. The form shows the field's default of 1 on
+	such a site, so the two disagree until TaxJar Settings is saved once.
+	Defaults to on when the read fails: a site that cannot read the setting
+	should still log rather than go quiet.
 	"""
 	try:
-		stored_value = frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging")
-		return 1 if stored_value is None else cint(stored_value)
+		return cint(frappe.db.get_single_value("TaxJar Settings", "enable_taxjar_logging"))
 	except Exception:
 		return 1
 

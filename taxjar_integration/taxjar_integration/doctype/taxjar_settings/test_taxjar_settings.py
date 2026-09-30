@@ -18705,6 +18705,18 @@ class TestLoggingEnabledIsRequestCached(UnitTestCase):
 		with patch.object(module.frappe.db, "get_single_value", side_effect=Exception("no db")):
 			self.assertEqual(module._is_taxjar_logging_enabled(), 1)
 
+	def test_a_setting_never_written_reads_as_off(self):
+		"""get_single_value() casts a missing Check to 0, so "never written"
+		reaches this function as 0, not None, and means off. A branch that
+		turned None into on could never run."""
+		from frappe.utils import cast
+
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		self.assertEqual(cast("Check", None), 0)
+		with patch.object(module.frappe.db, "get_single_value", return_value=None):
+			self.assertEqual(module._is_taxjar_logging_enabled(), 0)
+
 
 class TestEnqueueDefersToCommit(UnitTestCase):
 	"""on_customer_update enqueues from inside the customer's own save. Without
