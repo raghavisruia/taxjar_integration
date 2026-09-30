@@ -23,7 +23,7 @@
   },
   {
    "default": "0",
-   "description": "Compute sales tax on this company's Sales Invoices from its nexus, and add Product Tax Category fields to Items.",
+   "description": "Auto-computes sales taxes based on nexus while saving Quotation, Sales Order, Sales Invoice.",
    "fieldname": "taxjar_calculate_tax",
    "fieldtype": "Check",
    "in_list_view": 1,
@@ -31,11 +31,11 @@
   },
   {
    "default": "0",
-   "description": "Push this company's submitted Sales Invoices to TaxJar for reporting and AutoFile.",
+   "description": "Sales Invoices are synced for tax return filing using TaxJar <a href=\"https://support.taxjar.com/article/908-how-does-autofile-work\" target=\"_blank\" rel=\"noopener noreferrer\">AutoFile</a>.",
    "fieldname": "taxjar_create_transactions",
    "fieldtype": "Check",
    "in_list_view": 1,
-   "label": "File Transactions"
+   "label": "Sync Transactions"
   },
   {
    "default": "1",

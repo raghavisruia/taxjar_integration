@@ -3851,6 +3851,73 @@ class TestSyncProductTaxCategories(UnitTestCase):
 # fetch with a raw traceback (bug report: this is exactly what happened when
 # an untested/bad-token company reached the Nexus step) ─────────────────────
 
+class TestCompanyConfigFeatureWording(UnitTestCase):
+	"""The two switches a company is configured by, and what they promise.
+
+	The guided setup names the same two features on its Features step. The
+	field labels and the wizard used to disagree about the second one, and only
+	the wizard said where AutoFile is documented.
+	"""
+
+	def _fields(self):
+		import os
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "taxjar_company_config",
+			"taxjar_company_config.json",
+		))
+		with open(path) as f:
+			return {field["fieldname"]: field for field in json.load(f)["fields"]}
+
+	def test_the_filing_switch_is_called_sync_transactions(self):
+		"""Matches the wizard's own "Sync Transactions to TaxJar"."""
+		self.assertEqual(self._fields()["taxjar_create_transactions"]["label"], "Sync Transactions")
+
+	def test_the_calculate_switch_names_when_it_runs(self):
+		"""set_sales_tax() is a validate hook on all three documents, not a
+		Sales Invoice rule, and the description used to say only Sales
+		Invoices."""
+		description = self._fields()["taxjar_calculate_tax"]["description"]
+		for doctype in ("Quotation", "Sales Order", "Sales Invoice"):
+			self.assertIn(doctype, description)
+
+	def test_autofile_is_a_link_to_taxjars_own_article(self):
+		description = self._fields()["taxjar_create_transactions"]["description"]
+		self.assertIn(">AutoFile</a>", description)
+		self.assertIn('target="_blank"', description)
+		self.assertIn('rel="noopener noreferrer"', description)
+
+	def test_the_field_and_the_wizard_point_at_the_same_article(self):
+		"""Two copies of one URL, in a JSON file and a JS constant. Nothing
+		else holds them together."""
+		import os
+		import re
+
+		description = self._fields()["taxjar_create_transactions"]["description"]
+		in_field = re.search(r'href="([^"]+)"', description).group(1)
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..", "page", "taxjar_setup", "taxjar_setup.js",
+		))
+		with open(path) as f:
+			in_wizard = re.search(r'AUTOFILE_DOC_URL = "([^"]+)"', f.read()).group(1)
+
+		self.assertEqual(in_field, in_wizard)
+
+	def test_the_master_switch_names_the_labels_that_exist(self):
+		"""It tells the reader which two switches to turn on, by name."""
+		import os
+
+		path = os.path.join(os.path.dirname(__file__), "taxjar_settings.json")
+		with open(path) as f:
+			fields = {field["fieldname"]: field for field in json.load(f)["fields"]}
+
+		description = fields["taxjar_enabled"]["description"]
+		labels = self._fields()
+		self.assertIn(labels["taxjar_calculate_tax"]["label"], description)
+		self.assertIn(labels["taxjar_create_transactions"]["label"], description)
+
+
 class TestNexusSyncKeepsWhatItCannotRefresh(UnitTestCase):
 	"""A run that cannot reach one company must not report a refresh for it.
 

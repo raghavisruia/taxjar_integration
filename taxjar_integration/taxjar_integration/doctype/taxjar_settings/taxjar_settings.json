@@ -38,7 +38,7 @@
   },
   {
    "default": "0",
-   "description": "Master switch for the TaxJar integration. Turn this on, then enable Calculate Sales Tax and/or File Transactions per company in the Company Configuration table below.",
+   "description": "Master switch for the TaxJar integration. Turn this on, then enable Calculate Sales Tax and/or Sync Transactions per company in the Company Configuration table below.",
    "fieldname": "taxjar_enabled",
    "fieldtype": "Check",
    "label": "Enable TaxJar"
