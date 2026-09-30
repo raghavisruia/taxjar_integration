@@ -2156,14 +2156,14 @@ def get_taxjar_breakdown_html(doc):
 			# so the empty state says why rather than reporting an absence.
 			# nexus_reason already reads "Nexus not configured for NJ" (see
 			# set_sales_tax).
-			no_nexus_reason=(
+			no_nexus_reason=_as_clause(
 				getattr(doc, "taxjar_nexus_reason", None)
 				if not getattr(doc, "taxjar_has_nexus", None)
 				else None
 			),
 			# A table of no rows and a 0% total says nothing the reader can
 			# use, so a calculation that came back with no tax says why too.
-			zero_tax_reason=_zero_tax_reason(doc, data),
+			zero_tax_reason=_as_clause(_zero_tax_reason(doc, data)),
 		),
 	)
 	# Jinja's {% if/for %} control tags leave behind their surrounding blank
@@ -2194,17 +2194,69 @@ def _is_exempt_for_display(doc):
 
 
 def _exemption_reason(doc):
-	"""Why the document is exempt, for a reader of the invoice, or None.
+	"""Why the document is exempt, in the words the invoice prints, or None.
 
 	taxjar_customer_taxable_reason is a status line for the form and reads
 	"Taxable, but transaction is marked as exempt" - true about the customer
 	master, but not a sentence to print on an invoice.
+
+	Two exemptions, and the reader is owed the difference: the customer is
+	exempt whatever they buy, or this one transaction was marked exempt. The
+	type names the kind where TaxJar names one. Wholesale and Government say so;
+	Other, and no type at all, read plain rather than inventing a label.
+
+	These six sentences were the print format's own until 2026-09-30, built in
+	Jinja from a frappe.db.get_value("Customer", ...) inside the template - a
+	query on every render, for a value the context beside it already had. They
+	are unchanged; only where they are written moved.
 	"""
 	if not _is_exempt_for_display(doc):
 		return None
+
 	if not getattr(doc, "taxjar_customer_taxable", None):
-		return _("The customer is exempt from sales tax")
-	return _("This transaction is marked as exempt from sales tax")
+		# The type is on the customer's own master record. Whether it applies to
+		# this destination is already decided, in taxjar_customer_taxable.
+		#
+		# Guarded on the name: get_value with None reads the first row of the
+		# table rather than nothing.
+		customer = _get_customer_name(doc)
+		exemption_type = (
+			frappe.db.get_value("Customer", customer, "taxjar_exemption_type", cache=True)
+			if customer
+			else None
+		)
+		if exemption_type == "Wholesale":
+			return _("Wholesale customer is exempted from taxes")
+		if exemption_type == "Government":
+			return _("Government customer is exempted from taxes")
+		return _("Customer is exempted from taxes")
+
+	exemption_type = getattr(doc, "taxjar_transaction_exemption_type", None)
+	if exemption_type == "Wholesale":
+		return _("Wholesale transaction is exempted from taxes")
+	if exemption_type == "Government":
+		return _("Government transaction is exempted from taxes")
+	return _("Transaction is exempted from taxes")
+
+
+def _as_clause(reason):
+	"""A stored reason, ready to be the first half of a longer sentence.
+
+	These reasons are written to stand alone: the form's message strip prints
+	them as they are, and the document keeps them in taxjar_nexus_reason. One
+	of them, EXPORT_NO_TAX_REASON, ends in a full stop for exactly that reason.
+
+	taxjar_breakup.html joins whichever applies to ", hence no taxes are
+	charged.", and that produced "Sales taxes are not applicable on export
+	transactions., hence no taxes are charged." - a full stop, then a comma.
+	Only print never showed it, because an export takes the template's
+	is_zero_tax branch, so it reached the form alone.
+
+	The stop is dropped here, at the one place a reason becomes a clause,
+	rather than taken off the constant - which would leave every standalone
+	reader of it without one.
+	"""
+	return reason.rstrip(".") if reason else reason
 
 
 def _zero_tax_reason(doc, data):

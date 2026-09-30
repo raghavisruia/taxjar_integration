@@ -84,8 +84,9 @@ doctype_js = {
 # identify which Sales Taxes and Charges row is the TaxJar sales-tax row and
 # which is the shipping row (company_config.tax_account_head /
 # shipping_account_head) without re-deriving that lookup in the template.
-# get_taxjar_print_context: per-line taxability and the no-tax reason, read
-# from the stored TaxJar breakdown so the template does not parse JSON.
+# get_taxjar_print_context: why the document is exempt, and why a calculation
+# came back with no tax - read from the stored TaxJar breakdown so the template
+# parses no JSON and makes no query of its own.
 jinja = {
 	"methods": [
 		"taxjar_integration.taxjar_integration.taxjar_integration.get_company_config",

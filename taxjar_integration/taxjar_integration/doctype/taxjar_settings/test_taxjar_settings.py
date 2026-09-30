@@ -12349,15 +12349,66 @@ class TestZeroTaxState(UnitTestCase):
 		)
 		self.assertNotIn("<table", html)
 
+	# The breakdown and the invoice's grey source line both state the
+	# exemption, and they used to word it differently - "The customer is exempt
+	# from sales tax" here, "Customer is exempted from taxes" there. Both read
+	# _exemption_reason() now, so one fact is stated one way.
+
 	def test_exempt_customer_is_the_reason(self):
 		doc = _zero_tax_doc(taxjar_customer_taxable=0, taxjar_product_taxable="No")
 		html = get_taxjar_breakdown_html(doc)
-		self.assertIn("The customer is exempt from sales tax", html)
+		self.assertIn("Customer is exempted from taxes", html)
 
 	def test_exempt_transaction_is_the_reason(self):
 		doc = _zero_tax_doc(taxjar_transaction_exempt=1)
 		html = get_taxjar_breakdown_html(doc)
-		self.assertIn("This transaction is marked as exempt from sales tax", html)
+		self.assertIn("Transaction is exempted from taxes", html)
+
+	def test_a_reason_that_ends_in_a_full_stop_does_not_keep_it(self):
+		"""EXPORT_NO_TAX_REASON stands alone everywhere else - the form's
+		message strip prints it as it is - so it ends in a full stop. Joined to
+		", hence no taxes are charged." that read "...transactions., hence".
+
+		Print never showed it: an export takes the template's is_zero_tax
+		branch, so the sentence reached the form alone.
+		"""
+		from taxjar_integration.taxjar_integration.taxjar_integration import EXPORT_NO_TAX_REASON
+
+		# An export as the document really holds it: no nexus, so no calculation
+		# and no stored breakdown, and the reason on taxjar_nexus_reason.
+		doc = _make_doc()
+		doc.taxjar_has_nexus = 0
+		doc.taxjar_nexus_reason = EXPORT_NO_TAX_REASON
+		doc.taxjar_breakdown_json = None
+		html = get_taxjar_breakdown_html(doc)
+
+		self.assertNotIn("., hence", html)
+		self.assertIn("on export transactions, hence no taxes are charged.", html)
+
+	def test_the_constant_itself_keeps_its_full_stop(self):
+		"""Dropped from the constant instead, every standalone reader of it
+		would lose one - the message strip, and the stored nexus reason."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import EXPORT_NO_TAX_REASON
+
+		self.assertTrue(EXPORT_NO_TAX_REASON.endswith("."))
+
+	def test_a_reason_with_no_full_stop_is_untouched(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import _as_clause
+
+		self.assertEqual(_as_clause("Nexus not configured for NJ"), "Nexus not configured for NJ")
+		self.assertIsNone(_as_clause(None))
+		self.assertEqual(_as_clause(""), "")
+
+	def test_the_breakdown_and_the_invoice_word_it_the_same_way(self):
+		"""One fact, one sentence, wherever it is shown."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_exemption_reason,
+			get_taxjar_print_context,
+		)
+
+		doc = _zero_tax_doc(taxjar_transaction_exempt=1)
+		self.assertIn(_exemption_reason(doc), get_taxjar_breakdown_html(doc))
+		self.assertEqual(get_taxjar_print_context(doc).exemption_reason, _exemption_reason(doc))
 
 	def test_taxable_items_with_no_tax_get_a_general_reason(self):
 		doc = _zero_tax_doc(taxjar_product_taxable="Yes")
@@ -12401,21 +12452,154 @@ class TestTaxjarPrintContext(UnitTestCase):
 		_store_breakdown_data(_make_us_breakdown(), doc)
 		self.assertIsNone(get_taxjar_print_context(doc).zero_tax_reason)
 
-	def test_exempt_transaction_reason_is_written_for_the_invoice(self):
-		"""The reported case. taxjar_customer_taxable_reason is the form's
-		status line, "Taxable, but transaction is marked as exempt"."""
+	def _reason(self, customer_type=None, **fields):
+		"""The exemption sentence for one document.
+
+		customer_type is what the Customer's own master record holds. It is
+		read only on the customer-exempt path, so the stub answers for that
+		field alone and lets everything else reach the real frappe.db.
+		"""
 		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
 
-		context = get_taxjar_print_context(_zero_tax_doc(taxjar_transaction_exempt=1))
+		real = frappe.db.get_value
+
+		def fake(doctype, *args, **kwargs):
+			if doctype == "Customer" and args and args[1:2] == ("taxjar_exemption_type",):
+				return customer_type
+			return real(doctype, *args, **kwargs)
+
+		with patch(f"{_TJ}.frappe.db.get_value", side_effect=fake):
+			return get_taxjar_print_context(_zero_tax_doc(**fields)).exemption_reason
+
+	# The customer is exempt whatever they buy. The type is on their master
+	# record; Wholesale and Government are named, anything else reads plain.
+
+	def test_a_wholesale_customer_is_named(self):
 		self.assertEqual(
-			context.exemption_reason, "This transaction is marked as exempt from sales tax"
+			self._reason("Wholesale", taxjar_customer_taxable=0),
+			"Wholesale customer is exempted from taxes",
 		)
 
-	def test_exempt_customer_reason(self):
-		from taxjar_integration.taxjar_integration.taxjar_integration import get_taxjar_print_context
+	def test_a_government_customer_is_named(self):
+		self.assertEqual(
+			self._reason("Government", taxjar_customer_taxable=0),
+			"Government customer is exempted from taxes",
+		)
 
-		context = get_taxjar_print_context(_zero_tax_doc(taxjar_customer_taxable=0))
-		self.assertEqual(context.exemption_reason, "The customer is exempt from sales tax")
+	def test_any_other_customer_exemption_reads_plain(self):
+		"""Other, and a customer with no type at all."""
+		for customer_type in ("Other", None, ""):
+			with self.subTest(customer_type=customer_type):
+				self.assertEqual(
+					self._reason(customer_type, taxjar_customer_taxable=0),
+					"Customer is exempted from taxes",
+				)
+
+	# This one transaction was marked exempt. Its type is on the document.
+
+	def test_a_wholesale_transaction_is_named(self):
+		self.assertEqual(
+			self._reason(taxjar_transaction_exempt=1, taxjar_transaction_exemption_type="Wholesale"),
+			"Wholesale transaction is exempted from taxes",
+		)
+
+	def test_a_government_transaction_is_named(self):
+		self.assertEqual(
+			self._reason(taxjar_transaction_exempt=1, taxjar_transaction_exemption_type="Government"),
+			"Government transaction is exempted from taxes",
+		)
+
+	def test_any_other_transaction_exemption_reads_plain(self):
+		self.assertEqual(
+			self._reason(taxjar_transaction_exempt=1, taxjar_transaction_exemption_type="Other"),
+			"Transaction is exempted from taxes",
+		)
+
+	def test_the_customer_is_not_read_when_the_transaction_is_the_exempt_one(self):
+		"""A taxable customer with a marked transaction. The customer's own
+		type says nothing about it, and the query is not worth making."""
+		self.assertEqual(
+			self._reason("Wholesale", taxjar_transaction_exempt=1),
+			"Transaction is exempted from taxes",
+		)
+
+	def test_a_document_with_no_customer_reads_plain(self):
+		"""get_value with a name of None reads the first row of the table
+		rather than nothing, so the name is checked before the query."""
+		self.assertEqual(
+			self._reason("Wholesale", taxjar_customer_taxable=0, customer=None),
+			"Customer is exempted from taxes",
+		)
+
+	def test_neither_comment_still_claims_per_line_taxability(self):
+		"""The item rows carried a Taxable/Exempt tag until it was removed. The
+		print format's own header and the hooks entry both still listed it
+		among what they provide."""
+		import os
+
+		base = os.path.dirname(__file__)
+		with open(os.path.normpath(os.path.join(
+			base, "..", "..", "print_format", "us_sales_tax_invoice", "us_sales_tax_invoice.html",
+		))) as f:
+			header = f.read().split("#}")[0]
+		with open(os.path.normpath(os.path.join(base, "..", "..", "..", "hooks.py"))) as f:
+			hooks = f.read()
+
+		self.assertNotIn("per-line taxability, shipping", header)
+		self.assertNotIn("per-line taxability and the no-tax reason", hooks)
+		self.assertIn("get_taxjar_print_context", hooks)
+
+	def test_the_template_reads_the_context_instead_of_the_database(self):
+		"""The six sentences were Jinja branches, and one of them queried the
+		Customer on every render for a value tj already carried."""
+		import os
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"print_format", "us_sales_tax_invoice", "us_sales_tax_invoice.html",
+		))
+		with open(path) as f:
+			html = f.read()
+
+		self.assertIn("tj_source_line = tj.exemption_reason", html)
+		self.assertNotIn('get_value("Customer"', html)
+		self.assertNotIn("is exempted from taxes", html)
+
+	def test_the_template_and_the_helper_agree_on_exempt(self):
+		"""tj.exemption_reason has to be a sentence exactly when the template
+		takes its exempt branch. The two express the same test in two
+		languages, so nothing but this holds them together."""
+		import os
+		import re
+
+		path = os.path.normpath(os.path.join(
+			os.path.dirname(__file__), "..", "..",
+			"print_format", "us_sales_tax_invoice", "us_sales_tax_invoice.html",
+		))
+		with open(path) as f:
+			html = f.read()
+
+		in_template = re.search(r"\{%\s*set is_exempt = (.+?)%\}", html).group(1)
+		for field in ("taxjar_has_nexus", "taxjar_customer_taxable", "taxjar_transaction_exempt"):
+			self.assertIn(field, in_template)
+
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_is_exempt_for_display,
+			get_taxjar_print_context,
+		)
+
+		for fields in (
+			{"taxjar_customer_taxable": 0},
+			{"taxjar_transaction_exempt": 1},
+			{},
+			{"taxjar_has_nexus": 0, "taxjar_transaction_exempt": 1},
+		):
+			with self.subTest(**fields):
+				doc = _zero_tax_doc(**fields)
+				self.assertEqual(
+					bool(get_taxjar_print_context(doc).exemption_reason),
+					bool(_is_exempt_for_display(doc)),
+				)
 
 	def test_no_exemption_reason_without_nexus(self):
 		"""Exemption only means something once there is nexus to be exempt from."""
