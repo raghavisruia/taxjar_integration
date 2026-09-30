@@ -1330,16 +1330,21 @@ def _classify_foreign_tax_rows(doc, company_config):
 	}
 
 
+# The product code a charge line is sent under. A charge has no Item, so it
+# takes this code in the place an item takes its item_code.
+SYNTHETIC_PRODUCT_IDENTIFIER = "OTHER"
+
+
 def _build_synthetic_line_item(row):
+	# "[OTHER] Interest Income" - the same "[code] name" shape as a real item's
+	# "[ITEM-0001] LAPTOP", so the charge reads as one more line on the order.
 	account_name = frappe.db.get_value("Account", row.account_head, "account_name", cache=True)
-	description = f"{account_name or row.account_head} - {row.description}" if row.description \
-		else (account_name or row.account_head)
 	return dict(
 		id=_SYNTHETIC_LINE_ID_OFFSET + row.idx,
 		quantity=1,
 		product_tax_code=None,
-		product_identifier=row.account_head,
-		description=description,
+		product_identifier=SYNTHETIC_PRODUCT_IDENTIFIER,
+		description=f"[{SYNTHETIC_PRODUCT_IDENTIFIER}] {account_name or row.account_head}",
 		unit_price=flt(row.tax_amount),
 	)
 

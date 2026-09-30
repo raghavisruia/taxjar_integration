@@ -750,8 +750,8 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 		self.assertEqual(synthetic["id"], 1002)  # 1000 + idx(2)
 		self.assertEqual(synthetic["quantity"], 1)
 		self.assertIsNone(synthetic["product_tax_code"])
-		self.assertEqual(synthetic["product_identifier"], "5210 - Handling - TC")
-		self.assertEqual(synthetic["description"], "Handling Charges - Handling Fee")
+		self.assertEqual(synthetic["product_identifier"], "OTHER")
+		self.assertEqual(synthetic["description"], "[OTHER] Handling Charges")
 		self.assertEqual(synthetic["unit_price"], 20.0)
 		self.assertEqual(result["item_discounts"], {})
 
@@ -762,16 +762,18 @@ class TestClassifyForeignTaxRows(UnitTestCase):
 			side_effect=_scalar_get_value(None),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
-		self.assertEqual(result["synthetic_items"][0]["description"], "5210 - Handling - TC - Handling Fee")
+		self.assertEqual(result["synthetic_items"][0]["description"], "[OTHER] 5210 - Handling - TC")
 
-	def test_synthetic_description_omits_dangling_separator_when_row_description_blank(self):
+	def test_synthetic_description_leaves_out_the_row_description(self):
+		"""The row's own description is on the Sales Taxes and Charges row. The
+		line reads "[OTHER] {ledger}" whether that description is set or not."""
 		doc = _make_doc(taxes=[_make_tax_row("5210 - Handling - TC", "", 20.0, idx=1)])
 		with patch(
 			"taxjar_integration.taxjar_integration.taxjar_integration.frappe.db.get_value",
 			side_effect=_scalar_get_value("Handling Charges"),
 		):
 			result = _classify_foreign_tax_rows(doc, self._config())
-		self.assertEqual(result["synthetic_items"][0]["description"], "Handling Charges")
+		self.assertEqual(result["synthetic_items"][0]["description"], "[OTHER] Handling Charges")
 
 	def test_negative_row_distributes_proportionally_by_net_amount(self):
 		"""Mirrors apply_discount_amount()'s own distributed_amount math
@@ -1157,7 +1159,7 @@ class TestPreviewForeignTaxRows(UnitTestCase):
 		row = result["foreign_rows"][0]
 		self.assertEqual(row["treatment"], "taxable_line_item")
 		self.assertEqual(row["amount"], 20.0)
-		self.assertEqual(row["description"], "Handling Charges - Handling Fee")
+		self.assertEqual(row["description"], "[OTHER] Handling Charges")
 
 	def test_negative_row_returns_discount_treatment_with_affected_item_count(self):
 		doc_data = self._doc_data(
