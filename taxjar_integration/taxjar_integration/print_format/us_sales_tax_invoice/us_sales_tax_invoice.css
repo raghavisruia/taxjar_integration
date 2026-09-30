@@ -28,11 +28,19 @@
 	margin sits outside the white page, so the preview shows only the page's
 	own 15mm padding. In Print and PDF the page margin is already 15mm, and
 	the element margin came on top of it: 30mm in all. Printing drops it, so
-	both match the preview. The PDF step reads page margins only from a rule
-	whose selector is exactly .print-format, so this one does not change them.
+	both match the preview.
+
+	The PDF step also renders the repeated letter head in a page of its own,
+	inside a bare .print-format wrapper, with every style of this format.
+	There the margin pushed the letter head 15mm down and in, while its
+	height was measured without it, so the bottom of the letter head was cut
+	off and the body ran over it. body .print-format reaches both wrappers.
+
+	The PDF step reads page margins only from a rule whose selector is
+	exactly .print-format, so this one does not change them.
 */
 @media print {
-	.print-format-gutter .print-format {
+	body .print-format {
 		margin: 0;
 	}
 }
@@ -340,6 +348,9 @@
 }
 
 .taxjar-terms-label {
+	/* The label goes to the next page with the card, never alone at the foot of a page. */
+	break-after: avoid;
+	page-break-after: avoid;
 	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
