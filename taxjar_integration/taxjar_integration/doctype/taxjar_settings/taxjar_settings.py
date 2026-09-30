@@ -407,6 +407,12 @@ class TaxJarSettings(Document):
 		# Only when every configured company answered. A partial run leaves the
 		# previous timestamp, which is still true of every row now in the table -
 		# rather than claiming a refresh for a company that never got one.
+		# Read by sync_nexus_list, which tells the people who can fix it. A skip
+		# is silent otherwise: the msgprint below reaches nobody in a scheduled
+		# job, and the timestamp deliberately does not move, so the three
+		# screens that show it just go on showing an older date.
+		self.flags.nexus_sync_skipped = skipped
+
 		if not skipped:
 			self.nexus_last_synced = frappe.utils.now()
 		# Read by on_update: this save carries nexus, and nothing the credential

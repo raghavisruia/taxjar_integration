@@ -4092,6 +4092,18 @@ class TestNexusSyncKeepsWhatItCannotRefresh(UnitTestCase):
 		self.assertEqual(nexus["A Co"], [])
 		self.assertEqual(nexus["B Co"], ["FL"])
 
+	def test_the_skipped_companies_are_recorded_for_the_job_to_read(self):
+		"""sync_nexus_list() reads this to tell the people who can fix it. The
+		two halves shipped apart once, and the tests on either side both passed
+		because each stubbed the other - the job set the flag on its own mock,
+		and this method's tests never looked at it."""
+		self._run({"A Co": self._client(("NY", "New York")), "B Co": None})
+		self.assertEqual(self.settings.flags.nexus_sync_skipped, ["B Co"])
+
+	def test_a_complete_run_records_no_skips(self):
+		self._run({"A Co": self._client(("NY", "New York")), "B Co": self._client(("FL", "Florida"))})
+		self.assertEqual(self.settings.flags.nexus_sync_skipped, [])
+
 	def test_a_partial_run_leaves_the_previous_timestamp(self):
 		"""What the screens read. Saying "today" for a company that was skipped
 		is the claim this test exists for."""
