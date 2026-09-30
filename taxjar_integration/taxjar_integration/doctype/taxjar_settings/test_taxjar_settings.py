@@ -3851,6 +3851,93 @@ class TestSyncProductTaxCategories(UnitTestCase):
 # fetch with a raw traceback (bug report: this is exactly what happened when
 # an untested/bad-token company reached the Nexus step) ─────────────────────
 
+class TestNexusSyncKeepsWhatItCannotRefresh(UnitTestCase):
+	"""A run that cannot reach one company must not report a refresh for it.
+
+	The table was emptied up front and rebuilt from whatever answered, so a
+	company with no usable credential lost its nexus outright - and the run
+	still stamped nexus_last_synced. check_for_nexus() reads this table on
+	every save, so that company silently stopped collecting tax in every state
+	it is registered in, while three screens showed a sync that morning.
+	"""
+
+	MOD = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def setUp(self):
+		self.settings = frappe.get_single("TaxJar Settings")
+		self.settings.set("company_config", [
+			{"company": "A Co", "tax_account_head": "Sales Tax - _TC",
+			 "shipping_account_head": "Freight - _TC"},
+			{"company": "B Co", "tax_account_head": "Sales Tax - _TC",
+			 "shipping_account_head": "Freight - _TC"},
+		])
+		self.settings.set("nexus", [
+			{"company": "A Co", "region": "New Jersey", "region_code": "NJ",
+			 "country": "United States", "country_code": "US"},
+			{"company": "B Co", "region": "Florida", "region_code": "FL",
+			 "country": "United States", "country_code": "US"},
+		])
+		self.settings.nexus_last_synced = "2026-01-01 00:00:00"
+
+	def _region(self, code, region):
+		return MagicMock(region_code=code, country_code="US", region=region, country="United States")
+
+	def _run(self, clients):
+		"""clients: company -> a client, or None for one that cannot be reached."""
+		with patch(f"{self.MOD}.get_client", side_effect=lambda company: clients.get(company)), \
+		     patch(f"{self.MOD}.log_taxjar_call"), \
+		     patch(f"{self.MOD}.frappe.msgprint"), \
+		     patch.object(type(self.settings), "save"):
+			self.settings._sync_nexus_from_taxjar()
+		return {
+			company: sorted(r.region_code for r in self.settings.nexus if r.company == company)
+			for company in ("A Co", "B Co")
+		}
+
+	def _client(self, *regions):
+		client = MagicMock()
+		client.nexus_regions.return_value = [self._region(code, name) for code, name in regions]
+		return client
+
+	def test_a_company_with_no_credential_keeps_its_nexus(self):
+		"""The row that used to be deleted."""
+		nexus = self._run({"A Co": self._client(("NY", "New York")), "B Co": None})
+		self.assertEqual(nexus["A Co"], ["NY"])
+		self.assertEqual(nexus["B Co"], ["FL"])
+
+	def test_a_company_that_answered_is_replaced_not_merged(self):
+		"""A state the company deregistered from has to disappear."""
+		nexus = self._run({"A Co": self._client(("NY", "New York")), "B Co": None})
+		self.assertNotIn("NJ", nexus["A Co"])
+
+	def test_an_account_registered_nowhere_clears_its_own_rows(self):
+		"""No regions is a real answer, not a failure to answer."""
+		nexus = self._run({"A Co": self._client(), "B Co": self._client(("FL", "Florida"))})
+		self.assertEqual(nexus["A Co"], [])
+		self.assertEqual(nexus["B Co"], ["FL"])
+
+	def test_a_partial_run_leaves_the_previous_timestamp(self):
+		"""What the screens read. Saying "today" for a company that was skipped
+		is the claim this test exists for."""
+		self._run({"A Co": self._client(("NY", "New York")), "B Co": None})
+		self.assertEqual(str(self.settings.nexus_last_synced), "2026-01-01 00:00:00")
+
+	def test_a_complete_run_stamps_the_timestamp(self):
+		self._run({"A Co": self._client(("NY", "New York")), "B Co": self._client(("FL", "Florida"))})
+		self.assertNotEqual(str(self.settings.nexus_last_synced), "2026-01-01 00:00:00")
+
+	def test_a_company_no_longer_configured_loses_its_rows(self):
+		"""Neither refreshed nor skipped, so it drops - as the old
+		clear-everything did."""
+		self.settings.set("company_config", [
+			{"company": "A Co", "tax_account_head": "Sales Tax - _TC",
+			 "shipping_account_head": "Freight - _TC"},
+		])
+		nexus = self._run({"A Co": self._client(("NY", "New York"))})
+		self.assertEqual(nexus["A Co"], ["NY"])
+		self.assertEqual(nexus["B Co"], [])
+
+
 class TestUpdateNexusListAuthError(UnitTestCase):
 	def setUp(self):
 		self.settings = frappe.get_single("TaxJar Settings")
@@ -18904,7 +18991,6 @@ class TestBulkBoundariesRefuseNonNames(UnitTestCase):
 
 		with self.assertRaises(frappe.ValidationError):
 			parse_document_names('"SINV-001"')
-
 
 # ── Step 6: address split, failure modes, bulk paths ──────────────────────────
 

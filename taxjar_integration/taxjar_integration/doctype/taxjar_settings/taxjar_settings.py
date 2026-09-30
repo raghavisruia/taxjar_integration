@@ -304,13 +304,38 @@ class TaxJarSettings(Document):
 		if db_modified != (frappe.utils.get_datetime(self.modified) if self.modified else None):
 			self.reload()
 
-		self.set("nexus", [])
+		# Read before anything is cleared. A company this run cannot reach keeps
+		# the rows it already had.
+		#
+		# The table used to be emptied here, up front. A company with no usable
+		# credential - no row in API Credentials, or no token for the API mode
+		# the site is in - then hit the `continue` below and was never written
+		# back, so its nexus was deleted outright. check_for_nexus() reads this
+		# table on every save, so every sale into a state that company is
+		# registered in stopped collecting tax. The run went on to stamp
+		# nexus_last_synced, and three screens reported a refresh that had not
+		# happened for it. Switching the site between Live and Sandbox with a
+		# token on file for only some companies is enough to cause it.
+		#
+		# The 401/403 and the re-raise paths below never reached the save at
+		# all, so they lost nothing. This one did.
+		existing_by_company = {}
+		for row in (self.nexus or []):
+			existing_by_company.setdefault(row.company, []).append({
+				"company": row.company,
+				"region": row.region,
+				"region_code": row.region_code,
+				"country": row.country,
+				"country_code": row.country_code,
+			})
 
-		# Clears `nexus`; iterates `company_config`. Different tables.
-		# nosemgrep: frappe-modifying-child-tables-while-iterating
+		refreshed = {}
+		skipped = []
+
 		for config in self.company_config:
 			client = get_client(config.company)
 			if not client:
+				skipped.append(config.company)
 				frappe.msgprint(
 					frappe._("Could not connect to TaxJar for company {0}. Skipping.").format(config.company)
 				)
@@ -350,12 +375,13 @@ class TaxJarSettings(Document):
 				log_taxjar_call(action="nexus_regions", status="error", error=str(e), context={"company": config.company})
 				raise
 
+			rows = []
 			for address in nexus:
 				region_code = (address.region_code or "").strip().upper()
 				country_code = (address.country_code or "").strip().upper()
 				if not _CODE_RE.match(region_code) or not _CODE_RE.match(country_code):
 					continue
-				self.append("nexus", {
+				rows.append({
 					"company": config.company,
 					"region": address.region,
 					"region_code": region_code,
@@ -363,7 +389,26 @@ class TaxJarSettings(Document):
 					"country_code": country_code,
 				})
 
-		self.nexus_last_synced = frappe.utils.now()
+			# An account registered nowhere answers with no regions, and that is
+			# a real answer. It replaces what was there.
+			refreshed[config.company] = rows
+
+		# Rebuilt in company_config order, so the grouping the screens render
+		# reads the same as before. A company no longer configured is in neither
+		# map, so its rows drop, exactly as the old clear-everything did.
+		#
+		# Writes `nexus`; iterates `company_config`. Different tables.
+		# nosemgrep: frappe-modifying-child-tables-while-iterating
+		self.set("nexus", [])
+		for config in self.company_config:
+			for row in refreshed.get(config.company, existing_by_company.get(config.company, [])):
+				self.append("nexus", row)
+
+		# Only when every configured company answered. A partial run leaves the
+		# previous timestamp, which is still true of every row now in the table -
+		# rather than claiming a refresh for a company that never got one.
+		if not skipped:
+			self.nexus_last_synced = frappe.utils.now()
 		# Read by on_update: this save carries nexus, and nothing the credential
 		# check or the tax template sync would need to run again for.
 		self.flags.nexus_sync = True
