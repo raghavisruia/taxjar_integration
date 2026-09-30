@@ -76,6 +76,7 @@ from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settin
 	_TRANSACTION_BREAKDOWN_FIELDS,
 	_item_tax_fields,
 	_US_STATE_CODE_OPTIONS,
+	create_tax_categories,
 	make_custom_fields,
 	validate_taxjar_tokens,
 )
@@ -3807,6 +3808,49 @@ class TestSyncNexusList(UnitTestCase):
 
 
 # ── Weekly Product Tax Category sync task ────────────────────────────────────
+
+class TestCreateTaxCategories(UnitTestCase):
+	"""create_tax_categories() on its own, with real Product Tax Category rows."""
+
+	MOD = "taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings"
+
+	def setUp(self):
+		# Unique per run, so a crashed run's rows cannot answer for this one.
+		suffix = frappe.generate_hash(length=6).upper()
+		self.existing_code = f"TEST_PTC_OLD_{suffix}"
+		self.new_code = f"TEST_PTC_NEW_{suffix}"
+		for code in (self.existing_code, self.new_code):
+			self.addCleanup(frappe.db.delete, "Product Tax Category", {"product_tax_code": code})
+		frappe.get_doc({
+			"doctype": "Product Tax Category",
+			"product_tax_code": self.existing_code,
+			"category_name": "Original Name",
+			"description": "Original description",
+		}).insert(ignore_permissions=True)
+
+	def _row(self, code, name="Test Category"):
+		return {"product_tax_code": code, "description": f"{name} description", "name": name}
+
+	def test_reads_the_existing_codes_in_one_query(self):
+		"""About 800 rows at install, on the manual button and every week. One
+		exists() query per row was one round trip per row, even with nothing new."""
+		data = [self._row(self.existing_code, "Changed Name"), self._row(self.new_code)]
+
+		with patch(self.MOD + ".frappe.db.exists", side_effect=AssertionError("one query per row")):
+			create_tax_categories(data)
+
+		self.assertTrue(frappe.db.exists("Product Tax Category", self.new_code))
+		self.assertEqual(
+			frappe.db.get_value("Product Tax Category", self.existing_code, "category_name"), "Original Name"
+		)
+
+	def test_a_code_listed_twice_is_inserted_once(self):
+		"""The old per-row query saw a row inserted earlier in the same loop. The
+		one read at the start does not, so the loop has to remember its own."""
+		create_tax_categories([self._row(self.new_code), self._row(self.new_code, "Second")])
+
+		self.assertEqual(frappe.db.count("Product Tax Category", {"product_tax_code": self.new_code}), 1)
+
 
 class TestSyncProductTaxCategories(UnitTestCase):
 	"""Tests for the weekly scheduled task that refreshes Product Tax Category from

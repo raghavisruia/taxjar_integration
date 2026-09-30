@@ -547,13 +547,27 @@ def add_product_tax_categories():
 
 
 def create_tax_categories(data):
+	"""Insert each category whose product_tax_code is not here yet.
+
+	The existing codes are read once, not once per row. The list is about 800
+	rows, and it runs at install, on the manual button and every week, so a
+	query per row was about 800 round trips even when nothing was new. The set
+	also takes each code this loop inserts, so a code listed twice goes in once.
+
+	db_insert(), not insert(): insert() validates every row, so one fixture row
+	longer than its field would fail an install or migrate that passes today.
+	"""
+	existing = set(frappe.get_all("Product Tax Category", pluck="product_tax_code"))
 	for d in data:
-		if not frappe.db.exists("Product Tax Category", {"product_tax_code": d.get("product_tax_code")}):
-			tax_category = frappe.new_doc("Product Tax Category")
-			tax_category.description = d.get("description")
-			tax_category.product_tax_code = d.get("product_tax_code")
-			tax_category.category_name = d.get("name")
-			tax_category.db_insert()
+		code = d.get("product_tax_code")
+		if code in existing:
+			continue
+		tax_category = frappe.new_doc("Product Tax Category")
+		tax_category.description = d.get("description")
+		tax_category.product_tax_code = code
+		tax_category.category_name = d.get("name")
+		tax_category.db_insert()
+		existing.add(code)
 
 
 def fetch_and_insert_categories(client):
