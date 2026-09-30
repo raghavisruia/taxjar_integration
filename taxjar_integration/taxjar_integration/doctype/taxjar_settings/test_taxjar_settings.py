@@ -20124,6 +20124,39 @@ class TestExportsAreExcludedNotFailed(TaxJarTestCase):
 		self.assertIn(EXCLUSION_OUTSIDE_COVERAGE, TRANSACTION_EXCLUSION_REASONS)
 
 
+class TestCheckNexusLogsWhatItHides(TaxJarTestCase):
+	"""check_nexus() stays quiet for the user whatever goes wrong, because it
+	runs on every address change and only feeds a yellow message. An error it
+	does not expect is still a bug, so it goes to the Error Log."""
+
+	def _check(self, **get_doc_kwargs):
+		from taxjar_integration.taxjar_integration import taxjar_integration as module
+
+		with self.scope_patches(), \
+		     patch.object(module.frappe.db, "exists", return_value=True), \
+		     patch.object(module.frappe, "has_permission", return_value=True), \
+		     patch.object(module.frappe, "get_doc", **get_doc_kwargs), \
+		     patch.object(module.frappe, "log_error") as mock_log:
+			answer = module.check_nexus("ADDR-US", US_CALC.name)
+		return answer, mock_log
+
+	def test_an_unexpected_error_is_logged_and_the_user_sees_nothing(self):
+		answer, mock_log = self._check(side_effect=RuntimeError("a real bug"))
+
+		self.assertIsNone(answer)
+		mock_log.assert_called_once()
+		self.assertIn("a real bug", str(mock_log.call_args))
+
+	def test_an_address_deleted_after_the_guard_is_not_logged(self):
+		"""The exists() guard and the read are two queries. An address deleted
+		between them is expected, and one log row per address change would
+		bury the rows that matter."""
+		answer, mock_log = self._check(side_effect=frappe.DoesNotExistError("gone"))
+
+		self.assertIsNone(answer)
+		mock_log.assert_not_called()
+
+
 class TestExportDestinationIsNamedNotNumbered(TaxJarTestCase):
 	"""The form used to report an export as "Nexus not configured for null"."""
 

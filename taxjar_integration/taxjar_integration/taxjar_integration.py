@@ -2630,7 +2630,17 @@ def check_nexus(shipping_address_name: str, company: str):
 			# within a country, and the caller renders it as a full name.
 			country_code = (frappe.db.get_value("Country", address.country, "code", cache=True) or "").upper()
 			return {"state": address.state, "state_code": state_code, "country_code": country_code}
+	except frappe.DoesNotExistError:
+		# Deleted between the exists() guard above and the read. Expected, so
+		# neither a dialog nor a log row.
+		return
 	except Exception:
+		# Quiet for the user: this runs on every address change and only feeds
+		# the yellow nexus message, and the tax itself is decided in
+		# set_sales_tax(). But an error nobody expects is a bug, and silence
+		# here hid it completely, so it goes to the Error Log. An unreadable
+		# state is not one of these: the region helpers return None for it.
+		frappe.log_error(frappe.get_traceback(), "TaxJar: nexus check failed")
 		return
 
 
