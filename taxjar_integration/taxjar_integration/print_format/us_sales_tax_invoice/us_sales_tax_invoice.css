@@ -206,6 +206,23 @@
 	font-size: 12px;
 }
 
+/* Tax ID and email, set a little apart from the address above them */
+.taxjar-party-extra {
+	margin-top: 6px;
+}
+
+/* The item's description, small and grey under its name */
+.taxjar-item-description {
+	margin-top: 2px;
+	font-size: 10.5px;
+	line-height: 1.4;
+	color: #7c7c7c;
+}
+
+.taxjar-item-description p {
+	margin: 0;
+}
+
 .items-table,
 .tax-table {
 	width: 100%;

@@ -96,6 +96,7 @@
 					<div class="title">{{ _("Ship From") }}</div>
 					<div class="info-text text-bold">{{ doc.company }}</div>
 					{% if doc.company_address_display %}<div class="info-text">{{ clean_address(doc.company_address_display) }}</div>{% endif %}
+					{% if doc.company_tax_id %}<div class="info-text taxjar-party-extra"><span class="title">{{ _("Tax ID") }}:</span> {{ doc.company_tax_id }}</div>{% endif %}
 				</td>
 				<td class="taxjar-doc-details-cell" style="width: 50%">
 					<table class="taxjar-doc-details">
@@ -130,7 +131,7 @@
 						</tr>
 						{% if doc.due_date %}
 						<tr>
-							<td class="title">{{ _("Payment Due Date") }}</td>
+							<td class="title">{{ _("Due Date") }}</td>
 							<td class="info-text text-right">{{ doc.get_formatted("due_date") }}</td>
 						</tr>
 						{% endif %}
@@ -142,6 +143,7 @@
 					<div class="title">{{ _("Bill To") }}</div>
 					<div class="info-text text-bold">{{ doc.customer_name }}</div>
 					{% if doc.address_display %}<div class="info-text">{{ clean_address(doc.address_display) }}</div>{% endif %}
+					{% if doc.tax_id %}<div class="info-text taxjar-party-extra"><span class="title">{{ _("Tax ID") }}:</span> {{ doc.tax_id }}</div>{% endif %}
 				</td>
 				<td style="width: 50%">
 					<div class="title">{{ _("Ship To") }}</div>
@@ -217,7 +219,13 @@
 				{% set line_discount = (line_amount - (item.net_amount or 0)) | abs %}
 				<tr>
 					<td class="text-center">{{ loop.index }}</td>
-					<td class="text-left">{{ item.item_name }}</td>
+					<td class="text-left">
+						{{ item.item_name }}
+						{# The description only when it says more than the name; ERPNext copies the name into it by default. #}
+						{% if item.description and (item.description | striptags | trim) != (item.item_name | trim) %}
+						<div class="taxjar-item-description">{{ item.description }}</div>
+						{% endif %}
+					</td>
 					{% if item_naming_by != "Item Code" %}
 					<td class="text-left">{{ item.item_code }}</td>
 					{% endif %}
