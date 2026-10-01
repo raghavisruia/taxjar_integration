@@ -3033,6 +3033,9 @@ taxjar_integration._inject_nexus_table_styles = function () {
 		}
 		.taxjar-nexus-table td { padding: 8px 16px; white-space: nowrap; }
 		.taxjar-nexus-table tr:not(:last-child) td { border-bottom: 1px solid var(--border-color); }
+		/* The desk's default <code> color is a fixed purple that is too dark to
+		   read on the dark theme. The ink token follows the theme. */
+		.taxjar-nexus-table code { color: var(--ink-gray-6); background: none; }
 	`;
 	document.head.appendChild(style);
 };
