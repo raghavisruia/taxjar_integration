@@ -252,6 +252,9 @@ class TaxJarCustomerConfig {
 
 	refresh() {
 		const filters = this.get_filters();
+		// A filter change can start a refresh while an older one is still out.
+		// Only the newest may write current_page and the rows.
+		const request = (this._refresh_request = (this._refresh_request || 0) + 1);
 
 		Promise.all([
 			frappe.xcall(
@@ -263,6 +266,7 @@ class TaxJarCustomerConfig {
 				{ filters: this.get_scope_filters() }
 			),
 		]).then(([data, summary]) => {
+			if (request !== this._refresh_request) return;
 			if (data.not_configured) {
 				this.show_not_configured();
 				return;

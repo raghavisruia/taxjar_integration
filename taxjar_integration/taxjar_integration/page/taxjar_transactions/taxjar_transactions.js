@@ -369,6 +369,9 @@ class TaxJarTransactionSync {
 	}
 
 	refresh() {
+		// A filter change can start a refresh while an older one is still out.
+		// Only the newest may write current_page and the rows.
+		const request = (this._refresh_request = (this._refresh_request || 0) + 1);
 		Promise.all([
 			frappe.xcall(
 				"taxjar_integration.taxjar_integration.page.taxjar_transactions.taxjar_transactions.get_transactions",
@@ -384,6 +387,7 @@ class TaxJarTransactionSync {
 				{ filters: this.get_scope_filters() }
 			),
 		]).then(([data, summary]) => {
+			if (request !== this._refresh_request) return;
 			if (data.not_configured) {
 				this.show_not_configured();
 				return;
