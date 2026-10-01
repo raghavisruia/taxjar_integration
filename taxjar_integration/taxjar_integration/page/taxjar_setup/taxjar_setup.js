@@ -107,12 +107,9 @@ const LAST_WIZARD_STEP = WIZARD_STEPS.length - 1;
 // The summary page's cards. Four, not one per wizard step: Ledgers and Features
 // describe the same company from two sides, and nothing maps to a step any more
 // now that editing re-walks the whole wizard (see _start_edit).
-const CONFIG_CARDS = [
-	{ key: "connect", title: __("Connection") },
-	{ key: "nexus", title: __("Nexus") },
-	{ key: "ledgers", title: __("Ledgers & Features") },
-	{ key: "address", title: __("Address") },
-];
+// The parts of the configuration record a `focus` link can name. "connect" is
+// the Connection card. The others are a section inside every company card.
+const FOCUS_KEYS = ["connect", "nexus", "ledgers", "features", "address"];
 
 class TaxJarSetup {
 	constructor(page) {
@@ -224,10 +221,7 @@ class TaxJarSetup {
 		} catch (e) {
 			focus = null;
 		}
-		// One alias. The Features card merged into Ledgers & Features, and the
-		// links carrying `focus=features` are already out there on invoices.
-		const key = focus === "features" ? "ledgers" : focus;
-		this._focus = CONFIG_CARDS.some((c) => c.key === key) ? key : null;
+		this._focus = FOCUS_KEYS.includes(focus) ? focus : null;
 		this._arriving = true;
 		this._load_state();
 	}
@@ -2035,12 +2029,28 @@ class TaxJarSetup {
 	// open and none of them carries a control: this is the configuration
 	// written out, not a set of things to operate. One Edit configuration
 	// button sits beside the title, and it restarts the wizard.
+	//
+	// The Connection card holds the site settings. Then each company has one
+	// card with its ledgers, features, address and nexus, so the reader does
+	// not match a company name across several cards.
 	_render_review() {
 		const s = this.state || {};
+		const companies = this._review_companies(s);
+		// Read by _bind_hover_cards, which finds a company by its card's index.
+		this._review_company_list = companies;
 
 		this.$body.html(`
 			${s.setup_complete ? this._done_header() : ""}
-			<div class="ts-cardgrid ts-cfggrid"></div>
+			<div class="ts-card ts-conn${this._focus === "connect" ? " ts-cfg-focus" : ""}">
+				<div class="ts-card-b ts-conn-b">
+					<div class="ts-eyebrow">${__("Connection")}</div>
+					${this._card_body_connect(s)}
+				</div>
+			</div>
+			<div class="ts-section-h"><h3>${__("Companies")}</h3></div>
+			${companies.length
+				? `<div class="ts-cogrid">${companies.map((c, i) => this._company_card(c, i)).join("")}</div>`
+				: `<div class="text-muted small">${__("No companies configured yet.")}</div>`}
 		`);
 
 		if (s.setup_complete) {
@@ -2053,24 +2063,28 @@ class TaxJarSetup {
 			this._bind_setup_video();
 		}
 
-		const $grid = this.$body.find(".ts-cfggrid");
-		CONFIG_CARDS.forEach((card) => {
-			$grid.append(`
-				<div class="ts-card${this._focus === card.key ? " ts-cfg-focus" : ""}">
-					<div class="ts-card-h"><b>${card.title}</b></div>
-					<div class="ts-card-b ts-card-rows">${this[`_card_body_${card.key}`](s)}</div>
-				</div>
-			`);
-		});
+		this._bind_hover_cards();
 
-		this._bind_hover_cards(s);
-
-		// A remedial link named a card. Every card is open, so there is nothing
-		// to expand - mark it and bring it into view instead.
+		// A remedial link named a part of the record. Every card is open, so
+		// there is nothing to expand - mark it and bring it into view instead.
 		if (this._focus) {
-			const focused = $grid.find(".ts-cfg-focus")[0];
+			const focused = this.$body.find(".ts-cfg-focus")[0];
 			if (focused) focused.scrollIntoView({ block: "center", behavior: "smooth" });
 		}
+	}
+
+	// One entry for each company, in company_config order. A company that has
+	// only an address or only nexus rows still gets a card, after the others.
+	_review_companies(s) {
+		const byName = new Map();
+		const entry = (name) => {
+			if (!byName.has(name)) byName.set(name, { company: name, config: null, address: null, regions: [] });
+			return byName.get(name);
+		};
+		(s.companies || []).forEach((c) => (entry(c.company).config = c));
+		(s.addresses || []).forEach((a) => (entry(a.company).address = a));
+		Object.entries(s.nexus_by_company || {}).forEach(([name, regions]) => (entry(name).regions = regions));
+		return Array.from(byName.values()).filter((c) => c.company);
 	}
 
 	// frappe.ui.hover_card, the desk's own component, rather than a CSS-only
@@ -2080,13 +2094,12 @@ class TaxJarSetup {
 	// Bound by index rather than by a name in a data attribute - a company name
 	// round-tripping through an attribute has to be escaped on the way in and
 	// unescaped on the way out, and one of those always gets forgotten.
-	_bind_hover_cards(s) {
+	_bind_hover_cards() {
 		const options = { side: "bottom", align: "end", open_delay: 200, close_delay: 150 };
 
-		const nexusByCompany = s.nexus_by_company || {};
-		const names = Object.keys(nexusByCompany);
+		const companies = this._review_company_list || [];
 		this.$body.find('.ts-hint[data-hover="regions"]').each((i, el) => {
-			const regions = nexusByCompany[names[$(el).data("i")]] || [];
+			const regions = companies[$(el).data("i")]?.regions || [];
 			frappe.ui.hover_card($(el), {
 				content: () => taxjar_integration.region_hover_card(this._nexus_sections(regions)),
 				...options,
@@ -2145,98 +2158,78 @@ class TaxJarSetup {
 		`;
 	}
 
-	// A count, not the whole list. A company with economic nexus everywhere
-	// returns up to 46 regions, and three of those would make this card longer
-	// than the rest of the page put together. The names are one hover away,
-	// grouped by country, which is what someone checking a specific state wants.
-	_card_body_nexus(s) {
-		const nexusByCompany = s.nexus_by_company || {};
+	// One company: a header with its name and its region count,
+	// then its ledgers, its features and its address.
+	_company_card(c, index) {
+		const name = frappe.utils.escape_html(c.company);
+		const focus = (key) => (this._focus === key ? " ts-cfg-focus" : "");
+		const value = (text) => frappe.utils.escape_html(text || "—");
 
-		const rows = Object.keys(nexusByCompany).map((company, index) => {
-			const regions = nexusByCompany[company];
-			const name = frappe.utils.escape_html(company);
-
-			// A company registered nowhere is a legitimate answer, and a blank
-			// cell reads as a card that failed to render rather than as one.
-			if (!regions.length) {
-				return `<div class="ts-kv ts-kv-company"><span>${name}</span>
-					<span class="ts-kv-plain">${__("No regions registered")}</span></div>`;
-			}
-
-			// The count, not one name and a remainder. A single state out of five
-			// answers no question the reader has - "where am I registered" is
-			// answered by all of them, and the hover card names them in full.
-			const count = regions.length;
-			const label = count === 1 ? __("1 region") : __("{0} regions", [count]);
-
-			return `
-				<div class="ts-kv ts-kv-company"><span>${name}</span>
-					<span class="ts-hint" data-hover="regions" data-i="${index}" tabindex="0">${label}</span></div>
-			`;
-		}).join("");
-
-		return rows || `<div class="text-muted small">${__("No nexus regions synced yet.")}</div>`;
-	}
-
-	// Ledgers and features describe the same company from two sides, so they
-	// share a block rather than making the reader match a name across two cards.
-	_card_body_ledgers(s) {
-		return (s.companies || []).map((c) => `
-			<div class="ts-accrow">
-				<div class="ts-acc-company">${frappe.utils.escape_html(c.company)}</div>
-				<div class="ts-acc-detail">${__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head || "—")}</div>
-				<div class="ts-acc-detail">${__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head || "—")}</div>
-				<div class="ts-flags">
-					${this._feature_chip(__("Sales Tax"), __("Sales Tax off"), c.calculate)}
-					${this._feature_chip(__("Transaction Sync"), __("Transaction Sync off"), c.file)}
+		return `
+			<div class="ts-card ts-co-card">
+				<div class="ts-card-h ts-co-h">
+					<b class="ts-co-name">${name}</b>
+					<span class="ts-co-regions${focus("nexus")}">${this._region_count(c.regions, index)}</span>
+				</div>
+				<div class="ts-co-b">
+					<dl class="ts-co-sec${focus("ledgers")}">
+						<dt>${__("Tax Ledger")}</dt><dd>${value(c.config?.tax_account_head)}</dd>
+						<dt>${__("Shipping Ledger")}</dt><dd>${value(c.config?.shipping_account_head)}</dd>
+					</dl>
+					<dl class="ts-co-sec${focus("features")}">
+						<dt>${__("Features")}</dt><dd>${this._feature_chips(c.config)}</dd>
+					</dl>
+					<dl class="ts-co-sec${focus("address")}">
+						<dt>${__("Address")}</dt><dd>${this._address_lines(c.address)}</dd>
+					</dl>
 				</div>
 			</div>
-		`).join("") || `<div class="text-muted small">${__("No companies configured yet.")}</div>`;
+		`;
 	}
 
-	// frappe.ui.badge, the Espresso component, rather than a chip of this page's
-	// own. It carries the theme, the radius and the type size already, and it
-	// inverts with the desk theme without this file owning a second palette.
+	// A count, not the whole list. A company with economic nexus everywhere
+	// has up to 46 regions, and the list would make the card longer than the
+	// rest of the page. The hover card names them, grouped by country.
 	//
-	// Outline in both states, so neither is a filled block of colour on a page
-	// of ordinary configuration. The colour is in the text and the border only.
-	//
-	// It has to be colour, though, and it has to be green for on. Gray is the
-	// inactive colour everywhere in the desk, so a gray badge reading "Sales
-	// tax" says the opposite of what it spells - which is what the muted pair
-	// did. Separating the two by fill instead was worse: nobody would guess
-	// that rule, and gray-on-gray gave them near enough the same weight to read
-	// as one flat group.
-	//
-	// The label still carries the state as well. Colour reaches neither a
-	// reader who does not register it nor a screen reader, which never will.
-	_feature_chip(on_label, off_label, on) {
-		return on
-			? frappe.ui.badge.html({ label: on_label, theme: "green", variant: "outline" })
-			: frappe.ui.badge.html({ label: off_label, variant: "outline" });
+	// A company registered nowhere is a real answer, so it gets words, not a
+	// blank space that looks like a card that did not render.
+	_region_count(regions, index) {
+		if (!regions.length) return `<span class="text-muted">${__("No regions")}</span>`;
+		const label = regions.length === 1 ? __("1 region") : __("{0} regions", [regions.length]);
+		return `<span class="ts-hint" data-hover="regions" data-i="${index}" tabindex="0">${label}</span>`;
 	}
 
-	// The street itself, not a yes/no. This card is the only place the record
-	// says which address TaxJar prices from, and a company with several
-	// addresses is exactly where that matters. Country is printed because the
-	// whole point of the address is where the sale ships from.
-	_card_body_address(s) {
-		return (s.addresses || []).map((a) => {
-			const lines = a.address
-				? [
-					a.address_line1,
-					[a.city, [a.taxjar_state_code, a.pincode].filter(Boolean).join(" ")].filter(Boolean).join(", "),
-					a.country,
-				].filter(Boolean)
-				: [__("Not configured")];
+	// The enabled features only. A badge for a feature that is off made the
+	// reader read each label to find which ones are on. With no feature on,
+	// the row says so in words.
+	//
+	// frappe.ui.badge, the Espresso component: it brings its own theme, radius
+	// and type size, and it inverts with the desk theme. Outline and green, so
+	// "on" reads as on without a filled block of colour on the page.
+	_feature_chips(config) {
+		const on = [
+			config?.calculate && __("Sales Tax"),
+			config?.file && __("Transaction Sync"),
+		].filter(Boolean);
+		if (!on.length) return `<span class="text-muted">${__("None enabled")}</span>`;
+		return `<div class="ts-flags">${on
+			.map((label) => frappe.ui.badge.html({ label, theme: "green", variant: "outline" }))
+			.join("")}</div>`;
+	}
 
-			return `
-				<div class="ts-accrow">
-					<div class="ts-acc-company">${frappe.utils.escape_html(a.company)}</div>
-					${lines.map((line) => `<div class="ts-acc-detail">${frappe.utils.escape_html(line)}</div>`).join("")}
-				</div>
-			`;
-		}).join("") || `<div class="text-muted small">${__("No addresses configured yet.")}</div>`;
+	// The street itself, not a yes/no. This is the only place the record says
+	// which address TaxJar calculates tax from. The country is shown, because
+	// the address is where the sale ships from.
+	_address_lines(a) {
+		const lines = a?.address
+			? [
+				a.address_line1,
+				[a.city, [a.taxjar_state_code, a.pincode].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+				a.country,
+			].filter(Boolean)
+			: [];
+		if (!lines.length) return `<span class="text-muted">${__("Not configured")}</span>`;
+		return lines.map((line) => `<div>${frappe.utils.escape_html(line)}</div>`).join("");
 	}
 
 	// ── Activated header ────────────────────────────────────────────

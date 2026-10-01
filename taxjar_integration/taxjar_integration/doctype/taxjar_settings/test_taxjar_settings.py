@@ -15987,15 +15987,18 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		self.assertIn("this._arriving", load)
 		self.assertIn("this._land()", load)
 
-	def test_focus_is_checked_against_the_known_cards(self):
+	def test_focus_is_checked_against_the_known_keys(self):
 		arrive = self._fn("_on_arrive() {")
-		self.assertIn("CONFIG_CARDS.some((c) => c.key === key)", arrive)
+		self.assertIn("FOCUS_KEYS.includes(focus) ? focus : null", arrive)
+		keys = self._js().split("const FOCUS_KEYS = [")[1].split("];")[0]
+		for key in ("connect", "nexus", "ledgers", "features", "address"):
+			self.assertIn(f'"{key}"', keys)
 
-	def test_the_features_focus_alias_still_resolves(self):
-		"""The Features card merged into Ledgers & Features, and the invoice
-		sidebar links carrying focus=features are already out there."""
-		arrive = self._fn("_on_arrive() {")
-		self.assertIn('focus === "features" ? "ledgers" : focus', arrive)
+	def test_the_features_focus_link_still_resolves(self):
+		"""The invoice sidebar links carry focus=features. Features is now a
+		section in each company card, so the key names it with no alias."""
+		self.assertNotIn('focus === "features" ? "ledgers"', self._fn("_on_arrive() {"))
+		self.assertIn('focus("features")', self._fn("_company_card(c, index) {"))
 
 	def test_editing_starts_the_wizard_at_connect(self):
 		"""One button, and it restarts the flow. Connect rather than step 1:
@@ -16053,20 +16056,15 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 			self.assertNotIn(gone, review)
 
 	def test_nexus_shows_a_count_and_names_the_regions_on_hover(self):
-		"""A company with economic nexus everywhere returns up to 46 regions, and
-		three of those would make this card longer than the rest of the page.
-
-		The row used to print the first region and a "+4 regions" remainder. One
-		state out of five answers no question a reader has, so the row is the
-		count alone and the hover card carries every name."""
-		body = self._fn("_card_body_nexus(s) {")
-		self.assertIn("const count = regions.length;", body)
-		self.assertIn('count === 1 ? __("1 region") : __("{0} regions", [count])', body)
+		"""A company with economic nexus everywhere has up to 46 regions. The
+		company header shows the count, and the hover card names every region."""
+		body = self._fn("_region_count(regions, index) {")
+		self.assertIn('regions.length === 1 ? __("1 region") : __("{0} regions", [regions.length])', body)
 		self.assertIn('data-hover="regions"', body)
 		# The leading name and its remainder, both gone.
-		self.assertNotIn("const first = regions[0];", body)
+		self.assertNotIn("regions[0]", body)
 		self.assertNotIn("regions.length - 1", body)
-		self.assertNotIn("ts-tag", body)
+		self.assertIn("this._region_count(c.regions, index)", self._fn("_company_card(c, index) {"))
 
 	def test_hover_targets_are_reachable_without_a_pointer(self):
 		"""frappe.ui.hover_card opens on keyboard focus as well as hover, and
@@ -16074,50 +16072,53 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		tooltip would show nothing on touch and nothing to a keyboard."""
 		js = self._js()
 		self.assertIn("frappe.ui.hover_card(", js)
-		self.assertIn('tabindex="0"', self._fn("_card_body_nexus(s) {"))
+		self.assertIn('tabindex="0"', self._fn("_region_count(regions, index) {"))
 
 	def test_the_nexus_hover_reuses_the_shared_region_card(self):
 		"""The Customer Configuration page already opens a region card from a
 		region count. Two copies of "heading, names, cap the list" would drift,
 		so both pages call taxjar_integration.region_hover_card."""
-		bind = self._fn("_bind_hover_cards(s) {")
+		bind = self._fn("_bind_hover_cards() {")
 		self.assertIn(
 			"taxjar_integration.region_hover_card(this._nexus_sections(regions))", bind
 		)
+		# The card index finds the company, the same list the cards render from.
+		self.assertIn("companies[$(el).data(\"i\")]?.regions", bind)
+		self.assertIn("this._review_company_list = companies;", self._fn("_render_review() {"))
 		# The page's own one-line-each list went with it.
 		self.assertNotIn("_hover_list", self._js())
 
 	def test_nexus_regions_are_grouped_by_the_country_taxjar_named(self):
 		"""TaxJar returns the country with every nexus row, and it is not always
 		the US - a card built from the two known code lists would drop a region
-		silently. The heading is the country name that arrived with the row."""
+		silently. The heading is the country name that arrived with the row,
+		after the flag for its code."""
 		fn = self._fn("_nexus_sections(regions) {")
 		self.assertIn('const country = r.country || __("Unknown");', fn)
-		self.assertIn("heading: frappe.utils.escape_html(country)", fn)
+		self.assertIn("code: r.country_code", fn)
+		self.assertIn(
+			"heading: `${taxjar_integration.country_flag_html(code)}<span>${frappe.utils.escape_html(country)}</span>`",
+			fn,
+		)
 		# Nexus is a list of registrations, so no country ever collapses to
 		# "all of them" - that sentence answers a question about exemptions.
 		self.assertIn("all_label: null", fn)
 
 	def test_a_company_with_no_nexus_says_so(self):
-		"""A blank tag row reads as a card that failed to render."""
-		body = self._fn("_card_body_nexus(s) {")
-		self.assertIn('__("No regions registered")', body)
+		"""A blank space reads as a card that failed to render."""
+		self.assertIn('__("No regions")', self._fn("_region_count(regions, index) {"))
 
 	def test_the_record_reuses_the_page_own_card(self):
 		"""A summary of the configuration should not introduce a second kind of
-		card, and its headers should not read in a different voice from the ones
-		the user just walked past. .ts-card and .ts-card-h are the two the
-		Connect, Accounts and Features steps already use."""
-		review = self._fn("_render_review() {")
-		self.assertIn('<div class="ts-card-h"><b>${card.title}</b></div>', review)
-		self.assertIn("ts-card-b ts-card-rows", review)
-		self.assertIn("ts-cardgrid ts-cfggrid", review)
+		card. .ts-card and .ts-card-h are the two the wizard steps already use."""
+		card = self._fn("_company_card(c, index) {")
+		self.assertIn('<div class="ts-card ts-co-card">', card)
+		self.assertIn('<div class="ts-card-h ts-co-h">', card)
+		self.assertIn('<div class="ts-cogrid">', self._fn("_render_review() {"))
 
 		css = self._setup_css()
-		# The grid overrides the column rule only, the way .ts-nexusresult does.
-		grid = css.split(".taxjar-setup .ts-cfggrid {")[1].split("}")[0]
+		grid = css.split(".taxjar-setup .ts-cogrid {")[1].split("}")[0]
 		self.assertIn("grid-template-columns", grid)
-		self.assertNotIn("display: grid", grid)
 		# Both cards in a row take the height of the taller one, so every row
 		# closes on a single line rather than stepping down mid-block.
 		self.assertIn("align-items: stretch", grid)
@@ -16182,33 +16183,38 @@ class TestGuidedSetupEditFlowJS(UnitTestCase):
 		# The hover card has no target left anywhere on the page.
 		self.assertNotIn('data-hover="companies"', js)
 
-	def test_ledgers_and_features_share_one_block_per_company(self):
-		"""Two cards made the reader match a company name across both."""
-		body = self._fn("_card_body_ledgers(s) {")
-		self.assertIn('__("Tax Ledger")', body)
-		self.assertIn('__("Shipping Ledger")', body)
-		self.assertIn("_feature_chip(", body)
+	def test_each_company_has_one_card(self):
+		"""Separate cards made the reader match a company name across them. One
+		card holds the ledgers, features, address and nexus of one company."""
+		card = self._fn("_company_card(c, index) {")
+		for part in ('__("Tax Ledger")', '__("Shipping Ledger")', '__("Features")', '__("Address")',
+		             "this._feature_chips(c.config)", "this._address_lines(c.address)",
+		             "this._region_count(c.regions, index)"):
+			self.assertIn(part, card)
 
-	def test_a_switched_off_feature_says_so_in_its_label(self):
-		"""The same words under a grey dot read as "this one matters less",
-		which is a different claim from "this one is switched off"."""
-		body = self._fn("_card_body_ledgers(s) {")
-		self.assertIn('__("Sales Tax"), __("Sales Tax off")', body)
-		self.assertIn('__("Transaction Sync"), __("Transaction Sync off")', body)
-		chip = self._fn("_feature_chip(on_label, off_label, on) {")
-		# Green for on, gray for off, outlined in both states. Gray is the desk's
-		# inactive colour, so a gray badge reading "Sales tax" says the opposite
-		# of what it spells - the muted pair did exactly that. Outline keeps
-		# neither state a filled block of colour.
-		self.assertIn('theme: "green", variant: "outline"', chip)
-		self.assertIn('frappe.ui.badge.html({ label: off_label, variant: "outline" })', chip)
-		# Neither state is filled: subtle is the badge default, so an absent
-		# variant would silently be the filled one.
-		self.assertEqual(chip.count('variant: "outline"'), 2)
+	def test_a_company_with_only_some_data_still_gets_a_card(self):
+		"""The list is every company that any of the three sources names, in
+		company_config order first."""
+		fn = self._fn("_review_companies(s) {")
+		order = [fn.index(src) for src in ("s.companies", "s.addresses", "s.nexus_by_company")]
+		self.assertEqual(order, sorted(order))
+
+	def test_only_enabled_features_are_shown(self):
+		"""A badge for each feature that is off made the reader read every label
+		to find the ones that are on. With none on, the row says so in words."""
+		chips = self._fn("_feature_chips(config) {")
+		self.assertIn('config?.calculate && __("Sales Tax")', chips)
+		self.assertIn('config?.file && __("Transaction Sync")', chips)
+		self.assertIn('__("None enabled")', chips)
+		# Green outline: gray is the desk's inactive colour, and a filled badge
+		# is a block of colour on a page of ordinary configuration.
+		self.assertIn('theme: "green", variant: "outline"', chips)
+		self.assertNotIn("off", chips.split("{")[0])
+		self.assertNotIn('__("Sales Tax off")', self._js())
 
 	def test_the_address_card_prints_the_country(self):
 		"""The whole point of the address is where the sale ships from."""
-		body = self._fn("_card_body_address(s) {")
+		body = self._fn("_address_lines(a) {")
 		self.assertIn("a.country", body)
 		for field in ("a.address_line1", "a.city", "a.taxjar_state_code", "a.pincode"):
 			self.assertIn(field, body)
@@ -17231,22 +17237,20 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		# every part of that screen branches on.
 		self.assertEqual(js.count("this._reload_state()"), 7)
 
-	def test_review_groups_the_record_into_four_cards(self):
-		"""Four cards, not one per wizard step. Ledgers and Features describe the
-		same company from two sides, and nothing maps to a step any more now that
-		editing re-walks the whole wizard - so the cards group by what a reader
-		looks for rather than by how the wizard is built."""
+	def test_review_has_a_connection_card_and_one_card_per_company(self):
+		"""The site settings sit in one Connection card. Each company then has
+		one card, under a Companies heading."""
 		js = self._js()
-		self.assertIn("_render_review", js)
-		keys = js.split("const CONFIG_CARDS = [")[1].split("];")[0]
-		self.assertEqual(
-			[k for k in ("connect", "nexus", "ledgers", "address") if f'key: "{k}"' in keys],
-			["connect", "nexus", "ledgers", "address"],
-		)
-		self.assertIn('__("Ledgers & Features")', keys)
-		# The separate Features card is gone, and so is its body.
-		self.assertNotIn('key: "features"', keys)
-		self.assertNotIn("_card_body_features", js)
+		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
+		self.assertIn('<div class="ts-eyebrow">${__("Connection")}</div>', review)
+		self.assertIn("this._card_body_connect(s)", review)
+		self.assertIn('<div class="ts-section-h"><h3>${__("Companies")}</h3></div>', review)
+		self.assertNotIn("ts-section-count", review)
+		self.assertIn("companies.map((c, i) => this._company_card(c, i))", review)
+		# The four-card list and the bodies of the three cards it replaced.
+		self.assertNotIn("CONFIG_CARDS", js)
+		for gone in ("_card_body_nexus", "_card_body_ledgers", "_card_body_address", "_card_body_features"):
+			self.assertNotIn(gone, js)
 
 	def test_connect_card_has_remove_action_wired_to_server_api(self):
 		js = self._js()
@@ -17279,8 +17283,8 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		the number a reader can act on, so that is the count that has to agree
 		with itself."""
 		js = self._js()
-		body = js.split("_card_body_nexus(s) {")[1].split("\n\t}\n")[0]
-		self.assertIn('count === 1 ? __("1 region") : __("{0} regions", [count])', body)
+		body = js.split("_region_count(regions, index) {")[1].split("\n\t}\n")[0]
+		self.assertIn('regions.length === 1 ? __("1 region") : __("{0} regions", [regions.length])', body)
 		# The site-wide line itself, not the word - "across" also appears in the
 		# prose above these functions.
 		self.assertNotIn('__("{0} across {1} {2}"', js)
@@ -17298,46 +17302,33 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 		self.assertNotIn('class="indicator-pill', js)
 		self.assertIn('frappe.ui.badge.html({ label: __("Live"), theme: "green" })', js)
 
-	def test_review_nexus_card_lists_only_companies(self):
+	def test_review_names_no_refresh_schedule(self):
 		"""The Nexus card carried an "Auto-Refresh / Daily at midnight" row that
-		named a schedule the reader cannot change from this page. The card now
-		holds company rows alone, so every line in it is a registration."""
+		named a schedule the reader cannot change from this page."""
 		js = self._js()
-		review = js.split("_card_body_nexus(s) {")[1].split("\n\t}\n")[0]
-		self.assertNotIn('__("Auto-Refresh")', review)
-		self.assertNotIn('__("Daily at midnight")', review)
-
-	def test_review_accounts_stack_company_and_detail_on_separate_lines(self):
-		js = self._js()
-		self.assertIn("ts-acc-company", js)
-		self.assertIn("ts-acc-detail", js)
+		self.assertNotIn('__("Auto-Refresh")', js)
+		self.assertNotIn('__("Daily at midnight")', js)
 
 	def test_review_accounts_label_tax_and_shipping_ledgers_on_separate_lines(self):
 		"""Two bare account names side by side ("X · Y") gave no indication of
-		which was the tax ledger and which was the shipping ledger; each now
-		gets its own labelled line rather than sharing one. The Address line
-		joined them later and is held to the same rule."""
+		which was the tax ledger and which was the shipping ledger. Each has its
+		own label in the card's label column."""
 		js = self._js()
-		account_rows = js.split("_card_body_ledgers(s) {")[1].split("\n\t}\n")[0]
-		self.assertIn('__("Tax Ledger")}: ${frappe.utils.escape_html(c.tax_account_head', account_rows)
-		self.assertIn('__("Shipping Ledger")}: ${frappe.utils.escape_html(c.shipping_account_head', account_rows)
-		# Every detail line in the Ledgers card opens with its own label.
-		# Counting them against a hardcoded total only has to be bumped again
-		# the next time the card grows a row - which is exactly how this
-		# assertion came to be wrong.
-		self.assertEqual(
-			account_rows.count('<div class="ts-acc-detail">'),
-			account_rows.count('<div class="ts-acc-detail">${__("'),
-		)
+		card = js.split("_company_card(c, index) {")[1].split("\n\t}\n")[0]
+		self.assertIn('<dt>${__("Tax Ledger")}</dt><dd>${value(c.config?.tax_account_head)}</dd>', card)
+		self.assertIn('<dt>${__("Shipping Ledger")}</dt><dd>${value(c.config?.shipping_account_head)}</dd>', card)
+		# Every value in the card has a label before it.
+		self.assertEqual(card.count("<dt>"), card.count("<dd>"))
 
 	def test_summary_address_card_shows_the_street_not_a_yes_no(self):
-		"""The Address card is the only place the summary says which address
-		TaxJar prices from. A company with several addresses is exactly where
+		"""The address is the only place the summary says which address TaxJar
+		prices from. A company with several addresses is exactly where
 		"Configured" stops being an answer."""
 		js = self._js()
-		body = js.split("_card_body_address(s) {")[1].split("\n\t}\n")[0]
+		body = js.split("_address_lines(a) {")[1].split("\n\t}\n")[0]
 		for field in ("a.address_line1", "a.city", "a.taxjar_state_code", "a.pincode"):
 			self.assertIn(field, body)
+		self.assertIn('__("Not configured")', body)
 
 	def test_welcome_step_button_says_continue_not_save(self):
 		"""Nothing is saved on the Welcome step (no form fields) — its button
