@@ -10409,10 +10409,25 @@ class TestDeleteCustomerFromTaxJar(UnitTestCase):
 			with self.assertRaises(taxjar.exceptions.TaxJarResponseError):
 				delete_customer_from_taxjar("CUST-001")
 
-	def test_skips_when_no_client(self):
-		"""Should return early when client is None."""
-		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None):
-			delete_customer_from_taxjar("CUST-001")  # should not raise
+	def test_raises_when_no_client(self):
+		"""A company with no credential raises, so no caller takes the
+		customer as removed while TaxJar still holds it."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import TaxJarNotConfiguredError
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration.get_client", return_value=None), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.describe_missing_credential",
+		           return_value="No token."), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			with self.assertRaises(TaxJarNotConfiguredError):
+				delete_customer_from_taxjar("CUST-001", company="Test Co")
+
+	def test_a_missing_credential_is_retryable(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import TaxJarNotConfiguredError
+
+		verdict = classify_taxjar_error(TaxJarNotConfiguredError("No token."))
+		self.assertTrue(verdict["retryable"])
+		self.assertEqual(verdict["kind"], "not_configured")
+		self.assertEqual(verdict["message"], "No token.")
 
 	def test_connection_error_raises(self):
 		"""TaxJarConnectionError should be re-raised."""
@@ -10487,6 +10502,22 @@ class TestOnCustomerDelete(UnitTestCase):
 
 		self.assertIn("Test Co", str(ctx.exception))
 		self.assertIn("unreachable", str(ctx.exception))
+
+	def test_blocks_delete_when_a_company_has_no_credential(self):
+		"""Without a token the DELETE cannot run, so the Customer stays."""
+		from taxjar_integration.taxjar_integration.taxjar_integration import TaxJarNotConfiguredError
+
+		doc = self._make_customer_doc(customer_id="CUST-001")
+
+		with patch("taxjar_integration.taxjar_integration.taxjar_integration._is_taxjar_enabled", return_value=True), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration._customer_sync_companies", return_value=["Test Co"]), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.delete_customer_from_taxjar",
+		           side_effect=TaxJarNotConfiguredError("Test Co has no Live API token.")), \
+		     patch("taxjar_integration.taxjar_integration.taxjar_integration.log_taxjar_call"):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				on_customer_delete(doc, None)
+
+		self.assertIn("no Live API token", str(ctx.exception))
 
 	def test_stops_at_the_first_company_that_fails(self):
 		"""Each company deleted before the failure has already lost the
@@ -23102,6 +23133,12 @@ class TestTheRemovalJobChecksTheCurrentList(UnitTestCase):
 		_get, _delete, mock_set = self._run({"A Co"}, delete_error=taxjar.exceptions.TaxJarConnectionError("down"))
 		mock_set.assert_not_called()
 
+	def test_a_missing_credential_stays_pending(self):
+		from taxjar_integration.taxjar_integration.taxjar_integration import TaxJarNotConfiguredError
+
+		_get, _delete, mock_set = self._run({"A Co"}, delete_error=TaxJarNotConfiguredError("No token."))
+		mock_set.assert_not_called()
+
 	def test_a_permanent_failure_leaves_the_pending_list(self):
 		_get, _delete, mock_set = self._run({"A Co"}, delete_error=ValueError("bad"))
 		self.assertEqual(self._pending_after(mock_set), "")
@@ -23117,13 +23154,34 @@ class TestTheRemovalJobChecksTheCurrentList(UnitTestCase):
 
 
 class TestTheCronRetriesPendingRemovals(UnitTestCase):
-	def _run(self, rows, enabled=True):
+	def _run(self, rows, enabled=True, cursor=None, per_tick=50):
+		cache = MagicMock()
+		cache.get_value.return_value = cursor
 		with patch(f"{_TJ_TASKS}._is_taxjar_enabled", return_value=enabled), \
-		     patch(f"{_TJ_TASKS}.frappe.get_all", return_value=rows), \
+		     patch(f"{_TJ_TASKS}.frappe.get_all", return_value=rows) as mock_get_all, \
+		     patch(f"{_TJ_TASKS}.frappe.cache", cache), \
+		     patch(f"{_TJ_TASKS}._REMOVALS_PER_TICK", per_tick), \
 		     patch(f"{_TJ}.frappe.enqueue") as mock_enqueue:
 			from taxjar_integration.taxjar_integration.tasks import retry_pending_customer_removals
 			retry_pending_customer_removals()
+		self.get_all, self.cache = mock_get_all, cache
 		return mock_enqueue
+
+	def _rows(self, *names):
+		return [frappe._dict(name=name, taxjar_customer_pending_removals="B Co") for name in names]
+
+	def test_a_full_tick_moves_the_cursor_to_its_last_customer(self):
+		self._run(self._rows("CUST-001", "CUST-002"), per_tick=2)
+		self.cache.set_value.assert_called_once_with("taxjar_customer_removal_cursor", "CUST-002")
+
+	def test_the_next_tick_starts_after_the_cursor(self):
+		self._run(self._rows("CUST-003"), cursor="CUST-002", per_tick=2)
+		self.assertIn(["name", ">", "CUST-002"], self.get_all.call_args[1]["filters"])
+		self.assertEqual(self.get_all.call_args[1]["order_by"], "name asc")
+
+	def test_a_short_tick_starts_again_from_the_first_customer(self):
+		self._run(self._rows("CUST-003"), cursor="CUST-002", per_tick=2)
+		self.cache.set_value.assert_called_once_with("taxjar_customer_removal_cursor", "")
 
 	def test_each_pending_company_is_queued_again(self):
 		rows = [frappe._dict(name="CUST-001", taxjar_customer_pending_removals="B Co\nA Co")]

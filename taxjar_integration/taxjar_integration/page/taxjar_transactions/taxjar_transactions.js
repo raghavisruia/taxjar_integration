@@ -389,6 +389,9 @@ class TaxJarTransactionSync {
 				return;
 			}
 			this.hide_not_configured();
+			// The server serves the last page for a page past the end, so
+			// keep the page it served. The next reload then asks for it.
+			this.current_page = data.page;
 			this.invoices = data.invoices;
 			this.render_summary(summary);
 			this.render_table();

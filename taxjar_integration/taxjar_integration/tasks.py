@@ -236,19 +236,36 @@ def retry_failed_taxjar_customer_syncs():
 			)
 
 
+_REMOVALS_PER_TICK = 50
+_REMOVAL_CURSOR_KEY = "taxjar_customer_removal_cursor"
+
+
 def retry_pending_customer_removals():
 	"""Every 15 min: queue again each removal that a Customer still holds in
 	taxjar_customer_pending_removals - see _remove_from_dropped_companies().
+
+	A removal has no retry count, so a failed one stays pending. Each tick
+	starts after the last Customer of the tick before, in name order, and
+	starts again from the first when it reaches the end. Without that, 50
+	Customers that always fail took every tick, and the rest never had a try.
 	"""
 	if not _is_taxjar_enabled():
 		return
 
+	after = frappe.cache.get_value(_REMOVAL_CURSOR_KEY) or ""
 	customers = frappe.get_all(
 		"Customer",
-		filters=[["taxjar_customer_pending_removals", "is", "set"]],
+		filters=[
+			["taxjar_customer_pending_removals", "is", "set"],
+			["name", ">", after],
+		],
 		fields=["name", "taxjar_customer_pending_removals"],
-		limit=50,
+		order_by="name asc",
+		limit=_REMOVALS_PER_TICK,
 	)
+	last = customers[-1].name if len(customers) == _REMOVALS_PER_TICK else ""
+	frappe.cache.set_value(_REMOVAL_CURSOR_KEY, last)
+
 	for customer in customers:
 		for company in sorted(_pending_removals_of(customer.taxjar_customer_pending_removals)):
 			_enqueue_customer_removal(customer.name, company, retry=True)

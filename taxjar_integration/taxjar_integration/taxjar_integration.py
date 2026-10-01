@@ -347,6 +347,15 @@ def describe_missing_credential(company: str) -> str:
 _NOT_CONFIGURED_ERROR = describe_missing_credential
 
 
+class TaxJarNotConfiguredError(frappe.ValidationError):
+	"""A company has no usable credential, so the call never left this site.
+
+	Raised where skipping the call would lose work, such as a customer
+	DELETE. classify_taxjar_error() marks it retryable: the call can succeed
+	once an admin enters the token.
+	"""
+
+
 # Why a submitted transaction was deliberately kept out of TaxJar, stored on the
 # invoice as taxjar_exclusion_reason. Short readable phrases rather than codes,
 # for the same reason taxjar_sync_status holds words: the field reads correctly
@@ -3629,6 +3638,17 @@ def classify_taxjar_error(err):
 			"kind": "response",
 		}
 
+	if isinstance(err, TaxJarNotConfiguredError):
+		# Checked before ValidationError, its base class: the request is
+		# the same, and it succeeds once the credential is there.
+		return {
+			"status": None,
+			"retryable": True,
+			"message": str(err),
+			"log_detail": str(err),
+			"kind": "not_configured",
+		}
+
 	if isinstance(err, frappe.ValidationError):
 		# Raised by our own pre-flight checks (get_state_code, address validation),
 		# already worded for the user - re-wrapping it would only bury it.
@@ -4521,8 +4541,12 @@ def remove_customer_from_company(customer_name, company):
 		try:
 			delete_customer_from_taxjar(customer.taxjar_customer_id, company)
 		except Exception as err:
-			_get_taxjar_logger().error(traceback.format_exc())
-			if classify_taxjar_error(err)["retryable"]:
+			info = classify_taxjar_error(err)
+			# A missing credential is in the API log already, and the cron
+			# meets it again every tick until an admin adds the token.
+			if info["kind"] != "not_configured":
+				_get_taxjar_logger().error(traceback.format_exc())
+			if info["retryable"]:
 				return
 
 	pending = _pending_removals_of(customer.taxjar_customer_pending_removals)
@@ -4700,10 +4724,21 @@ def on_customer_delete(doc, method):
 
 
 def delete_customer_from_taxjar(taxjar_customer_id, company=None):
-	"""Delete a customer record from TaxJar."""
+	"""Delete a customer record from TaxJar.
+
+	A company with no usable credential raises TaxJarNotConfiguredError. A
+	silent return let the callers treat the customer as removed while
+	TaxJar still held it.
+	"""
 	client = get_client(company)
 	if not client:
-		return
+		log_taxjar_call(
+			action="delete_customer",
+			status="skipped",
+			error="TaxJar client is not configured",
+			context={"doctype": "Customer", "name": taxjar_customer_id, "company": company},
+		)
+		raise TaxJarNotConfiguredError(describe_missing_credential(company))
 
 	ctx = {"doctype": "Customer", "name": taxjar_customer_id, "company": company}
 	log_taxjar_call(action="delete_customer", status="request", context=ctx)
