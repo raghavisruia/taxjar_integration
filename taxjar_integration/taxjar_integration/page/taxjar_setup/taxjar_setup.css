@@ -625,7 +625,10 @@
 .taxjar-setup .ts-co-regions.ts-cfg-focus { color: var(--text-color); font-weight: 600; }
 
 /* ── The region count ─────────────────────────────────────────────
-   A dotted underline says "there is more here" without promising a link.
+   A dotted underline says "there is more here", and the pointer cursor says
+   the count reacts to the mouse. The underline sits under the text box that
+   the browser hit-tests, so the bottom padding brings the dots into the hover
+   area. Padding on an inline box does not move the text or the line.
    frappe.ui.hover_card does the rest, and it opens on keyboard focus too —
    tabindex is what makes that reachable. The card it opens is styled in
    public/scss/taxjar_integration.bundle.scss, which the Customer
@@ -633,7 +636,8 @@
    outside this page's own wrapper. */
 .taxjar-setup .ts-hint {
 	text-decoration: underline; text-decoration-style: dotted;
-	text-underline-offset: 3px; cursor: default;
+	text-underline-offset: 3px; cursor: pointer;
+	padding-bottom: 4px;
 }
 
 /* Feature flags are frappe.ui.badge (.es-badge), the Espresso component, so
