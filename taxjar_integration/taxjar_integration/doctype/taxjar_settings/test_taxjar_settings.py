@@ -17239,11 +17239,14 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 
 	def test_review_has_a_connection_card_and_one_card_per_company(self):
 		"""The site settings sit in one Connection card. Each company then has
-		one card. The cards come straight after the done header, with no
-		section headings between or above them."""
+		one card. The Connection card has the same header band as a company
+		card. There are no section headings between or above the cards."""
 		js = self._js()
 		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
-		for heading in ('__("Connection")', '__("Companies")', '__("Configuration")'):
+		self.assertIn(
+			'<div class="ts-card-h ts-co-h">\n\t\t\t\t\t<b class="ts-co-name">${__("Connection")}</b>', review
+		)
+		for heading in ('__("Companies")', '__("Configuration")'):
 			self.assertNotIn(heading, review)
 		self.assertNotIn("ts-eyebrow", js)
 		self.assertNotIn("ts-section-h", js)

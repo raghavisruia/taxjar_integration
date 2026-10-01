@@ -2032,8 +2032,9 @@ class TaxJarSetup {
 	//
 	// The Connection card holds the site settings. Then each company has one
 	// card with its ledgers, features, address and nexus, so the reader does
-	// not match a company name across several cards. The cards carry no
-	// headings: the done header and the row names say what each one holds.
+	// not match a company name across several cards. There are no
+	// section headings. The Connection card has the same header band as a
+	// company card, so the two kinds of card read alike.
 	_render_review() {
 		const s = this.state || {};
 		const companies = this._review_companies(s);
@@ -2043,6 +2044,9 @@ class TaxJarSetup {
 		this.$body.html(`
 			${s.setup_complete ? this._done_header() : ""}
 			<div class="ts-card ts-conn${this._focus === "connect" ? " ts-cfg-focus" : ""}">
+				<div class="ts-card-h ts-co-h">
+					<b class="ts-co-name">${__("Connection")}</b>
+				</div>
 				<div class="ts-card-b ts-conn-b">
 					${this._card_body_connect(s)}
 				</div>

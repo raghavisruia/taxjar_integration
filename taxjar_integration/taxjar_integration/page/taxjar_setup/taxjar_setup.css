@@ -570,13 +570,9 @@
    The company cards are .ts-card with .ts-card-h, the same two the wizard
    steps use, so the record does not introduce a second kind of card. */
 
-/* Connection: no header band and no label. The card has only two rows, and
-   the row names say what they are. The bottom margin is the company grid's
-   own gap, so the page reads as one set of cards.
-
-   The padding is on a .ts-card-b inside the card. On the card itself, the
-   rule for a card with no .ts-card-h and no .ts-card-b replaces it with
-   4px 16px, because that rule has a higher specificity. */
+/* Connection: the same header band as a company card (.ts-co-h and
+   .ts-co-name), at the full width of the page. The bottom margin is the
+   company grid's own gap, so the page reads as one set of cards. */
 .taxjar-setup .ts-conn { margin-bottom: 16px; }
 .taxjar-setup .ts-card-b.ts-conn-b { padding: 14px 20px; gap: 0; }
 /* The rows use the desk font and the Espresso .text-base values. Espresso's
