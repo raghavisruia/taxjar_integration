@@ -2101,16 +2101,19 @@ class TaxJarSetup {
 	//
 	// No all_label here. That sentence answers "is this every state", a question
 	// a list of exemptions raises and a list of registrations does not.
+	//
+	// Each heading has the country's flag before its name, as on the Customer
+	// Configuration page. A country with no flag on file shows its name only.
 	_nexus_sections(regions) {
 		const byCountry = new Map();
 		regions.forEach((r) => {
 			const country = r.country || __("Unknown");
-			if (!byCountry.has(country)) byCountry.set(country, []);
-			byCountry.get(country).push(r.region || r.region_code || "—");
+			if (!byCountry.has(country)) byCountry.set(country, { code: r.country_code, names: [] });
+			byCountry.get(country).names.push(r.region || r.region_code || "—");
 		});
-		return Array.from(byCountry, ([country, regionNames]) => ({
-			heading: frappe.utils.escape_html(country),
-			names: regionNames,
+		return Array.from(byCountry, ([country, { code, names }]) => ({
+			heading: `${taxjar_integration.country_flag_html(code)}<span>${frappe.utils.escape_html(country)}</span>`,
+			names,
 			all_label: null,
 		}));
 	}
