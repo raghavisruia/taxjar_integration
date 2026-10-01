@@ -570,25 +570,23 @@
    The company cards are .ts-card with .ts-card-h, the same two the wizard
    steps use, so the record does not introduce a second kind of card. */
 
-/* Connection: a small uppercase label in place of a header band. The card has
-   only two rows, and a band would make it taller than its content.
+/* Connection: no header band and no label. The card has only two rows, and
+   the row names say what they are. The bottom margin is the company grid's
+   own gap, so the page reads as one set of cards.
 
    The padding is on a .ts-card-b inside the card. On the card itself, the
    rule for a card with no .ts-card-h and no .ts-card-b replaces it with
    4px 16px, because that rule has a higher specificity. */
-.taxjar-setup .ts-conn { margin-bottom: 28px; }
-.taxjar-setup .ts-card-b.ts-conn-b { padding: 18px 20px 14px; gap: 0; }
-.taxjar-setup .ts-conn .ts-eyebrow { margin-bottom: 6px; }
-.taxjar-setup .ts-eyebrow {
-	font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.06em;
-	text-transform: uppercase; color: var(--text-muted);
+.taxjar-setup .ts-conn { margin-bottom: 16px; }
+.taxjar-setup .ts-card-b.ts-conn-b { padding: 14px 20px; gap: 0; }
+/* The rows use the desk font and the Espresso .text-base values. Espresso's
+   regular weight is 420, so a literal 400 draws thinner than the desk text. */
+.taxjar-setup .ts-conn .ts-kv {
+	align-items: center; border-bottom: 0; padding: 3px 0;
+	font-family: var(--font-stack); font-size: var(--text-base); letter-spacing: 0.015em;
 }
-.taxjar-setup .ts-conn .ts-kv { align-items: center; border-bottom: 0; padding: 3px 0; font-size: var(--text-base); }
-.taxjar-setup .ts-conn .ts-kv > span:first-child { color: var(--text-color); font-weight: 400; }
-.taxjar-setup .ts-conn .ts-kv > span:last-child { font-weight: 400; }
-
-.taxjar-setup .ts-section-h { margin: 0 0 14px; }
-.taxjar-setup .ts-section-h h3 { margin: 0; font-size: var(--text-lg); font-weight: 600; }
+.taxjar-setup .ts-conn .ts-kv > span:first-child { color: var(--text-color); font-weight: var(--font-weight-regular); }
+.taxjar-setup .ts-conn .ts-kv > span:last-child { font-weight: var(--font-weight-regular); }
 
 /* Two cards in a row on a wide screen, one on a narrow screen. Both cards in a
    row take the height of the taller one, so each row ends on one line. */

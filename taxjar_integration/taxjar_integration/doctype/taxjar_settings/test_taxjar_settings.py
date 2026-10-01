@@ -17239,12 +17239,15 @@ class TestGuidedSetupPhase2JS(UnitTestCase):
 
 	def test_review_has_a_connection_card_and_one_card_per_company(self):
 		"""The site settings sit in one Connection card. Each company then has
-		one card, under a Companies heading."""
+		one card. The cards come straight after the done header, with no
+		section headings between or above them."""
 		js = self._js()
 		review = js.split("_render_review() {")[1].split("\n\t}\n")[0]
-		self.assertIn('<div class="ts-eyebrow">${__("Connection")}</div>', review)
+		for heading in ('__("Connection")', '__("Companies")', '__("Configuration")'):
+			self.assertNotIn(heading, review)
+		self.assertNotIn("ts-eyebrow", js)
+		self.assertNotIn("ts-section-h", js)
 		self.assertIn("this._card_body_connect(s)", review)
-		self.assertIn('<div class="ts-section-h"><h3>${__("Companies")}</h3></div>', review)
 		self.assertNotIn("ts-section-count", review)
 		self.assertIn("companies.map((c, i) => this._company_card(c, i))", review)
 		# The four-card list and the bodies of the three cards it replaced.

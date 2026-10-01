@@ -2032,7 +2032,8 @@ class TaxJarSetup {
 	//
 	// The Connection card holds the site settings. Then each company has one
 	// card with its ledgers, features, address and nexus, so the reader does
-	// not match a company name across several cards.
+	// not match a company name across several cards. The cards carry no
+	// headings: the done header and the row names say what each one holds.
 	_render_review() {
 		const s = this.state || {};
 		const companies = this._review_companies(s);
@@ -2043,11 +2044,9 @@ class TaxJarSetup {
 			${s.setup_complete ? this._done_header() : ""}
 			<div class="ts-card ts-conn${this._focus === "connect" ? " ts-cfg-focus" : ""}">
 				<div class="ts-card-b ts-conn-b">
-					<div class="ts-eyebrow">${__("Connection")}</div>
 					${this._card_body_connect(s)}
 				</div>
 			</div>
-			<div class="ts-section-h"><h3>${__("Companies")}</h3></div>
 			${companies.length
 				? `<div class="ts-cogrid">${companies.map((c, i) => this._company_card(c, i)).join("")}</div>`
 				: `<div class="text-muted small">${__("No companies configured yet.")}</div>`}
