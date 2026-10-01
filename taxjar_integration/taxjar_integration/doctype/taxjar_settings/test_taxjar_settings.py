@@ -10605,10 +10605,15 @@ class TestCustomerDeleteThroughFrappe(UnitTestCase):
 	def test_linked_customer_is_not_removed_from_taxjar(self):
 		"""Frappe refuses to delete a Customer that other documents link to.
 		That refusal must come before the DELETE, not after it."""
+		# Named here: a site with no default company leaves Project.company empty.
+		company = frappe.db.get_value("Company", {}, "name")
+		if not company:
+			self.skipTest("needs a Company for the linking Project")
 		project = frappe.get_doc({
 			"doctype": "Project",
 			"project_name": f"_TaxJar Delete {self.customer.name}",
 			"customer": self.customer.name,
+			"company": company,
 		}).insert(ignore_permissions=True)
 		self.addCleanup(self._drop, "Project", project.name)
 		mock_delete = self._taxjar_on()

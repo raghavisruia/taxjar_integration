@@ -396,13 +396,11 @@ class TaxJarSettings(Document):
 		# Rebuilt in company_config order, so the grouping the screens render
 		# reads the same as before. A company no longer configured is in neither
 		# map, so its rows drop, exactly as the old clear-everything did.
-		#
-		# Writes `nexus`; iterates `company_config`. Different tables.
-		# nosemgrep: frappe-modifying-child-tables-while-iterating
-		self.set("nexus", [])
-		for config in self.company_config:
-			for row in refreshed.get(config.company, existing_by_company.get(config.company, [])):
-				self.append("nexus", row)
+		self.set("nexus", [
+			row
+			for config in self.company_config
+			for row in refreshed.get(config.company, existing_by_company.get(config.company, []))
+		])
 
 		# Only when every configured company answered. A partial run leaves the
 		# previous timestamp, which is still true of every row now in the table -
