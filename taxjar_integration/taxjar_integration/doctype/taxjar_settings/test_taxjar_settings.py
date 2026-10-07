@@ -11250,19 +11250,8 @@ class TestInstallSetup(UnitTestCase):
 		from taxjar_integration import hooks
 		self.assertIn("taxjar_integration.install.after_migrate", hooks.after_migrate)
 
-	def _run_setup(self, *, categories_exist):
+	def _run_setup(self):
 		from taxjar_integration import install
-
-		# a_row_exists is the question install asks: does the table hold a row.
-		# It is patched on the real frappe.db object (not a local copy), so a
-		# blanket return_value would also answer every other caller. Only fake
-		# the one doctype this is testing; let everything else through.
-		real_a_row_exists = frappe.db.a_row_exists
-
-		def fake_a_row_exists(dt, *args, **kwargs):
-			if dt == "Product Tax Category":
-				return categories_exist
-			return real_a_row_exists(dt, *args, **kwargs)
 
 		with patch("taxjar_integration.install.make_custom_fields") as mock_make, \
 		     patch("taxjar_integration.install.add_product_tax_categories") as mock_cats, \
@@ -11270,8 +11259,7 @@ class TestInstallSetup(UnitTestCase):
 		     patch("taxjar_integration.install.sync_all_company_tax_templates") as mock_sync, \
 		     patch("taxjar_integration.install.hide_legacy_exempt_from_sales_tax") as mock_hide, \
 		     patch("taxjar_integration.install.set_taxes_field_description") as mock_desc, \
-		     patch("taxjar_integration.install.add_guided_setup_alert") as mock_alert, \
-		     patch("taxjar_integration.install.frappe.db.a_row_exists", side_effect=fake_a_row_exists):
+		     patch("taxjar_integration.install.add_guided_setup_alert") as mock_alert:
 			install.setup_taxjar()
 		return mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert
 
@@ -11281,7 +11269,7 @@ class TestInstallSetup(UnitTestCase):
 			install.after_install()
 		mock_setup.assert_called_once()
 
-		mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert = self._run_setup(categories_exist=False)
+		mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert = self._run_setup()
 		mock_make.assert_called_once()
 		mock_cats.assert_called_once()
 		mock_perms.assert_called_once()
@@ -11290,15 +11278,21 @@ class TestInstallSetup(UnitTestCase):
 		mock_desc.assert_called_once()
 		mock_alert.assert_called_once()
 
-	def test_setup_skips_category_seed_when_already_present(self):
-		mock_make, mock_cats, mock_perms, mock_sync, mock_hide, mock_desc, mock_alert = self._run_setup(categories_exist=True)
-		mock_cats.assert_not_called()
-		mock_make.assert_called_once()
-		mock_perms.assert_called_once()
-		mock_sync.assert_called_once()
-		mock_hide.assert_called_once()
-		mock_desc.assert_called_once()
-		mock_alert.assert_called_once()
+	def test_setup_applies_the_category_fixture_on_every_run(self):
+		"""Not only on the first run. create_tax_categories() inserts a code the
+		site does not hold and leaves the rest alone, so a site seeded by an
+		older release picks up the codes added since. Without this, the list only
+		caught up on the weekly sync or when someone pressed Refresh."""
+		import inspect
+
+		from taxjar_integration import install
+
+		source = inspect.getsource(install.setup_taxjar)
+		self.assertIn("add_product_tax_categories()", source)
+		self.assertNotIn("a_row_exists", source)
+
+		_make, mock_cats, *_rest = self._run_setup()
+		mock_cats.assert_called_once()
 
 
 # ── Workspace guided-setup alert banner ───────────────────────────────────────
@@ -19860,20 +19854,6 @@ class TestSmallTruths(UnitTestCase):
 		hint = _STATUS_HINTS[422]
 		self.assertIn("TaxJar API Log", hint)
 		self.assertNotIn("Open", hint)
-
-	def test_the_seed_asks_whether_the_table_holds_a_row(self):
-		"""frappe.db.exists() with one argument asks whether a document of that
-		name exists. It answered this question correctly by accident."""
-		import os
-
-		path = os.path.normpath(
-			os.path.join(os.path.dirname(__file__), "..", "..", "..", "install.py")
-		)
-		with open(path) as f:
-			source = f.read()
-
-		self.assertIn('a_row_exists("Product Tax Category")', source)
-		self.assertNotIn('exists("Product Tax Category")\n', source)
 
 
 # ── Step 6: address split, failure modes, bulk paths ──────────────────────────

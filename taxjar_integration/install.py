@@ -149,7 +149,10 @@ def setup_taxjar():
 	* custom fields (the Customer/Sales Invoice ``taxjar_*`` columns) — created up
 	  front so the desk pages never query columns that don't exist (MySQLdb 1054);
 	* the Product Tax Category master (~800 rows from the bundled fixture) and the
-	  permissions that let the accounting/stock roles manage it;
+	  permissions that let the accounting/stock roles manage it. The fixture is
+	  applied on every run, not only on the first one: create_tax_categories()
+	  inserts a code the site does not hold and leaves every other row alone, so
+	  a site seeded by an older release picks up the codes added since;
 	* the guided-setup alert banner at the top of the workspace;
 	* standard-CoA ledger backfill and TaxJar Sales Tax template sync for every
 	  already-configured company (regional/united_states.py) — this is also what
@@ -162,11 +165,7 @@ def setup_taxjar():
 	"""
 	make_custom_fields()
 
-	# a_row_exists, not exists(): with one argument exists() asks whether a
-	# document of that name exists, which is not the question. It answers this
-	# one correctly by accident, through get_value's own empty filter.
-	if not frappe.db.a_row_exists("Product Tax Category"):
-		add_product_tax_categories()
+	add_product_tax_categories()
 
 	add_permissions()
 
