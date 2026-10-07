@@ -21250,6 +21250,401 @@ class TestTheNatureColumn(UnitTestCase):
 				self.assertIsInstance(rows, list)
 
 
+# ── Version-15 data: what the upgrade carries ────────────────────────────────
+
+
+class TestDropVersion15Nexus(UnitTestCase):
+	"""Version 15 held one nexus list for the whole site. Those rows arrive with
+	no company, and this app does not carry them over."""
+
+	def test_it_deletes_only_the_rows_with_no_company(self):
+		"""Version 16 writes the company on every row it syncs, so a blank one
+		can only have come from version 15. A row this app wrote stays."""
+		from taxjar_integration.patches.drop_version_15_nexus import _delete_query
+
+		sql = " ".join(str(_delete_query()).upper().split())
+
+		self.assertIn("DELETE", sql)
+		self.assertIn("COALESCE(`COMPANY`,'')=''", sql)
+		self.assertIn("`PARENTTYPE`='TAXJAR SETTINGS'", sql)
+
+	def test_it_waits_for_the_column(self):
+		"""A site whose child doctype has not synced yet has no column to read.
+		The next migrate reaches it."""
+		from taxjar_integration.patches import drop_version_15_nexus as patch_module
+
+		with patch.object(patch_module.frappe.db, "has_column", return_value=False), patch.object(
+			patch_module, "_delete_query"
+		) as delete_query:
+			patch_module.execute()
+
+		delete_query.assert_not_called()
+
+	def test_it_does_not_save_the_settings_document(self):
+		"""Saving TaxJar Settings runs its on_update, which enqueues three jobs.
+		A patch that removes stale child rows should enqueue nothing."""
+		import inspect
+
+		from taxjar_integration.patches import drop_version_15_nexus as patch_module
+
+		source = inspect.getsource(patch_module)
+		self.assertNotIn("get_doc", source)
+		self.assertNotIn("save(", source)
+
+	def test_the_patch_is_registered(self):
+		import os
+
+		import taxjar_integration
+
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			self.assertIn("taxjar_integration.patches.drop_version_15_nexus", handle.read())
+
+
+class TestCopyLegacyTransactionExemption(UnitTestCase):
+	"""ERPNext's own exempt_from_sales_tax checkbox carries the answer someone
+	gave for one sale. Version 16 reads its own field, so the answer is copied."""
+
+	def test_it_copies_the_tick_and_names_the_reason_other(self):
+		from taxjar_integration.patches.copy_legacy_transaction_exemption import _copy_query
+
+		sql = " ".join(str(_copy_query("Sales Invoice")).upper().split())
+
+		self.assertIn("SET `TAXJAR_TRANSACTION_EXEMPT`=1", sql)
+		self.assertIn("`TAXJAR_TRANSACTION_EXEMPTION_TYPE`='OTHER'", sql)
+
+	def test_it_reads_the_old_checkbox_with_coalesce(self):
+		"""An unset Check is stored as NULL as often as it is stored as 0, and
+		Python's own falsiness is not what the database applies here."""
+		from taxjar_integration.patches.copy_legacy_transaction_exemption import _copy_query
+
+		sql = " ".join(str(_copy_query("Quotation")).upper().split())
+
+		self.assertIn("COALESCE(`EXEMPT_FROM_SALES_TAX`,0)=1", sql)
+
+	def test_it_leaves_a_row_this_app_already_answered(self):
+		"""Only a row with the old checkbox ticked and this app's checkbox clear.
+		A transaction the app itself marked exempt keeps its own reason."""
+		from taxjar_integration.patches.copy_legacy_transaction_exemption import _copy_query
+
+		sql = " ".join(str(_copy_query("Sales Order")).upper().split())
+
+		self.assertIn("COALESCE(`TAXJAR_TRANSACTION_EXEMPT`,0)=0", sql)
+
+	def test_it_covers_the_three_transaction_doctypes_and_not_customer(self):
+		"""The Customer checkbox needs regions as well as a type, so its own
+		patch copies it. See TestCopyLegacyCustomerExemption."""
+		from taxjar_integration.patches.copy_legacy_transaction_exemption import _DOCTYPES
+
+		self.assertEqual(_DOCTYPES, ("Quotation", "Sales Order", "Sales Invoice"))
+		self.assertNotIn("Customer", _DOCTYPES)
+
+	def test_the_reason_is_a_value_the_field_offers(self):
+		"""'Other' has to be one of the Select's own options, or every copied row
+		holds a value the form will not show."""
+		from taxjar_integration.taxjar_integration.doctype.taxjar_settings.taxjar_settings import (
+			_transaction_exemption_fields,
+		)
+		from taxjar_integration.patches.copy_legacy_transaction_exemption import _EXEMPTION_TYPE
+
+		field = next(
+			f for f in _transaction_exemption_fields()
+			if f["fieldname"] == "taxjar_transaction_exemption_type"
+		)
+		self.assertIn(_EXEMPTION_TYPE, field["options"].split("\n"))
+
+	def test_it_skips_a_doctype_without_the_old_column(self):
+		"""ERPNext adds its checkbox only once a company's country is the United
+		States. A site with no US company has no column to read."""
+		from taxjar_integration.patches import copy_legacy_transaction_exemption as patch_module
+
+		def has_column(doctype, fieldname):
+			if fieldname == "taxjar_transaction_exempt":
+				return True
+			return doctype == "Sales Invoice"
+
+		with patch.object(patch_module.frappe.db, "has_column", side_effect=has_column), patch.object(
+			patch_module, "_copy_query"
+		) as copy_query, patch.object(patch_module, "make_custom_fields") as make:
+			patch_module._copy()
+
+		make.assert_not_called()
+		self.assertEqual([c[0][0] for c in copy_query.call_args_list], ["Sales Invoice"])
+
+	def test_the_patch_creates_the_fields_before_it_fills_them(self):
+		"""This app creates its custom fields from after_migrate, which runs after
+		every patch. On the migrate that first ships the field the column does
+		not exist yet. Same guard as backfill_transaction_nature."""
+		from taxjar_integration.patches import copy_legacy_transaction_exemption as patch_module
+
+		with patch.object(patch_module.frappe.db, "has_column", return_value=False), patch.object(
+			patch_module, "_copy_query"
+		), patch.object(patch_module, "make_custom_fields") as make:
+			patch_module._copy()
+
+		make.assert_called_once()
+
+	def test_the_patch_is_registered(self):
+		import os
+
+		import taxjar_integration
+
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			self.assertIn("taxjar_integration.patches.copy_legacy_transaction_exemption", handle.read())
+
+	def test_it_does_nothing_on_a_site_already_on_version_16(self):
+		"""A site already on version 16 runs this patch once, on the migrate that
+		ships it. A tick on the hidden old checkbox is old data by then."""
+		from taxjar_integration.patches import copy_legacy_transaction_exemption as patch_module
+
+		with patch.object(patch_module, "is_version_15_upgrade", return_value=False), patch.object(
+			patch_module, "_copy"
+		) as copy:
+			patch_module.execute()
+
+		copy.assert_not_called()
+
+	def test_it_copies_on_the_upgrade(self):
+		from taxjar_integration.patches import copy_legacy_transaction_exemption as patch_module
+
+		with patch.object(patch_module, "is_version_15_upgrade", return_value=True), patch.object(
+			patch_module, "_copy"
+		) as copy:
+			patch_module.execute()
+
+		copy.assert_called_once()
+
+
+class TestCopyLegacyCustomerExemption(UnitTestCase):
+	"""Version 15 read ERPNext's exempt_from_sales_tax on Customer. Version 16
+	reads its own type and regions, so the tick becomes Other, everywhere."""
+
+	def test_it_picks_ticked_customers_with_no_type_of_their_own(self):
+		from taxjar_integration.patches.copy_legacy_customer_exemption import _customers_query
+
+		sql = " ".join(str(_customers_query()).upper().split())
+
+		self.assertIn("COALESCE(`EXEMPT_FROM_SALES_TAX`,0)=1", sql)
+		self.assertIn("COALESCE(`TAXJAR_EXEMPTION_TYPE`,'')=''", sql)
+
+	def test_it_names_the_reason_other(self):
+		from taxjar_integration.patches.copy_legacy_customer_exemption import _set_type_query
+
+		sql = " ".join(str(_set_type_query(["C-1"])).upper().split())
+
+		self.assertIn("SET `TAXJAR_EXEMPTION_TYPE`='OTHER'", sql)
+		self.assertIn("`NAME` IN ('C-1')", sql)
+
+	def test_the_regions_are_every_us_state_and_every_ca_province(self):
+		"""The same list the exemption dialog's Select all writes."""
+		from taxjar_integration.patches.copy_legacy_customer_exemption import _REGIONS
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			CA_PROVINCE_NAMES,
+			US_STATE_NAMES,
+		)
+
+		self.assertEqual({s for c, s in _REGIONS if c == "US"}, set(US_STATE_NAMES))
+		self.assertEqual({s for c, s in _REGIONS if c == "CA"}, set(CA_PROVINCE_NAMES))
+		self.assertEqual(len(_REGIONS), len(US_STATE_NAMES) + len(CA_PROVINCE_NAMES))
+
+	def test_every_region_passes_the_customer_validation(self):
+		"""A row the validate hook would refuse would block the next save."""
+		from taxjar_integration.patches.copy_legacy_customer_exemption import _REGIONS
+		from taxjar_integration.taxjar_integration.taxjar_integration import _STATES_BY_COUNTRY
+
+		for country, state in _REGIONS:
+			self.assertIn(state, _STATES_BY_COUNTRY[country])
+
+	def test_each_row_belongs_to_its_customer_in_order(self):
+		from taxjar_integration.patches.copy_legacy_customer_exemption import (
+			_REGION_COLUMNS,
+			_REGIONS,
+			_region_rows,
+		)
+
+		rows = [dict(zip(_REGION_COLUMNS, row)) for row in _region_rows(["C-1", "C-2"])]
+
+		self.assertEqual(len(rows), 2 * len(_REGIONS))
+		self.assertEqual({r["parenttype"] for r in rows}, {"Customer"})
+		self.assertEqual({r["parentfield"] for r in rows}, {"taxjar_exempt_regions"})
+		first = [r for r in rows if r["parent"] == "C-1"]
+		self.assertEqual([r["idx"] for r in first], list(range(1, len(_REGIONS) + 1)))
+		self.assertEqual(len({r["name"] for r in rows}), len(rows))
+
+	def test_it_clears_stale_regions_of_only_those_customers(self):
+		from taxjar_integration.patches.copy_legacy_customer_exemption import _delete_regions_query
+
+		sql = " ".join(str(_delete_regions_query(["C-1"])).upper().split())
+
+		self.assertIn("DELETE", sql)
+		self.assertIn("`PARENTTYPE`='CUSTOMER'", sql)
+		self.assertIn("`PARENT` IN ('C-1')", sql)
+
+	def test_the_reason_is_a_value_the_field_offers(self):
+		from taxjar_integration.patches.copy_legacy_customer_exemption import _EXEMPTION_TYPE
+		from taxjar_integration.taxjar_integration.taxjar_integration import (
+			_EXEMPTION_TYPES_REQUIRING_REGIONS,
+		)
+
+		self.assertIn(_EXEMPTION_TYPE, _EXEMPTION_TYPES_REQUIRING_REGIONS)
+
+	def test_it_skips_a_site_without_the_old_column(self):
+		from taxjar_integration.patches import copy_legacy_customer_exemption as patch_module
+
+		def has_column(doctype, fieldname):
+			return fieldname != "exempt_from_sales_tax"
+
+		with patch.object(patch_module.frappe.db, "has_column", side_effect=has_column), patch.object(
+			patch_module, "_customers_query"
+		) as customers_query:
+			patch_module._copy()
+
+		customers_query.assert_not_called()
+
+	def test_it_does_nothing_on_a_site_already_on_version_16(self):
+		"""A site already on version 16 runs this patch once, on the migrate that
+		ships it. Its admin may have set the exemption since the upgrade."""
+		from taxjar_integration.patches import copy_legacy_customer_exemption as patch_module
+
+		with patch.object(patch_module, "is_version_15_upgrade", return_value=False), patch.object(
+			patch_module, "_copy"
+		) as copy:
+			patch_module.execute()
+
+		copy.assert_not_called()
+
+	def test_it_copies_on_the_upgrade_and_leaves_the_marker(self):
+		"""The marker stays for the patches after this one.
+		clear_version_15_upgrade_marker deletes it."""
+		from taxjar_integration.patches import copy_legacy_customer_exemption as patch_module
+
+		with patch.object(patch_module, "is_version_15_upgrade", return_value=True), patch.object(
+			patch_module.frappe.db, "set_global"
+		) as set_global, patch.object(patch_module, "_copy") as copy:
+			patch_module.execute()
+
+		copy.assert_called_once()
+		set_global.assert_not_called()
+
+	def test_it_does_not_save_the_customer(self):
+		"""A save enqueues a TaxJar sync per customer per company."""
+		import inspect
+
+		from taxjar_integration.patches import copy_legacy_customer_exemption as patch_module
+
+		source = inspect.getsource(patch_module)
+		self.assertNotIn("get_doc", source)
+		self.assertNotIn(".save(", source)
+
+	def test_the_patch_is_registered(self):
+		import os
+
+		import taxjar_integration
+
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			self.assertIn("taxjar_integration.patches.copy_legacy_customer_exemption", handle.read())
+
+
+class TestMarkVersion15Upgrade(UnitTestCase):
+	"""The pre_model_sync patch that tells a version-15 site from a version-16 one."""
+
+	def test_it_marks_a_site_without_the_version_16_column(self):
+		from taxjar_integration.patches import mark_version_15_upgrade as patch_module
+
+		with patch.object(patch_module.frappe.db, "has_column", return_value=False), patch.object(
+			patch_module.frappe.db, "set_global"
+		) as set_global:
+			patch_module.execute()
+
+		set_global.assert_called_once_with(patch_module.MARKER, "1")
+
+	def test_it_leaves_a_site_already_on_version_16(self):
+		from taxjar_integration.patches import mark_version_15_upgrade as patch_module
+
+		with patch.object(patch_module.frappe.db, "has_column", return_value=True), patch.object(
+			patch_module.frappe.db, "set_global"
+		) as set_global:
+			patch_module.execute()
+
+		set_global.assert_not_called()
+
+	def test_it_runs_before_the_model_sync(self):
+		"""After the model sync, a post_model_sync patch has already created the
+		column on every site, so the question has no answer left."""
+		import os
+
+		import taxjar_integration
+
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			text = handle.read()
+
+		pre, post = text.split("[post_model_sync]")
+		self.assertIn("taxjar_integration.patches.mark_version_15_upgrade", pre)
+		self.assertNotIn("mark_version_15_upgrade", post)
+
+	def test_it_reads_the_marker(self):
+		from taxjar_integration.patches import mark_version_15_upgrade as patch_module
+
+		with patch.object(patch_module.frappe.db, "get_global", return_value="1"):
+			self.assertTrue(patch_module.is_version_15_upgrade())
+		with patch.object(patch_module.frappe.db, "get_global", return_value=None):
+			self.assertFalse(patch_module.is_version_15_upgrade())
+
+
+class TestClearVersion15UpgradeMarker(UnitTestCase):
+	"""The marker stays until every patch that reads it has run."""
+
+	def test_it_deletes_the_marker(self):
+		from taxjar_integration.patches import clear_version_15_upgrade_marker as patch_module
+
+		with patch.object(patch_module.frappe.db, "set_global") as set_global:
+			patch_module.execute()
+
+		set_global.assert_called_once_with(patch_module.MARKER, None)
+
+	def test_it_is_the_last_patch(self):
+		"""A patch below it would find the marker gone on a version-15 upgrade."""
+		import os
+
+		import taxjar_integration
+
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			lines = [line.strip() for line in handle if line.strip()]
+
+		self.assertEqual(lines[-1], "taxjar_integration.patches.clear_version_15_upgrade_marker")
+
+	def test_every_patch_that_reads_the_marker_runs_before_it(self):
+		import os
+
+		import taxjar_integration
+
+		patches_dir = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches")
+		path = os.path.join(os.path.dirname(taxjar_integration.__file__), "patches.txt")
+		with open(path) as handle:
+			order = [line.strip() for line in handle if line.strip().startswith("taxjar_integration.")]
+
+		readers = []
+		for name in os.listdir(patches_dir):
+			if not name.endswith(".py"):
+				continue
+			with open(os.path.join(patches_dir, name)) as handle:
+				if "is_version_15_upgrade()" in handle.read() and name != "mark_version_15_upgrade.py":
+					readers.append(f"taxjar_integration.patches.{name[:-3]}")
+
+		self.assertEqual(
+			sorted(readers),
+			["taxjar_integration.patches.copy_legacy_customer_exemption",
+			 "taxjar_integration.patches.copy_legacy_transaction_exemption"],
+		)
+		clear = order.index("taxjar_integration.patches.clear_version_15_upgrade_marker")
+		for reader in readers:
+			self.assertLess(order.index(reader), clear)
+
+
 class TestTheWizardCarriesTheExportSwitch(UnitTestCase):
 	"""The card in the setup wizard writes the same field the settings form does."""
 
