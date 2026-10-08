@@ -2,7 +2,7 @@
 for United States companies.
 
 Reuses the standard US chart of accounts' own ``Sales Tax Payable`` (account_number
-21400) and ``Shipping and Freight Income`` (41200) ledgers - never creates a new
+21410) and ``Shipping and Freight Income`` (41300) ledgers - never creates a new
 Account. A company on a non-standard chart of accounts that lacks these lines simply
 resolves to nothing here; the admin still picks a ledger by hand, same as before this
 module existed.
@@ -25,8 +25,8 @@ TAXJAR_SHIPPING_ROW_DESCRIPTION = "Shipping & Forwarding Charges"
 _US_DEFAULT_TEMPLATE_TITLES = ("US ST 6%", "US ST 4%", "US ST 6.25%")
 
 _STANDARD_LEDGERS = {
-	"tax_account_head": ("21400", "Sales Tax Payable"),
-	"shipping_account_head": ("41200", "Shipping and Freight Income"),
+	"tax_account_head": ("21410", "Sales Tax Payable"),
+	"shipping_account_head": ("41300", "Shipping and Freight Income"),
 }
 
 

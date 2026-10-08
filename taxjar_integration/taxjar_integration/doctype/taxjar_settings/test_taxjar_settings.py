@@ -17447,8 +17447,8 @@ class TestResolveDefaultLedgers(UnitTestCase):
 
 	def test_matches_by_account_number_first(self):
 		with self._chart([
-			{"name": "Sales Tax Payable - TC", "account_number": "21400", "account_name": "Sales Tax Payable"},
-			{"name": "Shipping and Freight Income - TC", "account_number": "41200", "account_name": "Shipping and Freight Income"},
+			{"name": "Sales Tax Payable - TC", "account_number": "21410", "account_name": "Sales Tax Payable"},
+			{"name": "Shipping and Freight Income - TC", "account_number": "41300", "account_name": "Shipping and Freight Income"},
 		]):
 			result = resolve_default_ledgers("Test Co")
 
@@ -17469,7 +17469,7 @@ class TestResolveDefaultLedgers(UnitTestCase):
 	def test_the_number_wins_when_both_are_present_on_different_accounts(self):
 		"""Numbers survive a rename; names do not, so the number is authoritative."""
 		with self._chart([
-			{"name": "Renamed Liability - TC", "account_number": "21400", "account_name": "Something Else"},
+			{"name": "Renamed Liability - TC", "account_number": "21410", "account_name": "Something Else"},
 			{"name": "Decoy - TC", "account_number": "99999", "account_name": "Sales Tax Payable"},
 		]):
 			result = resolve_default_ledgers("Test Co")
